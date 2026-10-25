@@ -31,8 +31,8 @@ versions SketchUp 8 à 2023).
   Trimble, ignoré par git), sinon la copie du même SDK livrée avec Unity sur ce Mac (voir `.project-map/decisions.md` d2).
   Vérifié le 2026-10-25 par un essai : la copie autonome (dossier `Versions/A/Libraries` avec ses dylibs `libCommon*`) se charge
   en 48 ms et lit le fichier de 97 Mo en 3,0 s, celui de 45 Mo en 1,9 s, un petit en 5 ms. Chemins cherchés par l'app dans l'ordre :
-  la variable `SIMPLESKP_SKETCHUP_SDK` (tests, développement), `Contents/Frameworks` de SimpleSKP.app, puis, pour les exécutions
-  hors bundle seulement, chaque `/Applications/SketchUp*.app` et `/Applications/SketchUp*/SketchUp*.app` (et sous `~/Applications`,
+  la variable `SIMPLESKP_SKETCHUP_SDK` (tests, développement), `Contents/Frameworks` de SimpleSKP.app, puis, sauf si
+  `SIMPLESKP_BUNDLED_SDK_ONLY` est posée (preuve et auto-test), chaque `/Applications/SketchUp*.app` et `/Applications/SketchUp*/SketchUp*.app` (et sous `~/Applications`,
   le plus récent d'abord ; là, les dylibs sœurs se préchargent par chemin absolu, leur `@rpath` supposant l'exécutable de SketchUp),
   puis le framework livré dans Unity. Les en-têtes officiels du SDK sont lisibles dans la copie Unity (`Versions/A/Headers`) : les
   prototypes y sont transcrits, les fichiers ne sont pas copiés. Si le framework manque (bundle cassé), l'app montre la vignette PNG
@@ -209,7 +209,7 @@ public struct SKPModel: Sendable {
     public struct Camera: Sendable { public var position: SIMD3<Float>; public var target: SIMD3<Float>; public var up: SIMD3<Float>; public var isPerspective: Bool; public var fovDegrees: Float; public var orthoHeight: Float }
     // Caméra en mètres, Z vertical, `fovDegrees` toujours VERTICAL (le Cœur convertit si SketchUp donne la largeur,
     // via l'aspect de la caméra) ; la Vue place le nœud caméra sous la racine tournée et prend ces valeurs telles quelles.
-    public struct Scene: Sendable { public var name: String; public var camera: Camera?; public var hiddenLayers: [Int] }
+    public struct Scene: Sendable { public var name: String; public var camera: Camera?; public var hiddenLayers: [Int]? }   // nil : la scène n'enregistre pas la visibilité des calques
     public struct Stats: Sendable { public var faces, triangles, edges, instances, definitions: Int; public var loadSeconds: Double }
     public var root: Definition; public var definitions: [Definition]   // root.children → definitions[i]
     public var materials: [Material]; public var layers: [Layer]; public var scenes: [Scene]
