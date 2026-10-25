@@ -306,4 +306,47 @@ final class RenderingTests: XCTestCase {
         let xrayPixel = try XCTUnwrap(xrayRep.colorAt(x: 100, y: 100)?.usingColorSpace(.sRGB))
         XCTAssertGreaterThan(xrayPixel.redComponent, 0.25, "X-Ray mode must also allow background/behind geometry to show through")
     }
+
+    func testPointLightCastsShadowsWhenShadowsEnabled() throws {
+        var model = SyntheticModel.cube()
+        model.root.children = []
+        // 1) White floor slab at Z = -0.2 .. 0.0 spanning X,Y in [-3, 3]
+        var (floorMesh, _) = SyntheticModel.cubeMesh(material: nil, layer: 0)
+        floorMesh.positions = floorMesh.positions.map { p in
+            SIMD3((p.x - 0.5) * 6.0, (p.y - 0.5) * 6.0, (p.z - 1.0) * 0.2)
+        }
+        // 2) Occluder cube hovering at Z = 1.0 .. 1.8 centered at X=0, Y=0
+        var (occluderMesh, _) = SyntheticModel.cubeMesh(material: 0, layer: 0)
+        occluderMesh.positions = occluderMesh.positions.map { p in
+            SIMD3((p.x - 0.5) * 1.2, (p.y - 0.5) * 1.2, 1.0 + p.z * 0.8)
+        }
+        model.root.meshes = [floorMesh, occluderMesh]
+        model.boundsMin = SIMD3(-3, -3, -0.2)
+        model.boundsMax = SIMD3(3, 3, 2.0)
+
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        let scene = ViewportScene(model: model)
+        scene.showsEdges = false
+        scene.ambientIntensity = 0.0
+        scene.lightingMode = .point
+        // Place point light directly above the occluder at (0, 0, 3.0)
+        scene.pointLights = [ViewportPointLight(name: "TopPoint", position: SIMD3(0, 0, 3.0), intensity: 1.5, isFromScene: false)]
+        view.present(scene)
+        // Camera looks squarely at the center of the floor (0, 0, 0) from (0, -3.2, 0.45) — seeing under the floating occluder cube
+        view.apply(camera: SKPModel.Camera(position: SIMD3(0, -3.2, 0.45), target: SIMD3(0, 0, 0), fovDegrees: 30), animated: false)
+
+        // With shadows OFF: the point light illuminates the floor right through the occluder cube
+        scene.shadowsEnabled = false
+        let unshadowedRep = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        let unshadowedCenter = try XCTUnwrap(unshadowedRep.colorAt(x: 100, y: 100)?.usingColorSpace(.sRGB))
+
+        // With shadows ON: the 6-spot cube shadow rig casts the occluder's shadow onto the floor at (0, 0, 0)
+        scene.shadowsEnabled = true
+        let shadowedRep = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        let shadowedCenter = try XCTUnwrap(shadowedRep.colorAt(x: 100, y: 100)?.usingColorSpace(.sRGB))
+
+        XCTAssertGreaterThan(unshadowedCenter.redComponent, 0.25, "Floor is lit when point light shadows are disabled")
+        XCTAssertLessThan(shadowedCenter.redComponent, unshadowedCenter.redComponent * 0.45,
+                          "Point light must cast a clear shadow on the floor below the occluder when shadowsEnabled is true (unshadowed=\(unshadowedCenter.redComponent), shadowed=\(shadowedCenter.redComponent))")
+    }
 }

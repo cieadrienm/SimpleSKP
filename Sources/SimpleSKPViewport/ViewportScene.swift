@@ -136,6 +136,9 @@ public final class ViewportScene {
         shadowQualityIsHigh = high
         sun.light!.shadowCascadeCount = high ? 3 : 1
         sun.light!.shadowMapSize = high ? CGSize(width: 2048, height: 2048) : CGSize(width: 1024, height: 1024)
+        if lightingMode == .point {
+            updateLightingModeAndPointLights()
+        }
     }
 
     /// The faces and edges drawn under one set of layers; `node` is nil until the set is first visible.
@@ -627,14 +630,40 @@ public final class ViewportScene {
 
         if pointLightsRoot.childNodes.count != pointLights.count {
             pointLightsRoot.childNodes.forEach { $0.removeFromParentNode() }
+            // Local Euler angles mapping `SCNNode.simdLocalFront` (0, 0, -1) to the 6 cube faces (-Z, +Z, +Y, -Y, +X, -X)
+            let cubeEulers: [SIMD3<Float>] = [
+                SIMD3(0, 0, 0),          // -Z (down)
+                SIMD3(.pi, 0, 0),        // +Z (up)
+                SIMD3(.pi / 2, 0, 0),    // +Y
+                SIMD3(-.pi / 2, 0, 0),   // -Y
+                SIMD3(0, -.pi / 2, 0),   // +X
+                SIMD3(0, .pi / 2, 0),    // -X
+            ]
             for item in pointLights {
                 let holder = SCNNode()
-                let omni = SCNLight()
-                omni.type = .omni
-                omni.temperature = 5400
-                omni.attenuationFalloffExponent = 1.85
-                omni.castsShadow = false
-                holder.light = omni
+
+                // SceneKit's `.omni` light does not support `castsShadow` natively; we use a 6-way `.spot` cube rig
+                // (-Z, +Z, +Y, -Y, +X, -X) so each point light illuminates all 360° and casts true perspective shadows when `shadowsEnabled` is true.
+                let shadowRig = SCNNode()
+                shadowRig.name = "pointLightShadowRig"
+                for (faceIdx, euler) in cubeEulers.enumerated() {
+                    let spotNode = SCNNode()
+                    spotNode.name = "spotFace\(faceIdx)"
+                    spotNode.simdEulerAngles = euler
+                    let spot = SCNLight()
+                    spot.type = .spot
+                    spot.temperature = 5400
+                    spot.attenuationFalloffExponent = 1.85
+                    spot.spotInnerAngle = 82
+                    spot.spotOuterAngle = 110
+                    spot.castsShadow = shadowsEnabled
+                    spot.shadowMode = .forward
+                    spot.shadowRadius = 2.8
+                    spot.automaticallyAdjustsShadowProjection = true
+                    spotNode.light = spot
+                    shadowRig.addChildNode(spotNode)
+                }
+                holder.addChildNode(shadowRig)
 
                 let gizmo = Self.makePointLightGizmo(radius: gizmoRadius, isFromScene: item.isFromScene)
                 gizmo.name = "pointLightGizmo"
@@ -643,15 +672,32 @@ public final class ViewportScene {
             }
         }
 
+        let shadowMapDim = shadowQualityIsHigh ? 1024 : 512
+        let shadowSamples = shadowQualityIsHigh ? 8 : 4
+        let zNear = CGFloat(max(minSpan * 0.02, 0.05))
+        let zFar = CGFloat(max(diagonal * 1.4, 8.0))
+
         for (index, item) in pointLights.enumerated() where index < pointLightsRoot.childNodes.count {
             let holder = pointLightsRoot.childNodes[index]
             holder.name = item.name
             holder.simdPosition = item.position
-            if let omni = holder.light {
-                let gain = pow(Double(max(0, item.intensity)), 1.35)
-                omni.intensity = baseIntensity * CGFloat(gain)
-                omni.attenuationStartDistance = startDist
-                omni.attenuationEndDistance = endDist
+            let gain = pow(Double(max(0, item.intensity)), 1.35)
+            let flux = baseIntensity * CGFloat(gain)
+            // Cast 6-way cube shadows for the first 2 active point lights when `shadowsEnabled` is true
+            let useCubeShadows = shadowsEnabled && item.intensity > 0.001 && index < 2
+
+            if let shadowRig = holder.childNode(withName: "pointLightShadowRig", recursively: false) {
+                for spotNode in shadowRig.childNodes {
+                    guard let spot = spotNode.light else { continue }
+                    spot.castsShadow = useCubeShadows
+                    spot.intensity = flux * 0.86
+                    spot.attenuationStartDistance = startDist
+                    spot.attenuationEndDistance = endDist
+                    spot.shadowMapSize = CGSize(width: shadowMapDim, height: shadowMapDim)
+                    spot.shadowSampleCount = shadowSamples
+                    spot.zNear = zNear
+                    spot.zFar = zFar
+                }
             }
             if let gizmo = holder.childNode(withName: "pointLightGizmo", recursively: false) {
                 gizmo.isHidden = !showsPointLightGizmo

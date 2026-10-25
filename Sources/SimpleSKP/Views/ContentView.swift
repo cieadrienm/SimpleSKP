@@ -265,15 +265,13 @@ struct TopBar: View {
                     model.setLightingMode(model.lightingMode == .sun ? .point : .sun)
                 }
 
-                if model.lightingMode == .sun {
-                    IconButton(
-                        symbol: model.shadowsEnabled ? "shadow" : "sun.min",
-                        active: model.shadowsEnabled,
-                        disabled: !model.isReady,
-                        tooltip: L("Activer ou couper les ombres portées (⌥⌘O)", "Toggle cast shadows (⌥⌘O)")
-                    ) {
-                        model.toggleShadows()
-                    }
+                IconButton(
+                    symbol: model.shadowsEnabled ? "shadow" : "sun.min",
+                    active: model.shadowsEnabled,
+                    disabled: !model.isReady,
+                    tooltip: L("Activer ou couper les ombres portées (⌥⌘O)", "Toggle cast shadows (⌥⌘O)")
+                ) {
+                    model.toggleShadows()
                 }
 
                 IconButton(
@@ -1041,6 +1039,16 @@ struct LightingPopover: View {
                 .tint(Theme.accent.swiftUI)
                 .help(L("Puissance lumineuse à échelle logarithmique (réglage fin dans les basses valeurs, de 0 % à 300 %)",
                         "Logarithmic light power (fine control in low values, from 0% to 300%)"))
+
+                Toggle(isOn: Binding(
+                    get: { model.shadowsEnabled },
+                    set: { _ in model.toggleShadows() }
+                )) {
+                    Text(L("Ombres portées de la lumière (⌥⌘O)", "Cast point light shadows (⌥⌘O)"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                .toggleStyle(.checkbox)
 
                 Toggle(isOn: Binding(
                     get: { model.showsPointLightGizmo },
