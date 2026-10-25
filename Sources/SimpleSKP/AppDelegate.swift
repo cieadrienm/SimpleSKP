@@ -41,13 +41,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if selfTestRequested { SelfTest.runAndExit(file: selfTestFile) }
         if let snapshotRequest { Snapshot.run(output: snapshotRequest.output, input: snapshotRequest.input) }
         NSApp.activate(ignoringOtherApps: true)
-        // A viewer has no untitled document: when nothing was opened or restored, ask for a file.
-        DispatchQueue.main.async { [self] in
-            if documentController.documents.isEmpty { documentController.openDocument(nil) }
-        }
     }
 
-    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
+    /// Never in the CLI modes: they must stay headless.
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { !cliMode }
+
+    /// A viewer has no untitled document: AppKit calls this only when nothing was opened or restored, so ask for a file.
+    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        documentController.openDocument(nil)
+        return true
+    }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
