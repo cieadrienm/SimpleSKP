@@ -1,5 +1,21 @@
 # Changelog — SimpleSKP
 
+## 1.1.0 — 2026-10-25
+- **Barre d'outils complète (`TopBar`)** : accès direct à toutes les fonctions sans passer par les menus ou les raccourcis (ouverture, Finder, SketchUp, réinitialisation de la vue `Z`, zoom étendu `⇧Z`, vues standard `Iso`/`Dessus`/`Face`/`Droite`/`Arrière`/`Gauche`/`Dessous`, bascule Perspective/Parallèle, mode Vol libre, styles de rendu, arêtes, ombres, mode d'éclairage Soleil/Ponctuel, réglage du soleil/lumière/SSAO/fond, grille & axes, sélecteur de scènes, copie et export PNG).
+- **Touche `Z` pour réinitialiser la vue** (et `⇧Z` pour le zoom étendu) + repère d'orientation 3D interactif (axes X rouge, Y vert, Z bleu) et barre de zoom rapide en surimpression de la vue 3D.
+- **Éclairage Soleil ou Ponctuel (`⌥⌘L`)** :
+  - Bascule entre l'éclairage solaire directionnel (azimut `-180°…180°`, hauteur `8°…85°`, ombres portées `⌥⌘O`) et un éclairage ponctuel omnidirectionnel.
+  - Détection automatique des lumières/projecteurs présents dans la scène `.skp` (`light`, `lumière`, `spot`, `projecteur`, `fresnel`, `découpe`, `svoboda`, etc.) ou création automatique d'une lumière par défaut au milieu de la géométrie, avec réglage des coordonnées **X, Y, Z** en mètres, de l'**intensité** (`10 %…300 %`) et repère 3D filaire.
+- **Rendu architectural enrichi, importance SSAO & couleur du fond personnalisée** :
+  - Contre-jour céleste directionnel (`skyFill`) éliminant les faces bouchées à contre-jour, exposition HDR et contraste affinés.
+  - 4 styles de rendu en direct (**PBR texturé**, **Maquette blanche**, **Rayons X**, **Filaire**).
+  - Réglage continu de l'**importance de l'occlusion ambiante SSAO** (`0 %` à `200 %`, défaut `70 %`, `⌥⌘A`).
+  - Choix du **fond de scène** parmi **Ciel architectural**, **Studio sombre**, **Papier chaud** ou **Couleur personnalisée** (`ColorPicker` natif + 6 pastilles rapides).
+  - **Grille au sol avec axes XYZ** (`⌥⌘G`).
+- **Barre latérale enrichie** : recherche/filtrage instantané des calques, boutons **Tout / Aucun**, mode **Solo** au survol d'un calque, navigation rapide entre scènes (`‹` / `›`) et inspecteur **Modèle & Matériaux** (dimensions, statistiques, nuancier des matériaux).
+- **Export PNG (`⇧⌘E`)** et retour visuel lors de la copie d'image (`⌘C`).
+- **Fenêtres À propos, Guide d'utilisation, Raccourcis et Réglages harmonisées (`SimpleFamily`)** : icône vectorielle `SKPHeroGraphic`, pastille de version copiable, grille `POINTS FORTS`, lien cliquable vers **`https://adrien-m.net`** (`Adrien Mondot · cie Adrien M`), manuel interactif à 2 colonnes et section Confidentialité.
+
 ## 1.0.0 — 2026-10-25
 - Première version de **SimpleSKP** (**cie Adrien M**) : visualiseur SketchUp natif, sans dépendance.
 - Lecture des `.skp` (SketchUp 8 à 2023) par `SketchUpAPI.framework` ; vignette PNG du fichier affichée avant la 3D, chargement en arrière-plan.

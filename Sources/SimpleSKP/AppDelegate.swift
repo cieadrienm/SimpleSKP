@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static var updater: SimpleUpdater?
 
     var documentController: DocumentController!
-    private var snapshotRequest: (output: String, input: String?)?
+    private var snapshotRequest: (output: String, input: String?, view: String?)?
     private var selfTestRequested = false
     private var selfTestFile: String?
     private var cliMode: Bool { snapshotRequest != nil || selfTestRequested }
@@ -25,8 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         func operand(after index: Int) -> String? {
             index < args.count && !args[index].hasPrefix("-") ? args[index] : nil
         }
+        let viewArg: String? = {
+            guard let i = args.firstIndex(of: "--view"), i + 1 < args.count else { return nil }
+            return args[i + 1]
+        }()
         if let index = args.firstIndex(of: "--snapshot") {
-            snapshotRequest = (operand(after: index + 1) ?? "/tmp/simpleskp-snapshot.png", operand(after: index + 2))
+            snapshotRequest = (operand(after: index + 1) ?? "/tmp/simpleskp-snapshot.png", operand(after: index + 2), viewArg)
         } else if let index = args.firstIndex(of: "--self-test") {
             selfTestRequested = true
             selfTestFile = operand(after: index + 1)
@@ -39,7 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if selfTestRequested { SelfTest.runAndExit(file: selfTestFile) }
-        if let snapshotRequest { Snapshot.run(output: snapshotRequest.output, input: snapshotRequest.input) }
+        if let snapshotRequest { Snapshot.run(output: snapshotRequest.output, input: snapshotRequest.input, view: snapshotRequest.view) }
         NSApp.activate(ignoringOtherApps: true)
     }
 

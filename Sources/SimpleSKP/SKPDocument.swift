@@ -76,15 +76,25 @@ final class SKPDocument: NSDocument {
     @objc func openInSketchUp(_ sender: Any?) { model.openInSketchUp() }
     @objc func revealInFinder(_ sender: Any?) { model.revealInFinder() }
     @objc func copyImage(_ sender: Any?) { model.copyImage() }
+    @objc func exportImage(_ sender: Any?) { model.exportImage() }
     @objc func toggleSidebarPanel(_ sender: Any?) { model.toggleSidebar() }
     @objc func toggleEdges(_ sender: Any?) { model.toggleEdges() }
+    @objc func toggleGrid(_ sender: Any?) { model.toggleGrid() }
     @objc func togglePerspective(_ sender: Any?) { model.togglePerspective() }
+    @objc func resetView(_ sender: Any?) { model.resetView() }
     @objc func zoomExtents(_ sender: Any?) { model.zoomExtents() }
     @objc func toggleShadows(_ sender: Any?) { model.toggleShadows() }
+    @objc func toggleLightingMode(_ sender: Any?) { model.setLightingMode(model.lightingMode == .sun ? .point : .sun) }
     @objc func toggleAmbientOcclusion(_ sender: Any?) { model.toggleAmbientOcclusion() }
     @objc func toggleFreeFlight(_ sender: Any?) { model.toggleFreeFlight() }
     @objc func previousScene(_ sender: Any?) { model.previousScene() }
     @objc func nextScene(_ sender: Any?) { model.nextScene() }
+
+    @objc func selectShadingStyle(_ sender: NSMenuItem) {
+        let styles = ShadingStyle.allCases
+        guard styles.indices.contains(sender.tag) else { return }
+        model.setShadingStyle(styles[sender.tag])
+    }
 
     /// Camera menu: the item's tag indexes `MainMenu.cameraViews`.
     @objc func lookStandard(_ sender: NSMenuItem) {
@@ -93,6 +103,7 @@ final class SKPDocument: NSDocument {
     }
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        let isEditingText = windowControllers.first?.window?.firstResponder is NSText
         switch item.action {
         case #selector(openInSketchUp(_:)):
             item.isHidden = model.sketchUpApp == nil   // SketchUp is optional (D1)
@@ -105,11 +116,17 @@ final class SKPDocument: NSDocument {
         case #selector(toggleEdges(_:)):
             item.state = model.showsEdges ? .on : .off
             return model.isReady
+        case #selector(toggleGrid(_:)):
+            item.state = model.showsGrid ? .on : .off
+            return model.isReady
         case #selector(togglePerspective(_:)):
             item.state = model.isPerspective ? .on : .off
             return model.isReady
         case #selector(toggleShadows(_:)):
             item.state = model.shadowsEnabled ? .on : .off
+            return model.isReady && model.lightingMode == .sun
+        case #selector(toggleLightingMode(_:)):
+            item.state = model.lightingMode == .point ? .on : .off
             return model.isReady
         case #selector(toggleAmbientOcclusion(_:)):
             item.state = model.ambientOcclusionEnabled ? .on : .off
@@ -117,9 +134,17 @@ final class SKPDocument: NSDocument {
         case #selector(toggleFreeFlight(_:)):
             item.state = model.isFreeFlying ? .on : .off
             return model.isReady
+        case #selector(selectShadingStyle(_:)):
+            let styles = ShadingStyle.allCases
+            if styles.indices.contains(item.tag) {
+                item.state = model.shadingStyle == styles[item.tag] ? .on : .off
+            }
+            return model.isReady
         case #selector(previousScene(_:)), #selector(nextScene(_:)):
             return model.isReady && !(model.skp?.scenes.isEmpty ?? true)
-        case #selector(copyImage(_:)), #selector(zoomExtents(_:)), #selector(lookStandard(_:)):
+        case #selector(resetView(_:)), #selector(zoomExtents(_:)):
+            return model.isReady && !isEditingText && !model.isFreeFlying
+        case #selector(copyImage(_:)), #selector(exportImage(_:)), #selector(lookStandard(_:)):
             return model.isReady
         default:
             return super.validateMenuItem(item)

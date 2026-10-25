@@ -3,6 +3,7 @@
 SimpleSKP est un visualiseur de fichiers SketchUp natif pour macOS (Swift, AppKit, SceneKit, zéro dépendance), de la famille des apps Simple de la cie Adrien M (SimpleAudio, SimplePJ, SimpleText). Adrien (spectacle vivant, maquettes de salles et de décors) est l'unique utilisateur ; il parle français et refuse Electron.
 
 ## Lire d'abord
+- `~/Programmation/SimpleFamily/GUIDELINES.md` — le guide de référence de la famille **Simple** (identité, barre d'outils, raccourcis `Z` / `⇧Z`, fenêtres À propos / Guide / Raccourcis / Réglages, CLI `--snapshot` / `--self-test`).
 - `DECISIONS.md` — D1…D11, le pourquoi de chaque choix, et ce qui est remis à plus tard. **Ajouter une entrée pour tout choix structurant.**
 - `docs/superpowers/specs/2026-10-25-simpleskp-design.md` — le design, le contrat entre les cibles et les phases.
 - `Sources/SimpleSKPCore/SKPModel.swift` — le contrat figé entre Cœur, Vue 3D et App.

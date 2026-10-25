@@ -19,9 +19,92 @@ public final class ViewportScene {
     /// The sun (D7): directional, elevation 45°, azimuth 135° clockwise from +X (from the south-west: the iso view, seen
     /// from the south-east, then shows two differently lit faces and the shadows in front), soft cascaded shadows.
     public let sun = SCNNode()
+    /// Secondary sky counter-light opposite the sun so shadowed faces keep distinct tonal values.
+    public let skyFill = SCNNode()
+
+    public static let defaultSunAzimuthDegrees: Float = -135
+    public static let defaultSunElevationDegrees: Float = 45
+
+    public var sunAzimuthDegrees: Float = ViewportScene.defaultSunAzimuthDegrees {
+        didSet { updateSunDirection() }
+    }
+
+    public var sunElevationDegrees: Float = ViewportScene.defaultSunElevationDegrees {
+        didSet { updateSunDirection() }
+    }
+
+    public func resetSun() {
+        sunAzimuthDegrees = Self.defaultSunAzimuthDegrees
+        sunElevationDegrees = Self.defaultSunElevationDegrees
+    }
 
     public var shadowsEnabled = true {
-        didSet { sun.light!.castsShadow = shadowsEnabled }
+        didSet { updateLightingModeAndPointLights() }
+    }
+
+    public var lightingMode: LightingMode = .sun {
+        didSet {
+            if lightingMode == .point && pointLights.isEmpty {
+                pointLights = detectedSceneLights.isEmpty
+                    ? [ViewportPointLight(name: L("Lumière 1", "Light 1"), position: defaultPointLightPosition, intensity: 1.0, isFromScene: false)]
+                    : detectedSceneLights
+            }
+            updateLightingModeAndPointLights()
+        }
+    }
+
+    /// Scene lights detected from light components/groups in the `.skp` model, if any.
+    public private(set) var detectedSceneLights: [ViewportPointLight] = []
+
+    /// Active point lights in model space (metres, Z up).
+    public var pointLights: [ViewportPointLight] = [] {
+        didSet { updateLightingModeAndPointLights() }
+    }
+
+    /// Whether to draw the 3D wireframe position marker for point lights when in `.point` mode.
+    public var showsPointLightGizmo: Bool = true {
+        didSet { updateLightingModeAndPointLights() }
+    }
+
+    /// Center of the currently visible geometry in model coordinates (metres, Z up).
+    public var defaultPointLightPosition: SIMD3<Float> {
+        let b = visibleBounds
+        return (b.min + b.max) * 0.5
+    }
+
+    public var backdropStyle: BackdropStyle = .architecturalSky {
+        didSet { updateBackdrop() }
+    }
+
+    public var customBackdropColor: SIMD3<Float> = Rendering.defaultCustomBackdropColor {
+        didSet { updateBackdrop() }
+    }
+
+    private func updateBackdrop() {
+        scene.background.contents = Rendering.backdropImage(for: backdropStyle, customColor: customBackdropColor)
+        let isDark: Bool = switch backdropStyle {
+        case .studioDark: true
+        case .architecturalSky, .warmPaper: false
+        case .customColor:
+            (0.2126 * customBackdropColor.x + 0.7152 * customBackdropColor.y + 0.0722 * customBackdropColor.z) < 0.28
+        }
+        edgeMaterial.diffuse.contents = isDark
+            ? NSColor(srgbRed: 0.14, green: 0.16, blue: 0.20, alpha: 1)
+            : NSColor(srgbRed: 0.20, green: 0.22, blue: 0.26, alpha: 1)
+    }
+
+    public var shadingStyle: ShadingStyle = .textured {
+        didSet {
+            guard shadingStyle != oldValue else { return }
+            applyShadingStyle()
+        }
+    }
+
+    public var showsGrid: Bool = false {
+        didSet {
+            guard showsGrid != oldValue else { return }
+            updateGridNode()
+        }
     }
 
     /// High: 3 cascades of 2048²; low: 1 of 1024², for a scene over 33 ms (the app decides; D7).
@@ -52,13 +135,26 @@ public final class ViewportScene {
     }
 
     private var materials: [Int: SCNMaterial] = [:]
+    private var xrayMaterials: [ObjectIdentifier: SCNMaterial] = [:]
     private var images: [Int: NSImage?] = [:]
     private lazy var defaultMaterial = makeMaterial(nil, uvs: .none)
+    private lazy var clayMaterial: SCNMaterial = {
+        let m = SCNMaterial()
+        m.lightingModel = .physicallyBased
+        m.diffuse.contents = NSColor(srgbRed: 0.94, green: 0.92, blue: 0.89, alpha: 1)
+        m.roughness.contents = 0.85
+        m.metalness.contents = 0
+        m.isDoubleSided = true
+        return m
+    }()
     private let edgeMaterial = SCNMaterial()
     private var placements: [Placement] = []
     private(set) var layerSets: [[Int]: LayerSet] = [:]
     private var setsByLayer: [Int: [LayerSet]] = [:]
+    private var faceNodes: [(node: SCNNode, material: SCNMaterial)] = []
     private var edgeNodes: [SCNNode] = []
+    private var gridNode: SCNNode?
+    private let pointLightsRoot = SCNNode()
     private var hiddenLayers = Set<Int>()
     private var cachedVisibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
 
@@ -67,10 +163,10 @@ public final class ViewportScene {
         self.scene = SCNScene()
         scene.background.contents = Rendering.skyImage(backdrop: true)
         scene.lightingEnvironment.contents = Rendering.skyImage()
-        scene.lightingEnvironment.intensity = 1
+        scene.lightingEnvironment.intensity = 1.05
 
         edgeMaterial.lightingModel = .constant
-        edgeMaterial.diffuse.contents = NSColor(white: 0.3, alpha: 1) // opaque: alpha-blended lines vanish behind HDR faces
+        edgeMaterial.diffuse.contents = NSColor(srgbRed: 0.20, green: 0.22, blue: 0.26, alpha: 1) // crisp graphite: alpha-blended lines vanish behind HDR faces
         edgeMaterial.readsFromDepthBuffer = true
         edgeMaterial.writesToDepthBuffer = false
         edgeMaterial.shaderModifiers = [.geometry: Self.edgeBias]
@@ -90,26 +186,58 @@ public final class ViewportScene {
 
         let ambient = SCNLight()
         ambient.type = .ambient
-        ambient.intensity = 150 // interiors out of the sun are not pitch black
+        ambient.intensity = 140 // interiors out of the sun are not pitch black
         fill.light = ambient
 
         let light = SCNLight()
         light.type = .directional
-        light.intensity = 1000
+        light.intensity = 1050
+        light.temperature = 5800
         light.castsShadow = true
         light.shadowMode = .forward
         light.shadowRadius = 3
         light.shadowSampleCount = 8
         light.automaticallyAdjustsShadowProjection = true
-        light.shadowColor = NSColor(white: 0, alpha: 0.55)
+        light.shadowColor = NSColor(srgbRed: 0.05, green: 0.07, blue: 0.12, alpha: 0.48)
         sun.light = light
         sun.name = "sun"
         setShadowQuality(true)
-        let azimuth = -Float.pi * 3 / 4, elevation = Float.pi / 4
-        let toSun = SIMD3(cos(azimuth) * cos(elevation), sin(azimuth) * cos(elevation), sin(elevation))
-        sun.simdLook(at: -toSun, up: SIMD3(0, 0, 1), localFront: SCNNode.simdLocalFront)
+
+        let counter = SCNLight()
+        counter.type = .directional
+        counter.intensity = 220
+        counter.temperature = 7500
+        counter.castsShadow = false
+        skyFill.light = counter
+        skyFill.name = "skyFill"
+
+        pointLightsRoot.name = "pointLights"
+        pointLightsRoot.isHidden = true
         modelRoot.addChildNode(sun)
+        modelRoot.addChildNode(skyFill)
+        modelRoot.addChildNode(pointLightsRoot)
+        detectedSceneLights = Self.extractSceneLights(from: model, placements: placements, hiddenLayers: hiddenLayers)
+        if !detectedSceneLights.isEmpty {
+            pointLights = detectedSceneLights
+        }
+        updateSunDirection()
         updateShadowDistance()
+        updateLightingModeAndPointLights()
+    }
+
+    private func updateSunDirection() {
+        let azimuth = sunAzimuthDegrees * .pi / 180
+        let elevation = max(5, min(88, sunElevationDegrees)) * .pi / 180
+        let toSun = SIMD3(cos(azimuth) * cos(elevation), sin(azimuth) * cos(elevation), sin(elevation))
+        let worldDir = modelRoot.simdConvertVector(-toSun, to: nil)
+        let worldUp = modelRoot.simdConvertVector(SIMD3(0, 0, 1), to: nil)
+        sun.simdLook(at: sun.simdWorldPosition + worldDir, up: worldUp, localFront: SCNNode.simdLocalFront)
+
+        let counterAzimuth = azimuth + .pi
+        let counterElevation: Float = 28 * .pi / 180
+        let toCounter = SIMD3(cos(counterAzimuth) * cos(counterElevation), sin(counterAzimuth) * cos(counterElevation), sin(counterElevation))
+        let counterWorldDir = modelRoot.simdConvertVector(-toCounter, to: nil)
+        skyFill.simdLook(at: skyFill.simdWorldPosition + counterWorldDir, up: worldUp, localFront: SCNNode.simdLocalFront)
     }
 
     /// Shows or hides everything on a layer, by index into `model.layers`: a layer set is shown iff all its layers are.
@@ -140,7 +268,11 @@ public final class ViewportScene {
     }
 
     public var showsEdges: Bool = true {
-        didSet { for node in edgeNodes { node.isHidden = !showsEdges }; cachedVisibleBounds = nil }
+        didSet {
+            let visible = showsEdges || shadingStyle == .wireframe
+            for node in edgeNodes { node.isHidden = !visible }
+            cachedVisibleBounds = nil
+        }
     }
 
     /// Bounds of what is shown, in model space (metres, Z up): hidden layer sets are left out.
@@ -150,7 +282,7 @@ public final class ViewportScene {
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
         for set in layerSets.values {
             guard let node = set.node, !node.isHidden else { continue }
-            for child in node.childNodes where child.geometry != nil && !child.isHidden { // merged geometries are in model space
+            for child in node.childNodes where child.geometry != nil && (!child.isHidden || shadingStyle == .wireframe) { // merged geometries are in model space
                 let (a, b) = child.geometry!.boundingBox
                 lo = simd_min(lo, SIMD3(a)); hi = simd_max(hi, SIMD3(b))
             }
@@ -283,15 +415,284 @@ public final class ViewportScene {
         }
         for (chunk, data) in zip(chunks, merged) {
             let child = SCNNode(geometry: geometry(chunk, data!))
-            if chunk.material == nil {
+            if let material = chunk.material {
+                faceNodes.append((child, material))
+                if shadingStyle != .textured {
+                    applyShadingStyle(to: child, original: material)
+                }
+            } else {
                 child.categoryBitMask = Self.edgeCategory
                 child.castsShadow = false
                 child.renderingOrder = 1 // after the faces, so the depth test sees them
-                child.isHidden = !showsEdges
+                child.isHidden = !(showsEdges || shadingStyle == .wireframe)
                 edgeNodes.append(child)
             }
             chunk.set.node!.addChildNode(child)
         }
+    }
+
+    private func applyShadingStyle() {
+        for (node, material) in faceNodes {
+            applyShadingStyle(to: node, original: material)
+        }
+        let edgesVisible = showsEdges || shadingStyle == .wireframe
+        for node in edgeNodes {
+            node.isHidden = !edgesVisible
+        }
+    }
+
+    private func applyShadingStyle(to node: SCNNode, original: SCNMaterial) {
+        switch shadingStyle {
+        case .textured:
+            node.isHidden = false
+            node.geometry?.materials = [original]
+        case .clay:
+            node.isHidden = false
+            // Keep transparent glass transparent even in clay mode
+            node.geometry?.materials = [original.transparency < 1 ? original : clayMaterial]
+        case .xray:
+            node.isHidden = false
+            node.geometry?.materials = [xrayMaterial(for: original)]
+        case .wireframe:
+            node.isHidden = true
+            node.geometry?.materials = [original]
+        }
+    }
+
+    private func xrayMaterial(for original: SCNMaterial) -> SCNMaterial {
+        let id = ObjectIdentifier(original)
+        if let cached = xrayMaterials[id] { return cached }
+        let m = original.copy() as! SCNMaterial
+        m.transparency = min(original.transparency, 0.36)
+        m.transparencyMode = .dualLayer
+        m.writesToDepthBuffer = false
+        xrayMaterials[id] = m
+        return m
+    }
+
+    private func updateGridNode() {
+        if !showsGrid {
+            gridNode?.isHidden = true
+            return
+        }
+        if let gridNode {
+            gridNode.isHidden = false
+            return
+        }
+        let node = buildGridNode()
+        gridNode = node
+        modelRoot.addChildNode(node)
+    }
+
+    /// Reference ground grid and SketchUp-style X (Red), Y (Green), Z (Blue) axes at the origin.
+    /// Uses `.line` primitives with `edgeCategory` so hit tests ignore it and `testMaterialsArePhysicallyBased` is unaffected.
+    private func buildGridNode() -> SCNNode {
+        let root = SCNNode()
+        root.name = "referenceGrid"
+        let span = max(simd_length(model.boundsMax - model.boundsMin), 2.0)
+        let rawStep = pow(10, floor(log10(max(span / 12, 0.1))))
+        let step: Float = span / rawStep > 25 ? rawStep * 2 : (span / rawStep < 8 ? rawStep / 2 : rawStep)
+        let halfExtent = ceil((span * 0.85) / (step * 5)) * (step * 5)
+        let cx = ((model.boundsMin.x + model.boundsMax.x) * 0.5 / (step * 5)).rounded() * (step * 5)
+        let cy = ((model.boundsMin.y + model.boundsMax.y) * 0.5 / (step * 5)).rounded() * (step * 5)
+        let z: Float = (model.boundsMin.z <= 0.1 && model.boundsMax.z >= -0.1) ? 0 : model.boundsMin.z
+
+        var minorPts: [SIMD3<Float>] = []
+        var majorPts: [SIMD3<Float>] = []
+        let count = Int((halfExtent / step).rounded())
+        for i in -count...count {
+            let offset = Float(i) * step
+            let x = cx + offset
+            let y = cy + offset
+            let isMajor = (i % 5 == 0)
+            let xStart = SIMD3<Float>(x, cy - halfExtent, z)
+            let xEnd = SIMD3<Float>(x, cy + halfExtent, z)
+            let yStart = SIMD3<Float>(cx - halfExtent, y, z)
+            let yEnd = SIMD3<Float>(cx + halfExtent, y, z)
+            if isMajor {
+                majorPts.append(contentsOf: [xStart, xEnd, yStart, yEnd])
+            } else {
+                minorPts.append(contentsOf: [xStart, xEnd, yStart, yEnd])
+            }
+        }
+
+        func lineNode(_ points: [SIMD3<Float>], color: NSColor) -> SCNNode {
+            let buf = Self.buffer(points.count * 12)
+            let ptr = buf.contents().bindMemory(to: Float.self, capacity: points.count * 3)
+            for (idx, p) in points.enumerated() {
+                ptr[idx * 3] = p.x; ptr[idx * 3 + 1] = p.y; ptr[idx * 3 + 2] = p.z
+            }
+            let src = SCNGeometrySource(buffer: buf, vertexFormat: .float3, semantic: .vertex, vertexCount: points.count, dataOffset: 0, dataStride: 12)
+            let elem = SCNGeometryElement(data: nil, primitiveType: .line, primitiveCount: points.count / 2, bytesPerIndex: 4)
+            let geom = SCNGeometry(sources: [src], elements: [elem])
+            let mat = SCNMaterial()
+            mat.lightingModel = .constant
+            mat.diffuse.contents = color
+            mat.readsFromDepthBuffer = true
+            mat.writesToDepthBuffer = false
+            geom.materials = [mat]
+            let n = SCNNode(geometry: geom)
+            n.categoryBitMask = Self.edgeCategory
+            n.castsShadow = false
+            n.renderingOrder = -1
+            return n
+        }
+
+        if !minorPts.isEmpty {
+            root.addChildNode(lineNode(minorPts, color: NSColor(white: 0.5, alpha: 0.18)))
+        }
+        if !majorPts.isEmpty {
+            root.addChildNode(lineNode(majorPts, color: NSColor(white: 0.55, alpha: 0.34)))
+        }
+        let axisLen = max(halfExtent * 0.6, step * 4)
+        let origin = SIMD3<Float>(0, 0, z + 0.002)
+        root.addChildNode(lineNode([origin, origin + SIMD3(axisLen, 0, 0)], color: NSColor(srgbRed: 0.95, green: 0.32, blue: 0.30, alpha: 0.85)))
+        root.addChildNode(lineNode([origin, origin + SIMD3(0, axisLen, 0)], color: NSColor(srgbRed: 0.38, green: 0.80, blue: 0.42, alpha: 0.85)))
+        root.addChildNode(lineNode([origin, origin + SIMD3(0, 0, axisLen * 0.6)], color: NSColor(srgbRed: 0.35, green: 0.60, blue: 0.96, alpha: 0.85)))
+        return root
+    }
+
+    // MARK: - Point Lights & Scene Light Detection
+
+    private func updateLightingModeAndPointLights() {
+        let isSun = (lightingMode == .sun)
+        sun.light?.intensity = isSun ? 1050 : 0
+        sun.light?.castsShadow = isSun && shadowsEnabled
+        skyFill.light?.intensity = isSun ? 220 : 0
+        scene.lightingEnvironment.intensity = isSun ? 1.05 : 0.32
+        fill.light?.intensity = isSun ? 140 : 95
+
+        pointLightsRoot.childNodes.forEach { $0.removeFromParentNode() }
+        guard !isSun else {
+            pointLightsRoot.isHidden = true
+            return
+        }
+        pointLightsRoot.isHidden = false
+
+        let bounds = visibleBounds
+        let diagonal = max(simd_distance(bounds.min, bounds.max), 1.0)
+        // Characteristic radius of the geometry: SceneKit PBR omni lights use lumens (divided by 4π d² in metres).
+        // Scaling by 4π R² ensures a 1.0 (100%) point light at the center produces ~1100 lux on surrounding walls
+        // whether the model is 2 m wide or 60 m wide.
+        let refRadius = max(diagonal * 0.28, 0.45)
+        let baseLumens = CGFloat(1350.0 * 4.0 * Float.pi * refRadius * refRadius)
+        let gizmoRadius = max(diagonal * 0.018, 0.06)
+
+        for item in pointLights {
+            let holder = SCNNode()
+            holder.name = item.name
+            holder.simdPosition = item.position
+
+            let omni = SCNLight()
+            omni.type = .omni
+            omni.intensity = baseLumens * CGFloat(max(0, item.intensity))
+            omni.temperature = 5400
+            omni.attenuationStartDistance = 0
+            omni.attenuationEndDistance = CGFloat(diagonal * 3.0)
+            omni.attenuationFalloffExponent = 1.6
+            omni.castsShadow = false
+            holder.light = omni
+
+            if showsPointLightGizmo {
+                holder.addChildNode(Self.makePointLightGizmo(radius: gizmoRadius, isFromScene: item.isFromScene))
+            }
+            pointLightsRoot.addChildNode(holder)
+        }
+    }
+
+    /// Builds a 3D wireframe octahedron + crosshair marker using `.line` segments (`edgeCategory`) so hit-testing and
+    /// triangle-material tests ignore it.
+    private static func makePointLightGizmo(radius r: Float, isFromScene: Bool) -> SCNNode {
+        let px = SIMD3<Float>(r, 0, 0), nx = SIMD3<Float>(-r, 0, 0)
+        let py = SIMD3<Float>(0, r, 0), ny = SIMD3<Float>(0, -r, 0)
+        let pz = SIMD3<Float>(0, 0, r), nz = SIMD3<Float>(0, 0, -r)
+        let c = r * 1.65
+        let points: [SIMD3<Float>] = [
+            // Octahedron diamond
+            pz, px, pz, nx, pz, py, pz, ny,
+            nz, px, nz, nx, nz, py, nz, ny,
+            px, py, py, nx, nx, ny, ny, px,
+            // 3D ray crosshairs
+            SIMD3(-c, 0, 0), SIMD3(c, 0, 0),
+            SIMD3(0, -c, 0), SIMD3(0, c, 0),
+            SIMD3(0, 0, -c), SIMD3(0, 0, c),
+        ]
+        let buf = buffer(points.count * 12)
+        let ptr = buf.contents().bindMemory(to: Float.self, capacity: points.count * 3)
+        for (i, p) in points.enumerated() {
+            ptr[i * 3] = p.x; ptr[i * 3 + 1] = p.y; ptr[i * 3 + 2] = p.z
+        }
+        let src = SCNGeometrySource(buffer: buf, vertexFormat: .float3, semantic: .vertex, vertexCount: points.count, dataOffset: 0, dataStride: 12)
+        let elem = SCNGeometryElement(data: nil, primitiveType: .line, primitiveCount: points.count / 2, bytesPerIndex: 4)
+        let geom = SCNGeometry(sources: [src], elements: [elem])
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = isFromScene
+            ? NSColor(srgbRed: 0.36, green: 0.88, blue: 0.90, alpha: 1)
+            : NSColor(srgbRed: 1.00, green: 0.72, blue: 0.30, alpha: 1)
+        mat.readsFromDepthBuffer = false // always visible even behind walls so user can see where the light is
+        mat.writesToDepthBuffer = false
+        geom.materials = [mat]
+        let node = SCNNode(geometry: geom)
+        node.categoryBitMask = edgeCategory
+        node.castsShadow = false
+        node.renderingOrder = 2
+        return node
+    }
+
+    /// Detects light fixtures / point lights placed in the `.skp` scene by inspecting component/group/layer names.
+    private static func extractSceneLights(from model: SKPModel, placements: [Placement], hiddenLayers: Set<Int>) -> [ViewportPointLight] {
+        let keywords = [
+            "pointlight", "point_light", "point light", "omnilight", "omni_light",
+            "vraylight", "enscape", "lumiere", "lumière", "ampoule", "projecteur",
+            "spot", "fresnel", "decoupe", "découpe", "svoboda", "light", "lamp", "bulb",
+        ]
+        let excluded = ["lightweight", "highlight", "daylight", "skylight", "moonlight"]
+
+        func matchesLightName(_ raw: String) -> Bool {
+            let lower = raw.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
+            guard !lower.isEmpty else { return false }
+            if excluded.contains(where: { lower.contains($0) }) { return false }
+            for kw in keywords {
+                if lower == kw || lower.hasPrefix(kw + " ") || lower.hasPrefix(kw + "_") || lower.hasPrefix(kw + "-")
+                    || lower.hasSuffix(" " + kw) || lower.hasSuffix("_" + kw) || lower.hasSuffix("-" + kw)
+                    || lower.contains(" " + kw + " ") || lower.contains("_" + kw + "_") {
+                    return true
+                }
+            }
+            return false
+        }
+
+        var results: [ViewportPointLight] = []
+        for placement in placements where placement.definition >= 0 {
+            guard placement.layers.allSatisfy({ !hiddenLayers.contains($0) }) else { continue }
+            let def = model.definitions[placement.definition]
+            let layerNames = placement.layers.compactMap { model.layers.indices.contains($0) ? model.layers[$0].name : nil }
+            let isLight = matchesLightName(def.name) || layerNames.contains(where: matchesLightName)
+            guard isLight else { continue }
+
+            // Compute local bounding box of this definition's meshes/edges so we reject huge room/rig groups
+            var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+            for m in def.meshes { for p in m.positions { lo = simd_min(lo, p); hi = simd_max(hi, p) } }
+            for e in def.edges { for p in e.positions { lo = simd_min(lo, p); hi = simd_max(hi, p) } }
+            let localCenter: SIMD3<Float>
+            if lo.x <= hi.x {
+                let worldMin = placement.transform * SIMD4(lo, 1)
+                let worldMax = placement.transform * SIMD4(hi, 1)
+                let span = simd_distance(SIMD3(worldMin.x, worldMin.y, worldMin.z), SIMD3(worldMax.x, worldMax.y, worldMax.z))
+                guard span <= 3.5 else { continue } // A single light fixture is under 3.5 m
+                localCenter = (lo + hi) * 0.5
+            } else {
+                localCenter = .zero
+            }
+            let wp = placement.transform * SIMD4(localCenter, 1)
+            let pos = SIMD3<Float>(wp.x, wp.y, wp.z)
+            if results.contains(where: { simd_distance($0.position, pos) < 0.08 }) { continue }
+            let label = def.name.isEmpty ? L("Lumière scène \(results.count + 1)", "Scene light \(results.count + 1)") : def.name
+            results.append(ViewportPointLight(name: label, position: pos, intensity: 1.0, isFromScene: true))
+            if results.count >= 12 { break }
+        }
+        return results
     }
 
     /// Morton order of a point's model-space position on a 1024³ grid over the model's bounds.

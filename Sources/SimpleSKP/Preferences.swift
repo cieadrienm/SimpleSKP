@@ -1,4 +1,5 @@
 import Foundation
+import simd
 import SimpleSKPViewport
 
 /// User settings with a default in code: without `register()` (tests) they still read the default.
@@ -7,18 +8,30 @@ enum Preferences {
     enum Key {
         static let showSidebar = "showSidebar"
         static let showsEdges = "showsEdges"
+        static let showsGrid = "showsGrid"
         static let isPerspective = "isPerspective"
         static let shadowsEnabled = "shadowsEnabled"
         static let ambientOcclusionEnabled = "ambientOcclusionEnabled"
+        static let ambientOcclusionIntensity = "ambientOcclusionIntensity"
+        static let backdropStyle = "backdropStyle"
+        static let customBackdropR = "customBackdropR"
+        static let customBackdropG = "customBackdropG"
+        static let customBackdropB = "customBackdropB"
         static let twoFingerScrollZooms = "twoFingerScrollZooms"
     }
 
     static let defaults: [String: Any] = [
         Key.showSidebar: true,
         Key.showsEdges: true,
+        Key.showsGrid: false,
         Key.isPerspective: true,
         Key.shadowsEnabled: true,
         Key.ambientOcclusionEnabled: false, // no SSAO setting gave corner shading without floor bands or speckles (fix-navrender)
+        Key.ambientOcclusionIntensity: Float(Rendering.defaultAmbientOcclusionIntensity),
+        Key.backdropStyle: BackdropStyle.architecturalSky.rawValue,
+        Key.customBackdropR: Rendering.defaultCustomBackdropColor.x,
+        Key.customBackdropG: Rendering.defaultCustomBackdropColor.y,
+        Key.customBackdropB: Rendering.defaultCustomBackdropColor.z,
         Key.twoFingerScrollZooms: false,
     ]
 
@@ -42,6 +55,42 @@ enum Preferences {
         set { UserDefaults.standard.set(newValue, forKey: Key.showsEdges) }
     }
 
+    static var showsGrid: Bool {
+        get { bool(Key.showsGrid) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.showsGrid) }
+    }
+
+    static var backdropStyle: BackdropStyle {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: Key.backdropStyle),
+                  let style = BackdropStyle(rawValue: raw) else {
+                return .architecturalSky
+            }
+            return style
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Key.backdropStyle) }
+    }
+
+    static var customBackdropColor: SIMD3<Float> {
+        get {
+            let ud = UserDefaults.standard
+            guard ud.object(forKey: Key.customBackdropR) != nil else {
+                return Rendering.defaultCustomBackdropColor
+            }
+            return SIMD3(
+                ud.float(forKey: Key.customBackdropR),
+                ud.float(forKey: Key.customBackdropG),
+                ud.float(forKey: Key.customBackdropB)
+            )
+        }
+        set {
+            let ud = UserDefaults.standard
+            ud.set(newValue.x, forKey: Key.customBackdropR)
+            ud.set(newValue.y, forKey: Key.customBackdropG)
+            ud.set(newValue.z, forKey: Key.customBackdropB)
+        }
+    }
+
     /// « Ombres » and « Occlusion ambiante » (D7: remembered), read when a document opens.
     static var shadowsEnabled: Bool {
         get { bool(Key.shadowsEnabled) }
@@ -51,6 +100,15 @@ enum Preferences {
     static var ambientOcclusionEnabled: Bool {
         get { bool(Key.ambientOcclusionEnabled) }
         set { UserDefaults.standard.set(newValue, forKey: Key.ambientOcclusionEnabled) }
+    }
+
+    static var ambientOcclusionIntensity: Float {
+        get {
+            UserDefaults.standard.object(forKey: Key.ambientOcclusionIntensity) != nil
+                ? UserDefaults.standard.float(forKey: Key.ambientOcclusionIntensity)
+                : Float(Rendering.defaultAmbientOcclusionIntensity)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Key.ambientOcclusionIntensity) }
     }
 
     /// Used when the file has no saved camera; a saved camera keeps its own projection.

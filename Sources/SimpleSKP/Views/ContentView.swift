@@ -1,18 +1,20 @@
 import AppKit
+import simd
 import SimpleSKPCore
 import SimpleSKPViewport
 import SwiftUI
 
-/// The model window: sidebar (scenes, layers) | 3D viewport, over the status bar.
+/// The model window: top toolbar, sidebar (scenes, layers, materials) | 3D viewport with HUD, over the status bar.
 struct ContentView: View {
     let model: DocumentModel
 
     var body: some View {
         VStack(spacing: 0) {
+            TopBar(model: model)
             HStack(spacing: 0) {
                 if model.showSidebar {
                     SidebarView(model: model)
-                        .frame(width: 220)
+                        .frame(width: 244)
                     Rectangle().fill(Theme.separator.swiftUI).frame(width: 1)
                 }
                 viewport
@@ -35,6 +37,11 @@ struct ContentView: View {
     private var viewport: some View {
         ZStack {
             ViewportRepresentable(view: model.viewport)
+            if let snapshotImage = model.snapshotPreviewImage {
+                Image(nsImage: snapshotImage)
+                    .resizable()
+                    .allowsHitTesting(false)
+            }
             if let thumbnail = model.thumbnail {
                 Image(nsImage: thumbnail)
                     .resizable()
@@ -45,6 +52,9 @@ struct ContentView: View {
             }
             if let error = model.error {
                 FailureBanner(message: error.localizedDescription, openInSketchUp: model.sketchUpApp.map { _ in model.openInSketchUp })
+            }
+            if model.isReady {
+                ViewportHUDOverlay(model: model)
             }
         }
         .clipped()
@@ -57,6 +67,892 @@ struct ViewportRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ViewportView { view }
     func updateNSView(_ nsView: ViewportView, context: Context) {}
+}
+
+// MARK: - TopBar
+
+struct TopBar: View {
+    let model: DocumentModel
+    @State private var showLightingPopover = false
+
+    private static let primaryViews: [(view: StandardView, label: String, shortcut: String)] = [
+        (.iso, L("Iso", "Iso"), "⌘1"),
+        (.top, L("Dessus", "Top"), "⌘2"),
+        (.front, L("Face", "Front"), "⌘3"),
+        (.right, L("Droite", "Right"), "⌘4"),
+    ]
+
+    private static let extraViews: [(view: StandardView, label: String, shortcut: String)] = [
+        (.back, L("Arrière", "Back"), "⌘5"),
+        (.left, L("Gauche", "Left"), "⌘6"),
+        (.bottom, L("Dessous", "Bottom"), "⌘7"),
+    ]
+
+    private static let shadingStyles: [(style: ShadingStyle, label: String, symbol: String, help: String)] = [
+        (.textured, L("PBR", "PBR"), "cube.fill", L("Style texturé réaliste doux (PBR)", "Soft realistic textured style (PBR)")),
+        (.clay, L("Blanc", "Clay"), "cube", L("Style maquette blanche architecturale", "Architectural white clay style")),
+        (.xray, L("Rayons X", "X-Ray"), "square.stack.3d.forward.dottedline", L("Style semi-transparent Rayons X", "Semi-transparent X-Ray style")),
+        (.wireframe, L("Filaire", "Wire"), "squareshape.split.2x2", L("Style filaire (arêtes seules)", "Wireframe style (edges only)")),
+    ]
+
+    var body: some View {
+        HStack(spacing: 7) {
+            // 1. Sidebar & File actions
+            HStack(spacing: 3) {
+                IconButton(
+                    symbol: "sidebar.left",
+                    active: model.showSidebar,
+                    disabled: model.skp == nil,
+                    tooltip: L("Afficher ou masquer la barre latérale (⌥⌘S)", "Show or hide sidebar (⌥⌘S)")
+                ) {
+                    model.toggleSidebar()
+                }
+                IconButton(
+                    symbol: "folder",
+                    tooltip: L("Ouvrir un fichier SketchUp… (⌘O)", "Open a SketchUp file… (⌘O)")
+                ) {
+                    NSDocumentController.shared.openDocument(nil)
+                }
+                if model.info != nil {
+                    IconButton(
+                        symbol: "finder",
+                        tooltip: L("Afficher le fichier dans le Finder", "Show file in Finder")
+                    ) {
+                        model.revealInFinder()
+                    }
+                }
+                if model.sketchUpApp != nil {
+                    ToolbarPillButton(
+                        title: "SketchUp",
+                        symbol: "arrow.up.forward.app",
+                        tooltip: L("Ouvrir le modèle dans SketchUp (⇧⌘O)", "Open model in SketchUp (⇧⌘O)")
+                    ) {
+                        model.openInSketchUp()
+                    }
+                }
+            }
+
+            barDivider
+
+            // 2. Camera framing & standard views
+            HStack(spacing: 3) {
+                IconButton(
+                    symbol: "arrow.counterclockwise",
+                    disabled: !model.isReady,
+                    tooltip: L("Réinitialiser la vue initiale (Z)", "Reset to initial view (Z)")
+                ) {
+                    model.resetView()
+                }
+                IconButton(
+                    symbol: "arrow.up.left.and.arrow.down.right",
+                    disabled: !model.isReady,
+                    tooltip: L("Zoom étendu sur tout le modèle visible (⇧Z)", "Zoom extents to fit visible model (⇧Z)")
+                ) {
+                    model.zoomExtents()
+                }
+
+                HStack(spacing: 1) {
+                    ForEach(Self.primaryViews, id: \.view) { item in
+                        ToolbarPillButton(
+                            title: item.label,
+                            active: model.activeStandardView == item.view,
+                            disabled: !model.isReady,
+                            tooltip: "\(item.label) (\(item.shortcut))"
+                        ) {
+                            model.look(item.view)
+                        }
+                    }
+                    Menu {
+                        ForEach(Self.extraViews, id: \.view) { item in
+                            Button("\(item.label) (\(item.shortcut))") {
+                                model.look(item.view)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                            .frame(width: 18, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .disabled(!model.isReady)
+                    .help(L("Autres vues standard : Arrière (⌘5), Gauche (⌘6), Dessous (⌘7)",
+                            "More standard views: Back (⌘5), Left (⌘6), Bottom (⌘7)"))
+                }
+                .padding(2)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)))
+
+                ToolbarPillButton(
+                    title: model.isPerspective ? L("Persp.", "Persp.") : L("Parallèle", "Parallel"),
+                    symbol: model.isPerspective ? "view.3d" : "square.grid.2x2",
+                    active: !model.isPerspective,
+                    disabled: !model.isReady,
+                    tooltip: L("Basculer Perspective / Projection parallèle (⌥⌘P)", "Toggle Perspective / Parallel projection (⌥⌘P)")
+                ) {
+                    model.togglePerspective()
+                }
+
+                ToolbarPillButton(
+                    title: L("Vol libre", "Free Fly"),
+                    symbol: "airplane",
+                    active: model.isFreeFlying,
+                    disabled: !model.isReady,
+                    tooltip: L("Mode vol libre à la souris et au clavier (⌥⌘F, Échap pour quitter)",
+                               "Free fly mode with mouse and keyboard (⌥⌘F, Esc to exit)")
+                ) {
+                    model.toggleFreeFlight()
+                }
+            }
+
+            barDivider
+
+            // 3. Shading, Edges, Sun & Grid
+            HStack(spacing: 3) {
+                HStack(spacing: 1) {
+                    ForEach(Self.shadingStyles, id: \.style) { item in
+                        ToolbarPillButton(
+                            title: item.label,
+                            symbol: item.symbol,
+                            active: model.shadingStyle == item.style,
+                            disabled: !model.isReady,
+                            tooltip: item.help
+                        ) {
+                            model.setShadingStyle(item.style)
+                        }
+                    }
+                }
+                .padding(2)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)))
+
+                IconButton(
+                    symbol: "square.3.layers.3d.down.right",
+                    active: model.showsEdges,
+                    disabled: !model.isReady,
+                    tooltip: L("Afficher ou masquer les arêtes (⌘E)", "Show or hide edges (⌘E)")
+                ) {
+                    model.toggleEdges()
+                }
+
+                ToolbarPillButton(
+                    title: model.lightingMode == .sun ? L("Soleil", "Sun") : L("Ponctuel", "Point"),
+                    symbol: model.lightingMode == .sun ? (model.shadowsEnabled ? "sun.max.fill" : "sun.max") : "lightbulb.fill",
+                    active: model.lightingMode == .point,
+                    disabled: !model.isReady,
+                    tooltip: L("Basculer entre éclairage Soleil et éclairage Ponctuel", "Switch between Sun lighting and Point lighting")
+                ) {
+                    model.setLightingMode(model.lightingMode == .sun ? .point : .sun)
+                }
+
+                if model.lightingMode == .sun {
+                    IconButton(
+                        symbol: model.shadowsEnabled ? "shadow" : "sun.min",
+                        active: model.shadowsEnabled,
+                        disabled: !model.isReady,
+                        tooltip: L("Activer ou couper les ombres portées (⌥⌘O)", "Toggle cast shadows (⌥⌘O)")
+                    ) {
+                        model.toggleShadows()
+                    }
+                }
+
+                IconButton(
+                    symbol: "slider.horizontal.below.sun.max",
+                    active: showLightingPopover || model.ambientOcclusionEnabled || model.lightingMode == .point || model.backdropStyle == .customColor,
+                    disabled: !model.isReady,
+                    tooltip: L("Réglages d'éclairage (Soleil / Ponctuel), importance SSAO et couleur de fond",
+                               "Lighting settings (Sun / Point), SSAO strength and background color")
+                ) {
+                    showLightingPopover.toggle()
+                }
+                .popover(isPresented: $showLightingPopover, arrowEdge: .bottom) {
+                    LightingPopover(model: model)
+                }
+
+                IconButton(
+                    symbol: "grid",
+                    active: model.showsGrid,
+                    disabled: !model.isReady,
+                    tooltip: L("Afficher ou masquer la grille au sol et les axes XYZ (⌥⌘G)", "Show or hide ground grid and XYZ axes (⌥⌘G)")
+                ) {
+                    model.toggleGrid()
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            // 4. Scene stepper & Capture
+            if let skp = model.skp, !skp.scenes.isEmpty {
+                HStack(spacing: 2) {
+                    IconButton(
+                        symbol: "chevron.left",
+                        disabled: !model.isReady,
+                        tooltip: L("Scène précédente (⌘[)", "Previous scene (⌘[)")
+                    ) {
+                        model.previousScene()
+                    }
+                    Menu {
+                        ForEach(skp.scenes.indices, id: \.self) { index in
+                            Button {
+                                model.selectScene(index)
+                            } label: {
+                                HStack {
+                                    Text(skp.scenes[index].name)
+                                    if model.selectedScene == index {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "camera.metering.center.weighted")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Theme.accent.swiftUI)
+                            Text(currentSceneLabel(skp))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.text.swiftUI)
+                                .lineLimit(1)
+                                .frame(maxWidth: 110, alignment: .leading)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(!model.isReady)
+                    .help(L("Choisir une scène du modèle", "Select a model scene"))
+
+                    IconButton(
+                        symbol: "chevron.right",
+                        disabled: !model.isReady,
+                        tooltip: L("Scène suivante (⌘])", "Next scene (⌘])")
+                    ) {
+                        model.nextScene()
+                    }
+                }
+                .padding(.horizontal, 2)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)))
+
+                barDivider
+            }
+
+            HStack(spacing: 3) {
+                IconButton(
+                    symbol: "doc.on.doc",
+                    disabled: !model.isReady,
+                    tooltip: L("Copier l'image de la vue dans le presse-papiers (⌘C)", "Copy view image to clipboard (⌘C)")
+                ) {
+                    model.copyImage()
+                }
+                IconButton(
+                    symbol: "camera",
+                    disabled: !model.isReady,
+                    tooltip: L("Exporter l'image en PNG… (⇧⌘E)", "Export PNG image… (⇧⌘E)")
+                ) {
+                    model.exportImage()
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 38)
+        .background(Theme.header.swiftUI)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+        }
+    }
+
+    private func currentSceneLabel(_ skp: SKPModel) -> String {
+        if let index = model.selectedScene, skp.scenes.indices.contains(index) {
+            return skp.scenes[index].name
+        }
+        return L("Scènes (\(skp.scenes.count))", "Scenes (\(skp.scenes.count))")
+    }
+
+    private var barDivider: some View {
+        Rectangle()
+            .fill(Theme.separator.swiftUI)
+            .frame(width: 1, height: 18)
+    }
+}
+
+// MARK: - Lighting, SSAO & Backdrop Popover
+
+struct LightingPopover: View {
+    let model: DocumentModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            // 1. Lighting Mode Header (Soleil vs Ponctuel)
+            SectionHeader(L("Mode d'éclairage", "Lighting mode")) {
+                if model.lightingMode == .sun {
+                    Button {
+                        model.resetSun()
+                    } label: {
+                        Text(L("Réinitialiser", "Reset"))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(Theme.accent.swiftUI)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button {
+                        model.addPointLight()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 10.5))
+                            Text(L("Créer une lumière", "Add light"))
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.accent.swiftUI)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 4) {
+                ToolbarPillButton(
+                    title: L("Soleil (Directionnel)", "Sun (Directional)"),
+                    symbol: "sun.max.fill",
+                    active: model.lightingMode == .sun
+                ) {
+                    model.setLightingMode(.sun)
+                }
+                ToolbarPillButton(
+                    title: L("Ponctuel (Omni)", "Point (Omni)"),
+                    symbol: "lightbulb.fill",
+                    active: model.lightingMode == .point
+                ) {
+                    model.setLightingMode(.point)
+                }
+            }
+
+            if model.lightingMode == .sun {
+                sunControls
+            } else {
+                pointLightControls
+            }
+
+            Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
+            // 2. Ambient Occlusion (SSAO) + Importance slider
+            SectionHeader(L("Occlusion ambiante (SSAO)", "Ambient occlusion (SSAO)"))
+            Toggle(isOn: Binding(
+                get: { model.ambientOcclusionEnabled },
+                set: { _ in model.toggleAmbientOcclusion() }
+            )) {
+                Text(L("Activer l'occlusion ambiante (⌥⌘A)", "Enable ambient occlusion (⌥⌘A)"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.text.swiftUI)
+            }
+            .toggleStyle(.checkbox)
+
+            if model.ambientOcclusionEnabled {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(L("Importance SSAO", "SSAO strength"))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text("\(Int((model.ambientOcclusionIntensity * 100).rounded())) %")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(model.ambientOcclusionIntensity) },
+                            set: { model.setAmbientOcclusionIntensity(Float($0)) }
+                        ),
+                        in: 0.0...2.0
+                    )
+                    .tint(Theme.accent.swiftUI)
+                }
+            }
+
+            Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
+            // 3. Backdrop Style & Custom Color
+            SectionHeader(L("Fond de scène", "Backdrop"))
+            HStack(spacing: 4) {
+                backdropChoice(.architecturalSky, title: L("Ciel", "Sky"), symbol: "cloud.sun")
+                backdropChoice(.studioDark, title: L("Studio", "Studio"), symbol: "circle.lefthalf.filled")
+                backdropChoice(.warmPaper, title: L("Papier", "Paper"), symbol: "doc.plaintext")
+                backdropChoice(.customColor, title: L("Couleur", "Color"), symbol: "paintpalette")
+            }
+
+            HStack(spacing: 8) {
+                ColorPicker(
+                    L("Couleur du fond", "Background color"),
+                    selection: customColorBinding,
+                    supportsOpacity: false
+                )
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.textDim.swiftUI)
+
+                Spacer()
+
+                HStack(spacing: 5) {
+                    colorSwatch(SIMD3<Float>(0.08, 0.09, 0.11), label: L("Noir théâtre", "Stage black"))
+                    colorSwatch(SIMD3<Float>(0.16, 0.18, 0.22), label: L("Anthracite", "Anthracite"))
+                    colorSwatch(SIMD3<Float>(0.45, 0.47, 0.50), label: L("Gris neutre", "Neutral grey"))
+                    colorSwatch(SIMD3<Float>(0.12, 0.22, 0.34), label: L("Bleu nuit", "Night blue"))
+                    colorSwatch(SIMD3<Float>(0.92, 0.90, 0.86), label: L("Crème", "Cream"))
+                    colorSwatch(SIMD3<Float>(1.00, 1.00, 1.00), label: L("Blanc pur", "Pure white"))
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 318)
+        .background(Theme.panel.swiftUI)
+        .preferredColorScheme(.dark)
+    }
+
+    // MARK: Sun Controls
+
+    private var sunControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(L("Azimut solaire", "Sun azimuth"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                Spacer()
+                Text("\(Int(model.sunAzimuthDegrees.rounded()))°")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.text.swiftUI)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(model.sunAzimuthDegrees) },
+                    set: { model.setSun(azimuth: Float($0), elevation: model.sunElevationDegrees) }
+                ),
+                in: -180...180
+            )
+            .tint(Theme.accent.swiftUI)
+
+            HStack {
+                Text(L("Hauteur solaire", "Sun elevation"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                Spacer()
+                Text("\(Int(model.sunElevationDegrees.rounded()))°")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.text.swiftUI)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(model.sunElevationDegrees) },
+                    set: { model.setSun(azimuth: model.sunAzimuthDegrees, elevation: Float($0)) }
+                ),
+                in: 8...85
+            )
+            .tint(Theme.accent.swiftUI)
+
+            Toggle(isOn: Binding(
+                get: { model.shadowsEnabled },
+                set: { _ in model.toggleShadows() }
+            )) {
+                Text(L("Ombres portées du soleil (⌥⌘O)", "Cast sun shadows (⌥⌘O)"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.text.swiftUI)
+            }
+            .toggleStyle(.checkbox)
+        }
+    }
+
+    // MARK: Point Light Controls
+
+    private var pointLightControls: some View {
+        let range = model.pointLightCoordinateRange
+        let span = max(Float(range.upperBound - range.lowerBound), 1.0)
+        let step = max(0.05, Double((span / 100.0).rounded(.toNearestOrAwayFromZero)))
+
+        return VStack(alignment: .leading, spacing: 8) {
+            if let detectedCount = model.scene?.detectedSceneLights.count, detectedCount > 0 {
+                HStack(spacing: 5) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.accent.swiftUI)
+                    Text(L(
+                        "\(detectedCount) lumière(s) détectée(s) dans la scène",
+                        "\(detectedCount) light(s) detected in scene"
+                    ))
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                }
+            }
+
+            if model.pointLights.count > 1 {
+                HStack(spacing: 6) {
+                    Picker("", selection: Binding(
+                        get: { model.selectedPointLightIndex },
+                        set: { model.selectedPointLightIndex = $0 }
+                    )) {
+                        ForEach(Array(model.pointLights.enumerated()), id: \.offset) { index, light in
+                            Text(light.isFromScene ? "★ \(light.name)" : light.name).tag(index)
+                        }
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+
+                    Button {
+                        model.removeSelectedPointLight()
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L("Supprimer cette lumière", "Delete this light"))
+                }
+            }
+
+            if let light = model.selectedPointLight {
+                coordinateRow(
+                    axis: "X",
+                    color: NSColor(srgbRed: 0.92, green: 0.28, blue: 0.26, alpha: 1.0),
+                    value: light.position.x,
+                    range: range,
+                    step: Float(step)
+                ) { newX in
+                    model.updateSelectedPointLight(position: SIMD3<Float>(newX, light.position.y, light.position.z))
+                }
+                coordinateRow(
+                    axis: "Y",
+                    color: NSColor(srgbRed: 0.25, green: 0.78, blue: 0.36, alpha: 1.0),
+                    value: light.position.y,
+                    range: range,
+                    step: Float(step)
+                ) { newY in
+                    model.updateSelectedPointLight(position: SIMD3<Float>(light.position.x, newY, light.position.z))
+                }
+                coordinateRow(
+                    axis: "Z",
+                    color: NSColor(srgbRed: 0.24, green: 0.54, blue: 0.96, alpha: 1.0),
+                    value: light.position.z,
+                    range: range,
+                    step: Float(step)
+                ) { newZ in
+                    model.updateSelectedPointLight(position: SIMD3<Float>(light.position.x, light.position.y, newZ))
+                }
+
+                HStack(spacing: 6) {
+                    ToolbarPillButton(
+                        title: L("Au milieu de la géométrie", "Center of geometry"),
+                        symbol: "scope",
+                        active: false
+                    ) {
+                        model.centerSelectedPointLight()
+                    }
+                    ToolbarPillButton(
+                        title: L("À la caméra", "At camera"),
+                        symbol: "video",
+                        active: false
+                    ) {
+                        model.moveSelectedPointLightToCamera()
+                    }
+                }
+
+                HStack {
+                    Text(L("Intensité", "Intensity"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim.swiftUI)
+                    Spacer()
+                    Text("\(Int((light.intensity * 100).rounded())) %")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(light.intensity) },
+                        set: { model.updateSelectedPointLight(intensity: Float($0)) }
+                    ),
+                    in: 0.1...3.0
+                )
+                .tint(Theme.accent.swiftUI)
+
+                Toggle(isOn: Binding(
+                    get: { model.showsPointLightGizmo },
+                    set: { _ in model.togglePointLightGizmo() }
+                )) {
+                    Text(L("Afficher le repère 3D de la lumière", "Show 3D light gizmo"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                .toggleStyle(.checkbox)
+            }
+        }
+    }
+
+    private func coordinateRow(
+        axis: String,
+        color: NSColor,
+        value: Float,
+        range: ClosedRange<Double>,
+        step: Float,
+        onChange: @escaping (Float) -> Void
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(axis)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color(nsColor: color))
+                .frame(width: 14, alignment: .leading)
+
+            Slider(
+                value: Binding(
+                    get: { Double(value) },
+                    set: { onChange(Float($0)) }
+                ),
+                in: range
+            )
+            .controlSize(.small)
+            .tint(Color(nsColor: color))
+
+            Text(String(format: "%+.2f m", value))
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Theme.text.swiftUI)
+                .frame(width: 58, alignment: .trailing)
+
+            HStack(spacing: 2) {
+                Button {
+                    onChange(value - step)
+                } label: {
+                    Image(systemName: "minus")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 16, height: 16)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                Button {
+                    onChange(value + step)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 16, height: 16)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+            }
+            .foregroundStyle(Theme.textDim.swiftUI)
+        }
+    }
+
+    private var customColorBinding: Binding<Color> {
+        Binding(
+            get: {
+                Color(
+                    .sRGB,
+                    red: Double(model.customBackdropColor.x),
+                    green: Double(model.customBackdropColor.y),
+                    blue: Double(model.customBackdropColor.z),
+                    opacity: 1.0
+                )
+            },
+            set: { newColor in
+                if let cg = NSColor(newColor).usingColorSpace(.sRGB) {
+                    model.setCustomBackdropColor(SIMD3<Float>(
+                        Float(cg.redComponent),
+                        Float(cg.greenComponent),
+                        Float(cg.blueComponent)
+                    ))
+                }
+            }
+        )
+    }
+
+    private func colorSwatch(_ rgb: SIMD3<Float>, label: String) -> some View {
+        let isSelected = model.backdropStyle == .customColor &&
+            abs(model.customBackdropColor.x - rgb.x) < 0.02 &&
+            abs(model.customBackdropColor.y - rgb.y) < 0.02 &&
+            abs(model.customBackdropColor.z - rgb.z) < 0.02
+        return Button {
+            model.setCustomBackdropColor(rgb)
+        } label: {
+            Circle()
+                .fill(Color(.sRGB, red: Double(rgb.x), green: Double(rgb.y), blue: Double(rgb.z), opacity: 1.0))
+                .frame(width: 15, height: 15)
+                .overlay(
+                    Circle()
+                        .strokeBorder(isSelected ? Theme.accent.swiftUI : Color.white.opacity(0.25), lineWidth: isSelected ? 2 : 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(label)
+    }
+
+    private func backdropChoice(_ style: BackdropStyle, title: String, symbol: String) -> some View {
+        ToolbarPillButton(
+            title: title,
+            symbol: symbol,
+            active: model.backdropStyle == style
+        ) {
+            model.setBackdropStyle(style)
+        }
+    }
+}
+
+// MARK: - Viewport HUD Overlay
+
+private struct ViewportHUDOverlay: View {
+    let model: DocumentModel
+
+    var body: some View {
+        VStack {
+            // Top banners (Free-fly / Flash feedback)
+            HStack {
+                Spacer()
+                if model.isFreeFlying {
+                    HStack(spacing: 10) {
+                        Image(systemName: "airplane")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.accent.swiftUI)
+                        Text(L("Mode vol libre — Souris pour regarder · ZQSD / Flèches pour avancer · Échap pour sortir",
+                               "Free fly mode — Mouse to look · WASD / Arrows to move · Esc to exit"))
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(Theme.text.swiftUI)
+                        TextButton(title: L("Quitter (Échap)", "Exit (Esc)"), compact: true) {
+                            model.toggleFreeFlight()
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Theme.panel.swiftUI.opacity(0.92))
+                            .overlay(Capsule().strokeBorder(Theme.accent.swiftUI.opacity(0.45), lineWidth: 1))
+                    )
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+                } else if let flash = model.flashMessage {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.alive.swiftUI)
+                        Text(flash)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Theme.panel.swiftUI.opacity(0.92))
+                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                    )
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+                }
+                Spacer()
+            }
+            .padding(.top, 10)
+
+            Spacer()
+
+            // Bottom-right orientation gizmo & quick camera pill
+            HStack(alignment: .bottom) {
+                Spacer()
+                HStack(alignment: .center, spacing: 8) {
+                    Button {
+                        model.resetView()
+                    } label: {
+                        AxisGizmoView(yaw: model.cameraYaw, pitch: model.cameraPitch)
+                            .frame(width: 44, height: 44)
+                            .background(
+                                Circle()
+                                    .fill(Theme.panel.swiftUI.opacity(0.84))
+                                    .overlay(Circle().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(L("Repère 3D (X rouge, Y vert, Z bleu) — Cliquer pour réinitialiser la vue (Z)",
+                            "3D axes gizmo (X red, Y green, Z blue) — Click to reset view (Z)"))
+
+                    HStack(spacing: 2) {
+                        IconButton(
+                            symbol: "minus.magnifyingglass",
+                            tooltip: L("Dézoomer", "Zoom out")
+                        ) {
+                            model.zoomOut()
+                        }
+                        IconButton(
+                            symbol: "plus.magnifyingglass",
+                            tooltip: L("Zoomer", "Zoom in")
+                        ) {
+                            model.zoomIn()
+                        }
+                        Rectangle()
+                            .fill(Theme.separator.swiftUI)
+                            .frame(width: 1, height: 14)
+                            .padding(.horizontal, 2)
+                        ToolbarPillButton(
+                            title: "Z",
+                            tooltip: L("Réinitialiser la vue (Z)", "Reset view (Z)")
+                        ) {
+                            model.resetView()
+                        }
+                        ToolbarPillButton(
+                            title: "⇧Z",
+                            tooltip: L("Zoom étendu (⇧Z)", "Zoom extents (⇧Z)")
+                        ) {
+                            model.zoomExtents()
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(Theme.panel.swiftUI.opacity(0.86))
+                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+                    )
+                }
+                .shadow(color: .black.opacity(0.28), radius: 6, y: 2)
+            }
+            .padding(12)
+        }
+    }
+}
+
+/// Projects the SketchUp world axes (X red, Y green, Z blue) into the current camera basis.
+private struct AxisGizmoView: View {
+    let yaw: Float
+    let pitch: Float
+
+    var body: some View {
+        Canvas { ctx, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius = min(size.width, size.height) * 0.36
+
+            let cy = cos(yaw), sy = sin(yaw)
+            let cp = cos(pitch), sp = sin(pitch)
+            // Camera basis in SketchUp Z-up world coordinates (matching CameraRig.Pose)
+            let forward = SIMD3<Float>(-sy * cp, cy * cp, sp)
+            let right = SIMD3<Float>(cy, sy, 0)
+            let up = simd_cross(right, forward)
+
+            let axes: [(SIMD3<Float>, Color, String)] = [
+                (SIMD3<Float>(1, 0, 0), Color(red: 0.95, green: 0.32, blue: 0.32), "X"),
+                (SIMD3<Float>(0, 1, 0), Color(red: 0.28, green: 0.84, blue: 0.48), "Y"),
+                (SIMD3<Float>(0, 0, 1), Color(red: 0.35, green: 0.68, blue: 0.98), "Z"),
+            ]
+
+            // Draw back-to-front by depth along forward
+            let sorted = axes.sorted { simd_dot($0.0, forward) > simd_dot($1.0, forward) }
+            for (dir, color, _) in sorted {
+                let sx = CGFloat(simd_dot(dir, right)) * radius
+                let syScreen = -CGFloat(simd_dot(dir, up)) * radius
+                let end = CGPoint(x: center.x + sx, y: center.y + syScreen)
+
+                var line = Path()
+                line.move(to: center)
+                line.addLine(to: end)
+                ctx.stroke(line, with: .color(color), style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
+
+                let dotRect = CGRect(x: end.x - 2.6, y: end.y - 2.6, width: 5.2, height: 5.2)
+                ctx.fill(Path(ellipseIn: dotRect), with: .color(color))
+            }
+
+            let originRect = CGRect(x: center.x - 2, y: center.y - 2, width: 4, height: 4)
+            ctx.fill(Path(ellipseIn: originRect), with: .color(Color.white.opacity(0.85)))
+        }
+    }
 }
 
 private struct FailureBanner: View {
@@ -85,35 +981,120 @@ private struct FailureBanner: View {
     }
 }
 
+// MARK: - Sidebar
+
 struct SidebarView: View {
-    let model: DocumentModel
+    @Bindable var model: DocumentModel
 
     var body: some View {
         ScrollView {
             // Not lazy: in a LazyVStack the first layer row was laid out but not drawn (seen in --snapshot).
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 if let skp = model.skp {
                     if !skp.scenes.isEmpty {
-                        SectionHeader(L("Scènes", "Scenes")) { Chip(text: "\(skp.scenes.count)") }
+                        SectionHeader(L("Scènes", "Scenes")) {
+                            HStack(spacing: 4) {
+                                Chip(text: "\(skp.scenes.count)")
+                                if skp.scenes.count > 1 {
+                                    Button { model.previousScene() } label: {
+                                        Image(systemName: "chevron.left")
+                                            .font(.system(size: 9.5, weight: .bold))
+                                            .foregroundStyle(Theme.textDim.swiftUI)
+                                            .frame(width: 16, height: 16)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(L("Scène précédente (⌘[)", "Previous scene (⌘[)"))
+                                    Button { model.nextScene() } label: {
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 9.5, weight: .bold))
+                                            .foregroundStyle(Theme.textDim.swiftUI)
+                                            .frame(width: 16, height: 16)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(L("Scène suivante (⌘])", "Next scene (⌘])"))
+                                }
+                            }
+                        }
                         ForEach(skp.scenes.indices, id: \.self) { index in
-                            sceneRow(skp.scenes[index].name, index: index)
+                            sceneRow(skp.scenes[index].name, hasCamera: skp.scenes[index].camera != nil, index: index)
                         }
-                        Spacer().frame(height: 12)
+                        Spacer().frame(height: 10)
                     }
-                    SectionHeader(L("Calques", "Layers")) { Chip(text: "\(skp.layers.count)") }
-                    ForEach(skp.layers.indices, id: \.self) { index in
-                        Toggle(isOn: Binding(
-                            get: { model.layerVisible.indices.contains(index) && model.layerVisible[index] },
-                            set: { _ in model.toggleLayer(index) }
-                        )) {
-                            Text(skp.layers[index].name)
-                                .font(.system(size: 12))
+
+                    SectionHeader(L("Calques", "Layers")) {
+                        HStack(spacing: 5) {
+                            if skp.layers.count > 1 {
+                                Button {
+                                    model.setAllLayers(visible: true)
+                                } label: {
+                                    Text(L("Tout", "All"))
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(Theme.accent.swiftUI)
+                                }
+                                .buttonStyle(.plain)
+                                .help(L("Afficher tous les calques", "Show all layers"))
+
+                                Text("·")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Theme.textFaint.swiftUI)
+
+                                Button {
+                                    model.setAllLayers(visible: false)
+                                } label: {
+                                    Text(L("Aucun", "None"))
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(Theme.textDim.swiftUI)
+                                }
+                                .buttonStyle(.plain)
+                                .help(L("Masquer tous les calques", "Hide all layers"))
+                            }
+                            Chip(text: "\(model.visibleLayerCount)/\(skp.layers.count)")
+                        }
+                    }
+
+                    if skp.layers.count > 4 {
+                        HStack(spacing: 6) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(Theme.textFaint.swiftUI)
+                            TextField(L("Filtrer les calques…", "Filter layers…"), text: $model.layerFilter)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11.5))
                                 .foregroundStyle(Theme.text.swiftUI)
-                                .lineLimit(1)
+                            if !model.layerFilter.isEmpty {
+                                Button {
+                                    model.layerFilter = ""
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(Theme.textDim.swiftUI)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
-                        .toggleStyle(.checkbox)
-                        .padding(.vertical, 1.5)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4.5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(Color.white.opacity(0.05))
+                                .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.white.opacity(0.07)))
+                        )
+                        .padding(.bottom, 4)
                     }
+
+                    let indices = filteredLayerIndices(skp)
+                    ForEach(indices, id: \.self) { index in
+                        LayerRow(
+                            name: skp.layers[index].name,
+                            isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
+                            canSolo: skp.layers.count > 1,
+                            onToggle: { model.toggleLayer(index) },
+                            onSolo: { model.soloLayer(index) }
+                        )
+                    }
+
+                    Spacer().frame(height: 12)
+                    ModelInspectorSection(skp: skp, visibleSize: model.visibleSize)
                 }
             }
             .padding(10)
@@ -121,22 +1102,139 @@ struct SidebarView: View {
         .background(Theme.panel.swiftUI)
     }
 
-    private func sceneRow(_ name: String, index: Int) -> some View {
+    private func filteredLayerIndices(_ skp: SKPModel) -> [Int] {
+        let query = model.layerFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return Array(skp.layers.indices) }
+        return skp.layers.indices.filter { skp.layers[$0].name.localizedCaseInsensitiveContains(query) }
+    }
+
+    private func sceneRow(_ name: String, hasCamera: Bool, index: Int) -> some View {
         let selected = model.selectedScene == index
         return Button { model.selectScene(index) } label: {
-            Text(name)
-                .font(.system(size: 12, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? Theme.accent.swiftUI : Theme.text.swiftUI)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(RoundedRectangle(cornerRadius: 5).fill(selected ? Theme.accent.swiftUI.opacity(0.12) : .clear))
-                .contentShape(Rectangle())
+            HStack(spacing: 6) {
+                Image(systemName: hasCamera ? "video.fill" : "square.stack.3d.up")
+                    .font(.system(size: 10))
+                    .foregroundStyle(selected ? Theme.accent.swiftUI : Theme.textFaint.swiftUI)
+                Text(name)
+                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Theme.accent.swiftUI : Theme.text.swiftUI)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 5).fill(selected ? Theme.accent.swiftUI.opacity(0.14) : .clear))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 }
+
+private struct LayerRow: View {
+    let name: String
+    let isVisible: Bool
+    let canSolo: Bool
+    let onToggle: () -> Void
+    let onSolo: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Toggle(isOn: Binding(get: { isVisible }, set: { _ in onToggle() })) {
+                Text(name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI)
+                    .lineLimit(1)
+            }
+            .toggleStyle(.checkbox)
+
+            Spacer(minLength: 0)
+
+            if canSolo && hovering {
+                Button(action: onSolo) {
+                    Text("Solo")
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.accent.swiftUI)
+                        .padding(.horizontal, 4.5)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Theme.accent.swiftUI.opacity(0.15)))
+                }
+                .buttonStyle(.plain)
+                .help(L("Isoler ce calque (ou réafficher tous les calques)", "Solo this layer (or restore all layers)"))
+            }
+        }
+        .padding(.vertical, 1.5)
+        .padding(.horizontal, 2)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+}
+
+private struct ModelInspectorSection: View {
+    let skp: SKPModel
+    let visibleSize: SIMD3<Float>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionHeader(L("Modèle & Matériaux", "Model & Materials")) {
+                Chip(text: "\(skp.materials.count)")
+            }
+
+            let size = visibleSize ?? skp.size
+            VStack(alignment: .leading, spacing: 4) {
+                statRow(L("Dimensions", "Dimensions"), "\(Format.decimal(size.x)) × \(Format.decimal(size.y)) × \(Format.decimal(size.z)) m")
+                statRow(L("Faces", "Faces"), Format.integer(skp.stats.faces))
+                statRow(L("Arêtes", "Edges"), Format.integer(skp.stats.edges))
+                statRow(L("Composants", "Components"), Format.integer(skp.stats.instances))
+                let textureCount = skp.materials.filter { $0.textureURL != nil }.count
+                if textureCount > 0 {
+                    statRow(L("Textures", "Textures"), Format.integer(textureCount))
+                }
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.03)))
+
+            if !skp.materials.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(Array(skp.materials.prefix(16).enumerated()), id: \.offset) { _, mat in
+                            RoundedRectangle(cornerRadius: 3.5)
+                                .fill(Color(
+                                    red: Double(mat.color.x),
+                                    green: Double(mat.color.y),
+                                    blue: Double(mat.color.z),
+                                    opacity: max(0.35, Double(mat.opacity))
+                                ))
+                                .frame(width: 16, height: 16)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 3.5)
+                                        .strokeBorder(mat.textureURL != nil ? Theme.accent.swiftUI.opacity(0.8) : Color.white.opacity(0.18), lineWidth: 1)
+                                )
+                                .help(mat.name.isEmpty ? L("Matériau", "Material") : mat.name)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+    }
+
+    private func statRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.textDim.swiftUI)
+            Spacer()
+            Text(value)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Theme.text.swiftUI)
+                .lineLimit(1)
+        }
+    }
+}
+
+// MARK: - StatusBar
 
 struct StatusBar: View {
     let model: DocumentModel

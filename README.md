@@ -1,16 +1,23 @@
 # SimpleSKP
 
-Visualiseur **SketchUp** natif, léger (13 Mo dont 11 pour le SDK SketchUp, zéro dépendance) : double-cliquez un `.skp` et voyez-le en 3D en moins d'une seconde, dans la lignée de **SimpleAudio**, **SimplePJ** et **SimpleText** (**cie Adrien M**). Le fichier est lu par le framework du SDK SketchUp (`SketchUpAPI.framework`, livré dans l'app et chargé à la demande) et affiché avec SceneKit : **SketchUp n'a pas besoin d'être installé** : un visualiseur, pas un éditeur, rien n'est modifié ni enregistré.
+Visualiseur **SketchUp** natif, léger (13 Mo dont 11 pour le SDK SketchUp, zéro dépendance) : double-cliquer un `.skp` pour le visualiser en 3D en moins d'une seconde, dans la lignée de **SimpleAudio**, **SimplePJ**, **SimpleVectorizer** et **SimpleText** (**cie Adrien M** — [adrien-m.net/software](https://adrien-m.net/software)). Le fichier est lu par le framework du SDK SketchUp (`SketchUpAPI.framework`, livré dans l'app et chargé à la demande) et affiché avec SceneKit / Metal : **SketchUp n'a pas besoin d'être installé**. Un visualiseur strict, pas un éditeur : aucun fichier `.skp` n'est jamais modifié ni enregistré.
 
 ## Fonctionnalités
 
+- **Barre d'outils complète (`TopBar`)** : toutes les actions, vues standard, projections, styles de rendu, réglages d'éclairage, scènes et captures sont directement accessibles à la souris avec infobulles détaillées.
 - **3D instantanée après la vignette** : la vignette du fichier s'affiche tout de suite, le modèle se charge en arrière-plan et apparaît en fondu.
-- **Scènes** : la caméra glisse vers la scène choisie (⌘[ et ⌘] pour passer de l'une à l'autre), ses calques masqués s'appliquent.
-- **Calques** : liste avec cases, visibilité immédiate.
+- **Rendu architectural doux** :
+  - **4 styles de rendu en direct** : **PBR** (texturé réaliste doux), **Blanc** (maquette architecturale en plâtre mat), **Rayons X** (faces semi-transparentes) et **Filaire**.
+  - **Éclairage Soleil ou Ponctuel (`⌥⌘L`)** : bascule entre soleil directionnel orientable (azimut `-180°…180°`, hauteur `8°…85°`, ombres douces `⌥⌘O`) et éclairage ponctuel omnidirectionnel basé sur les lumières détectées dans la scène `.skp` ou sur une lumière créée par défaut au milieu de la géométrie (coordonnées X, Y, Z et intensité réglables).
+  - **Importance de l'occlusion ambiante SSAO** réglable de `0 %` à `200 %` (`⌥⌘A`).
+  - **Fond de scène personnalisable** : Ciel architectural, Studio sombre, Papier chaud ou **Couleur personnalisée** (`ColorPicker` + pastilles rapides).
+  - **Grille au sol et axes XYZ** (`⌥⌘G`) + repère d'orientation 3D interactif en bas à droite de la vue.
+- **Scènes** : la caméra glisse vers la scène choisie (`⌘[` et `⌘]` ou sélecteur de la barre d'outils), ses calques masqués s'appliquent.
+- **Calques & Inspecteur** : recherche/filtrage instantané des calques par nom, boutons **Tout / Aucun**, bouton **Solo** au survol d'un calque, et résumé **Modèle & Matériaux** (dimensions, statistiques, nuancier des matériaux).
 - **Dimensions en mètres** dans la barre d'état, avec version SketchUp du fichier, faces, arêtes et composants.
-- **Vues standard** : iso, dessus, face, droite, arrière, gauche, dessous (⌘1…⌘7).
-- **Perspective / parallèle** (⌥⌘P) et **arêtes** affichables ou masquées (⌘E).
-- **Copie d'image** de la vue (⌘C) et **ouverture dans SketchUp** (⇧⌘O).
+- **Vues standard** : Iso, Dessus, Face, Droite, Arrière, Gauche, Dessous (`⌘1…⌘7`), **Réinitialiser la vue** (`Z`) et **Zoom étendu** (`⇧Z`).
+- **Perspective / parallèle** (`⌥⌘P`) et **arêtes** affichables ou masquées (`⌘E`).
+- **Copie d'image** (`⌘C`), **export PNG** (`⇧⌘E`) et **ouverture dans SketchUp** (`⇧⌘O`).
 - Glisser-déposer d'un `.skp` sur la fenêtre ou l'icône, plusieurs fichiers ouverts, Ouvrir récent, restauration des fenêtres.
 
 ## Manipulation
@@ -23,6 +30,8 @@ Quatre façons coexistent ; un clic ou une touche arrête tout mouvement en cour
 | ⇧-glisser ou bouton du milieu | Panoramique |
 | Molette | Zoom vers le curseur |
 | Double-clic | Recentrer et approcher le point |
+| `Z` | Réinitialiser la caméra à la vue initiale |
+| `⇧Z` | Zoom étendu sur l'ensemble des objets visibles |
 | Clic droit tenu | Regarder autour (éditeur de jeu) |
 | ZQSD (WASD en QWERTY) ou flèches | Avancer, reculer, pas de côté (touches physiques) |
 | Espace ou E / C | Monter / descendre |
@@ -33,7 +42,6 @@ Quatre façons coexistent ; un clic ou une touche arrête tout mouvement en cour
 | Pincer | Zoom vers le curseur |
 | Rotation à deux doigts | Tourner autour de la verticale |
 | ⌥⌘F | Vol libre : la souris oriente sans clic, le clavier déplace, Échap pour sortir |
-| ⇧Z | Zoom étendu |
 
 ## Raccourcis
 
@@ -42,18 +50,23 @@ Quatre façons coexistent ; un clic ou une touche arrête tout mouvement en cour
 | ⌘O | Ouvrir… |
 | ⌘W | Fermer |
 | ⇧⌘O | Ouvrir dans SketchUp |
-| ⌘C | Copier l'image |
+| ⌘C | Copier l'image dans le presse-papiers |
+| ⇧⌘E | Exporter l'image en PNG… |
 | ⌥⌘S | Afficher / masquer la barre latérale |
 | ⌘E | Arêtes |
+| ⌥⌘G | Grille au sol et axes XYZ |
 | ⌥⌘P | Perspective / parallèle |
-| ⌥⌘O | Ombres |
-| ⌥⌘A | Occlusion ambiante |
+| ⌥⌘O | Ombres portées |
+| ⌥⌘L | Éclairage Soleil / Ponctuel |
+| ⌥⌘A | Occlusion ambiante SSAO |
+| Z | Réinitialiser la vue initiale |
 | ⇧Z | Zoom étendu |
 | ⌥⌘F | Mode vol libre (Échap pour sortir) |
 | ⌘[ / ⌘] | Scène précédente / suivante |
 | ⌘1 … ⌘7 | Iso, dessus, face, droite, arrière, gauche, dessous |
-| ⌘? | Aide |
-| ⌘/ | Raccourcis |
+| ⌘, | Réglages |
+| ⌘? | Guide d'utilisation |
+| ⌘/ | Raccourcis clavier |
 
 ## Prérequis
 
@@ -100,6 +113,6 @@ Mesuré le 25 octobre 2026 sur Apple Silicon, build release, cache disque chaud 
 
 ## Crédits & Licence
 
-**Adrien Mondot · cie Adrien M** (Compagnie Adrien M) — Bundle ID : `net.cieadrienm.simpleskp`.
+**Adrien Mondot · cie Adrien M** (Compagnie Adrien M — [adrien-m.net](https://adrien-m.net)) — Bundle ID : `net.cieadrienm.simpleskp`.
 SketchUp est une marque de Trimble Inc. ; SimpleSKP n'en est ni affilié ni approuvé.
 Le framework du SDK C de SketchUp (Trimble) est embarqué dans l'app sous la licence du SDK SketchUp ; le code de SimpleSKP est GPL v3 (voir [`LICENSE`](LICENSE)).

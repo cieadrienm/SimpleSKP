@@ -18,6 +18,10 @@ public final class ViewportView: SCNView {
     public static var twoFingerScrollZooms = false
     /// Called when free fly starts or ends, whatever ended it (Esc, the menu, lost focus).
     public var onFreeFlyingChange: ((Bool) -> Void)?
+    /// Called whenever the camera pose changes (orbit, pan, zoom, glide), with `(yaw, pitch, speed)` for HUD indicators.
+    public var onPoseChange: ((Float, Float, Float) -> Void)?
+    /// Optional override for `resetView(animated:)` so the document model can restore the active scene's camera.
+    public var onResetView: ((Bool) -> Void)?
 
     private enum Drag { case orbit, pan, look }
     private var drag: Drag?
@@ -52,7 +56,10 @@ public final class ViewportView: SCNView {
         camera.fieldOfView = 35 // SketchUp's default
         cameraNode.camera = camera
         cameraNode.name = "camera"
-        rig.onChange = { [unowned self] in setNeedsDisplay(bounds) }
+        rig.onChange = { [unowned self] in
+            setNeedsDisplay(bounds)
+            onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
+        }
         // Free fly reads mouseMoved; .inVisibleRect follows resizes by itself.
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
@@ -64,7 +71,19 @@ public final class ViewportView: SCNView {
     var target: SIMD3<Float> { modelToWorld(rig.pose.target) }
 
     public var ambientOcclusionEnabled = false {
-        didSet { Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera) }
+        didSet { Rendering.setAmbientOcclusion(ambientOcclusionEnabled, intensity: ambientOcclusionIntensity, on: camera) }
+    }
+
+    public var ambientOcclusionIntensity: CGFloat = Rendering.defaultAmbientOcclusionIntensity {
+        didSet {
+            Rendering.setAmbientOcclusion(ambientOcclusionEnabled, intensity: ambientOcclusionIntensity, on: camera)
+            setNeedsDisplay(bounds)
+        }
+    }
+
+    /// Current camera position in SketchUp model coordinates (metres, Z up).
+    public var cameraModelPosition: SIMD3<Float> {
+        rig.pose.position
     }
 
     /// Main thread: shows the scene, applies the file's camera if any, otherwise zooms to extents.
@@ -87,6 +106,22 @@ public final class ViewportView: SCNView {
 
     public func zoomExtents(animated: Bool) {
         frame(rig.pose, animated: animated)
+    }
+
+    /// Resets the view (`Z`): restores the model's initial camera, or frames `.iso`.
+    public func resetView(animated: Bool) {
+        if let camera = viewportScene?.model.camera {
+            apply(camera: camera, animated: animated)
+        } else {
+            look(.iso, animated: animated)
+        }
+        onResetView?(isPerspective)
+    }
+
+    /// Zooms in (`ratio < 1`) or out (`ratio > 1`) around the centre of the viewport.
+    public func zoomStep(ratio: Float) {
+        rig.stop()
+        zoom(ratio: ratio, at: CGPoint(x: bounds.midX, y: bounds.midY), newGesture: true)
     }
 
     /// Frames the whole model from a standard direction.
@@ -131,7 +166,7 @@ public final class ViewportView: SCNView {
                 camera.orthographicScale = Double(rig.pose.distance * tanHalf)
             }
             camera.usesOrthographicProjection = !isPerspective
-            Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera)
+            Rendering.setAmbientOcclusion(ambientOcclusionEnabled, intensity: ambientOcclusionIntensity, on: camera)
             setNeedsDisplay(bounds)
         }
     }
@@ -262,15 +297,19 @@ public final class ViewportView: SCNView {
         rig.stop()
         if event.keyCode == 53, isFreeFlying { isFreeFlying = false; return } // Esc
         if press(event) { return }
-        if event.charactersIgnoringModifiers?.lowercased() == "z", event.modifierFlags.contains(.shift),
+        if event.charactersIgnoringModifiers?.lowercased() == "z",
            event.modifierFlags.isDisjoint(with: [.command, .option, .control]) {
-            zoomExtents(animated: true)
+            if event.modifierFlags.contains(.shift) {
+                zoomExtents(animated: true)
+            } else {
+                resetView(animated: true)
+            }
         } else {
             super.keyDown(with: event)
         }
     }
 
-    /// A menu must not take ⇧Z from the movement keys while looking around (AZERTY: ⇧ + physical W types "Z").
+    /// A menu must not take Z or ⇧Z from the movement keys while looking around (AZERTY: physical W types "z"/"Z").
     public override func performKeyEquivalent(with event: NSEvent) -> Bool {
         window?.firstResponder === self && press(event) ? true : super.performKeyEquivalent(with: event)
     }
@@ -285,14 +324,14 @@ public final class ViewportView: SCNView {
         super.flagsChanged(with: event)
     }
 
-    /// Movement key by physical position. ⇧Z stays « zoom étendu » unless looking around or flying, where ⇧ means fast.
+    /// Movement key by physical position. Z resets the view and ⇧Z stays « zoom étendu » unless looking around or flying, where Z moves and ⇧ means fast.
     private func press(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown, CameraRig.moveKeys.contains(event.keyCode),
               event.modifierFlags.isDisjoint(with: [.command, .option, .control]) else { return false }
         let shift = event.modifierFlags.contains(.shift)
         // A held key: ⇧ pressed meanwhile means fast, never ⇧Z (AZERTY: holding Z then ⇧).
         if rig.keys.contains(event.keyCode) || event.isARepeat { rig.fast = shift; return true }
-        if shift, event.charactersIgnoringModifiers?.lowercased() == "z", drag != .look, !isFreeFlying { return false }
+        if event.charactersIgnoringModifiers?.lowercased() == "z", drag != .look, !isFreeFlying { return false }
         rig.fast = shift
         rig.keys.insert(event.keyCode)
         return true

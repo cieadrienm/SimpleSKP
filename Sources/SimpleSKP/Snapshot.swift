@@ -31,23 +31,38 @@ enum Snapshot {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
             hosting.layoutSubtreeIfNeeded()
             model.present(scene, seconds: seconds)
+            let env = ProcessInfo.processInfo.environment
+            if env["SIMPLESKP_SNAPSHOT_LIGHTING"] == "point" {
+                model.setLightingMode(.point)
+            }
+            if let bg = env["SIMPLESKP_SNAPSHOT_BG"] {
+                let parts = bg.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                if parts.count == 3 {
+                    model.setCustomBackdropColor(SIMD3(parts[0], parts[1], parts[2]))
+                }
+            }
+            if let ssao = env["SIMPLESKP_SNAPSHOT_SSAO"].flatMap(Float.init) {
+                model.setAmbientOcclusionIntensity(ssao)
+            }
         }
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         hosting.layoutSubtreeIfNeeded()
         hosting.displayIfNeeded()
 
         let bounds = hosting.bounds
-        guard bounds.width > 1, let rep = hosting.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
-        hosting.cacheDisplay(in: bounds, to: rep)
-
         var frame = model.viewport.convert(model.viewport.bounds, to: hosting)   // top-left origin when flipped
         if !hosting.isFlipped { frame.origin.y = bounds.height - frame.maxY }
-        guard frame.width > 1, frame.height > 1 else { return nil }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        let drawRect = CGRect(x: frame.minX, y: bounds.height - frame.maxY, width: frame.width, height: frame.height)
-        model.viewport.snapshot().draw(in: drawRect)
-        NSGraphicsContext.restoreGraphicsState()
+        guard bounds.width > 1, frame.width > 1, frame.height > 1 else { return nil }
+
+        let viewportShot = model.viewport.snapshot()
+        model.snapshotPreviewImage = viewportShot
+        defer { model.snapshotPreviewImage = nil }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        hosting.layoutSubtreeIfNeeded()
+        hosting.displayIfNeeded()
+
+        guard let rep = hosting.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+        hosting.cacheDisplay(in: bounds, to: rep)
 
         let scale = CGFloat(rep.pixelsWide) / bounds.width
         let pixels = CGRect(x: frame.minX * scale, y: frame.minY * scale, width: frame.width * scale, height: frame.height * scale)
@@ -151,16 +166,27 @@ enum Snapshot {
         return label + item.keyEquivalent.uppercased()
     }
 
-    static func run(output: String, input: String?) -> Never {
+    static func run(output: String, input: String?, view: String? = nil) -> Never {
         let environment = ProcessInfo.processInfo.environment
         if let title = environment["SIMPLESKP_SNAPSHOT_MENU"] { listMenu(title, input: input) }
         let rep: NSBitmapImageRep?
         var viewportRect: CGRect?
-        switch environment["SIMPLESKP_SNAPSHOT_WINDOW"] {
+        switch view ?? environment["SIMPLESKP_SNAPSHOT_WINDOW"] {
         case "about": rep = render(AboutView(close: {}))
         case "shortcuts": rep = render(ShortcutsView(close: {}))
         case "help": rep = render(HelpView(close: {}))
         case "settings": rep = render(SettingsView())
+        case "lighting-sun":
+            let model = DocumentModel()
+            let scene = ViewportScene(model: SyntheticModel.cube())
+            model.present(scene, seconds: 0.1)
+            rep = render(LightingPopover(model: model))
+        case "lighting-point":
+            let model = DocumentModel()
+            let scene = ViewportScene(model: SyntheticModel.cube())
+            model.present(scene, seconds: 0.1)
+            model.setLightingMode(.point)
+            rep = render(LightingPopover(model: model))
         case nil, "", "document":
             let model = DocumentModel()
             do {

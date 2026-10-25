@@ -405,9 +405,10 @@ final class NavigationTests: XCTestCase {
         XCTAssertFalse(view.rig.isMoving, "the spin decays")
     }
 
-    /// AZERTY: holding Z then pressing ⇧ goes faster; it is not ⇧Z (zoom extents).
+    /// AZERTY: holding Z during free-fly or right-click look then pressing ⇧ goes faster; it is not ⇧Z (zoom extents).
     func testShiftWhileHoldingZIsFastNotZoomExtents() {
         let (view, _) = presented()
+        view.isFreeFlying = true
         view.keyDown(with: key(13, "z"))
         view.flagsChanged(with: flags(.shift, keyCode: 56))
         view.keyDown(with: key(13, "Z", flags: .shift, repeated: true))
@@ -417,10 +418,32 @@ final class NavigationTests: XCTestCase {
         XCTAssertFalse(view.rig.isMoving, "no zoom extents glide")
     }
 
+    /// Z resets the view to its initial framing; ⇧Z zooms extents.
+    func testZKeyResetsViewAndShiftZZoomsExtents() {
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view.present(ViewportScene(model: SyntheticModel.cube()))
+        let initialPosition = view.rig.pose.position
+        view.look(.top, animated: false)
+        XCTAssertGreaterThan(simd_distance(view.rig.pose.position, initialPosition), 0.1)
+
+        var didCallback = false
+        view.onResetView = { _ in didCallback = true }
+        view.keyDown(with: key(6, "z"))
+        view.rig.step(dt: 1)
+        XCTAssertTrue(didCallback)
+        XCTAssertEqual(simd_distance(view.rig.pose.position, initialPosition), 0, accuracy: 1e-4, "Z restores initial view")
+
+        view.look(.front, animated: false)
+        view.keyDown(with: key(6, "Z", flags: .shift))
+        XCTAssertTrue(view.rig.isMoving, "⇧Z starts zoom extents glide")
+        view.rig.step(dt: 1)
+        XCTAssertFalse(view.rig.isMoving)
+    }
+
     /// AppKit sends no keyUp for a key released while ⌘ is held: ⌘ lets go of the movement keys.
     func testCommandReleasesHeldKeys() {
         let (view, _) = presented()
-        view.keyDown(with: key(13, "z"))
+        view.keyDown(with: key(13, "w"))
         XCTAssertTrue(view.rig.isMoving)
         view.flagsChanged(with: flags(.command, keyCode: 55))
         XCTAssertTrue(view.rig.keys.isEmpty)

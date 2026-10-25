@@ -49,15 +49,16 @@ enum MainMenu {
     }
 
     /// AppKit inserts « Ouvrir l'élément récent » itself once the bundle declares document types (SimpleText D14).
-    /// A viewer saves nothing: no Save items.
+    /// A viewer never saves back to `.skp`, but exporting a PNG screenshot is available.
     private static func fileMenu() -> NSMenuItem {
         let menu = NSMenu(title: L("Fichier", "File"))
         menu.add(L("Ouvrir…", "Open…"), #selector(NSDocumentController.openDocument(_:)), key: "o")
         menu.addItem(.separator())
-        menu.add(L("Fermer", "Close"), #selector(NSWindow.performClose(_:)), key: "w")
-        menu.addItem(.separator())
+        menu.add(L("Exporter l'image PNG…", "Export PNG Image…"), #selector(SKPDocument.exportImage(_:)), key: "e", modifiers: [.command, .shift])
         menu.add(L("Ouvrir dans SketchUp", "Open in SketchUp"), #selector(SKPDocument.openInSketchUp(_:)), key: "o", modifiers: [.command, .shift])
         menu.add(L("Afficher dans le Finder", "Show in Finder"), #selector(SKPDocument.revealInFinder(_:)))
+        menu.addItem(.separator())
+        menu.add(L("Fermer", "Close"), #selector(NSWindow.performClose(_:)), key: "w")
         return menu.asItem()
     }
 
@@ -71,10 +72,23 @@ enum MainMenu {
         let menu = NSMenu(title: L("Présentation", "View"))
         menu.add(L("Barre latérale", "Sidebar"), #selector(SKPDocument.toggleSidebarPanel(_:)), key: "s", modifiers: [.command, .option])
         menu.add(L("Arêtes", "Edges"), #selector(SKPDocument.toggleEdges(_:)), key: "e")
+        menu.add(L("Grille et axes", "Grid and Axes"), #selector(SKPDocument.toggleGrid(_:)), key: "g", modifiers: [.command, .option])
         menu.add(L("Perspective / Parallèle", "Perspective / Parallel"), #selector(SKPDocument.togglePerspective(_:)), key: "p", modifiers: [.command, .option])
         menu.add(L("Ombres", "Shadows"), #selector(SKPDocument.toggleShadows(_:)), key: "o", modifiers: [.command, .option])
+        menu.add(L("Éclairage ponctuel", "Point Lighting"), #selector(SKPDocument.toggleLightingMode(_:)), key: "l", modifiers: [.command, .option])
         menu.add(L("Occlusion ambiante", "Ambient Occlusion"), #selector(SKPDocument.toggleAmbientOcclusion(_:)), key: "a", modifiers: [.command, .option])
         menu.addItem(.separator())
+        let styles: [(ShadingStyle, String)] = [
+            (.textured, L("Style : Texturé (PBR)", "Style: Textured (PBR)")),
+            (.clay, L("Style : Maquette blanche", "Style: White Clay")),
+            (.xray, L("Style : Rayons X", "Style: X-Ray")),
+            (.wireframe, L("Style : Filaire", "Style: Wireframe")),
+        ]
+        for (index, entry) in styles.enumerated() {
+            menu.add(entry.1, #selector(SKPDocument.selectShadingStyle(_:)), tag: index)
+        }
+        menu.addItem(.separator())
+        menu.add(L("Réinitialiser la vue", "Reset View"), #selector(SKPDocument.resetView(_:)), key: "z", modifiers: [])
         menu.add(L("Zoom étendu", "Zoom Extents"), #selector(SKPDocument.zoomExtents(_:)), key: "z", modifiers: [.shift])
         menu.add(L("Mode vol libre", "Free Fly Mode"), #selector(SKPDocument.toggleFreeFlight(_:)), key: "f", modifiers: [.command, .option])
         menu.addItem(.separator())

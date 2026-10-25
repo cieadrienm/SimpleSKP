@@ -3,7 +3,7 @@ import Foundation
 /// Version and build reported by SimpleSKP (status bar, About window, `--version`).
 /// Both are stamped into the bundle's `Info.plist` by `Scripts/bundle.sh`.
 struct AppVersion: Equatable, CustomStringConvertible, Sendable {
-    static let defaultVersion = "1.0.0"
+    static let defaultVersion = "1.1.0"
     static let bundleIdentifier = "net.cieadrienm.simpleskp"
 
     let version: String
@@ -30,8 +30,23 @@ struct AppVersion: Equatable, CustomStringConvertible, Sendable {
     var cliLine: String { "SimpleSKP \(description)" }
 
     static func runIfRequested(arguments: [String] = CommandLine.arguments) {
-        guard arguments.dropFirst().contains("--version") || arguments.dropFirst().contains("-v") else { return }
-        print(current.cliLine)
-        exit(0)
+        let flags = Set(arguments.dropFirst())
+        if flags.contains("--version") || flags.contains("-v") {
+            print(current.cliLine)
+            exit(0)
+        }
+        if flags.contains("--help") || flags.contains("-h") {
+            print("""
+            \(current.cliLine) — Visualiseur 3D de fichiers SketchUp (.skp)
+
+            Usage:
+              SimpleSKP [fichier.skp]
+              SimpleSKP --version
+              SimpleSKP --help
+              SimpleSKP --self-test [fichier.skp]
+              SimpleSKP --snapshot <sortie.png> [fichier.skp] [--view document|about|help|shortcuts|settings] [--lang fr|en]
+            """)
+            exit(0)
+        }
     }
 }

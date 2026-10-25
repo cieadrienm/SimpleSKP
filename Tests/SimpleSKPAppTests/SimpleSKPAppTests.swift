@@ -36,8 +36,12 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertFalse(file?.items.contains { $0.action == #selector(NSDocument.save(_:)) } ?? true, "a viewer has no Save")
         let view = try! XCTUnwrap(menu.items.first { $0.title == L("Présentation", "View") }?.submenu)
         func item(_ action: Selector) -> NSMenuItem? { view.items.first { $0.action == action } }
+        XCTAssertEqual(item(#selector(SKPDocument.resetView(_:)))?.keyEquivalent.lowercased(), "z")
+        XCTAssertEqual(item(#selector(SKPDocument.resetView(_:)))?.keyEquivalentModifierMask, [], "Z without modifiers resets view")
         XCTAssertEqual(item(#selector(SKPDocument.zoomExtents(_:)))?.keyEquivalent.lowercased(), "z")
         XCTAssertEqual(item(#selector(SKPDocument.zoomExtents(_:)))?.keyEquivalentModifierMask, [.shift], "⇧Z, no ⌘")
+        XCTAssertEqual(item(#selector(SKPDocument.toggleGrid(_:)))?.keyEquivalent, "g")
+        XCTAssertEqual(item(#selector(SKPDocument.toggleGrid(_:)))?.keyEquivalentModifierMask, [.command, .option])
         XCTAssertEqual(item(#selector(SKPDocument.toggleSidebarPanel(_:)))?.keyEquivalent, "s")
         XCTAssertEqual(item(#selector(SKPDocument.toggleSidebarPanel(_:)))?.keyEquivalentModifierMask, [.command, .option])
         XCTAssertEqual(item(#selector(SKPDocument.togglePerspective(_:)))?.keyEquivalent, "p")
@@ -80,6 +84,15 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertEqual(model.layerVisible, [true, true])
         XCTAssertTrue(model.statusText.contains(L("faces", "faces")), model.statusText)
         XCTAssertTrue(model.statusText.contains("SketchUp 2023"), model.statusText)
+
+        model.soloLayer(1)
+        XCTAssertEqual(model.layerVisible, [false, true], "solo isolates layer 1")
+        model.soloLayer(1)
+        XCTAssertEqual(model.layerVisible, [true, true], "solo again restores all layers")
+        model.setAllLayers(visible: false)
+        XCTAssertEqual(model.layerVisible, [false, false])
+        model.setAllLayers(visible: true)
+        XCTAssertEqual(model.layerVisible, [true, true])
     }
 
     /// A scene that does not save layer visibility (nil) leaves the layers as they are, like SketchUp.
