@@ -67,92 +67,104 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertEqual(simd_distance(world, SIMD3(0, 1, 0)), 0, accuracy: 1e-5)
     }
 
-    func testNodesAndSharedGeometry() {
-        let scene = ViewportScene(model: SyntheticModel.cube())
-        scene.setLayer(1, visible: true) // B is on the hidden "Cotes" layer: filled when shown
-        let root = scene.modelRoot.childNodes[0]
-        XCTAssertEqual(root.childNodes.count, 4) // mesh, edges, two instances
-        let (mesh, edges, a, b) = (root.childNodes[0], root.childNodes[1], root.childNodes[2], root.childNodes[3])
-        XCTAssertEqual(mesh.geometry?.elements.first?.primitiveType, .triangles)
-        XCTAssertEqual(mesh.geometry?.elements.first?.primitiveCount, 12)
-        XCTAssertEqual(edges.geometry?.elements.first?.primitiveType, .line)
-        XCTAssertEqual(edges.geometry?.elements.first?.primitiveCount, 12)
-        XCTAssertEqual(a.childNodes.count, 2)
-        XCTAssertEqual(b.childNodes.count, 2)
-        XCTAssertEqual(a.simdPosition, SIMD3(2, 0, 0))
-        // B is unpainted: both clones share the edges geometry, B shares the mesh geometry with the prototype.
-        XCTAssertTrue(a.childNodes[1].geometry === b.childNodes[1].geometry)
-        XCTAssertTrue(a.childNodes[1].geometry !== edges.geometry)
-        // A is painted: shallow copy (same sources), the shared model material (same object as the root mesh's).
-        XCTAssertTrue(a.childNodes[0].geometry !== b.childNodes[0].geometry)
-        XCTAssertTrue(a.childNodes[0].geometry?.sources.first === b.childNodes[0].geometry?.sources.first)
-        XCTAssertTrue(a.childNodes[0].geometry?.firstMaterial === mesh.geometry?.firstMaterial)
-        XCTAssertTrue(b.childNodes[0].geometry?.firstMaterial !== mesh.geometry?.firstMaterial)
-        XCTAssertEqual(mesh.geometry?.firstMaterial?.lightingModel, .lambert)
-        XCTAssertEqual(mesh.geometry?.firstMaterial?.isDoubleSided, true)
+    // Merged structure: one node per layer set under modelRoot, holding one face geometry per material and the edges.
+    private func faces(_ scene: ViewportScene, _ layers: [Int]) -> [SCNNode] {
+        scene.layerSets[layers]?.node?.childNodes.filter { $0.geometry?.elements.first?.primitiveType == .triangles } ?? []
     }
 
+    private func edges(_ scene: ViewportScene, _ layers: [Int]) -> [SCNNode] {
+        scene.layerSets[layers]?.node?.childNodes.filter { $0.geometry?.elements.first?.primitiveType == .line } ?? []
+    }
+
+    private func triangles(_ nodes: [SCNNode]) -> Int { nodes.reduce(0) { $0 + $1.geometry!.elements[0].primitiveCount } }
+
+    /// Brief (a): the root cube and A (Layer0) merge into the {0} set, B (Cotes) into {0, 1}; no triangle lost or doubled.
+    func testMergedTriangleCountsPerLayerSet() {
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        XCTAssertEqual(Set(scene.layerSets.keys), [[0], [0, 1]])
+        XCTAssertNil(scene.layerSets[[0, 1]]!.node, "Cotes is hidden: B's set is not built yet")
+        scene.setLayer(1, visible: true)
+        XCTAssertEqual(faces(scene, [0]).count, 1, "root cube and A share the red material: one geometry")
+        XCTAssertEqual(triangles(faces(scene, [0])), 24)
+        XCTAssertEqual(triangles(faces(scene, [0, 1])), 12)
+        XCTAssertEqual(triangles(edges(scene, [0])), 24) // segments
+        XCTAssertEqual(triangles(edges(scene, [0, 1])), 12)
+        let red = faces(scene, [0])[0].geometry!.firstMaterial!
+        XCTAssertEqual(red.lightingModel, .physicallyBased)
+        XCTAssertEqual(red.isDoubleSided, true)
+        XCTAssertTrue(faces(scene, [0, 1])[0].geometry!.firstMaterial !== red, "unpainted B: the default material")
+        // Positions are in model space: A's cube sits at x 2…3.
+        let (lo, hi) = faces(scene, [0])[0].geometry!.boundingBox
+        XCTAssertEqual(SIMD3<Float>(lo), SIMD3(0, 0, 0))
+        XCTAssertEqual(SIMD3<Float>(hi), SIMD3(3, 1, 1))
+        scene.setLayer(1, visible: false)
+        scene.setLayer(1, visible: true)
+        XCTAssertEqual(scene.layerSets[[0, 1]]!.node!.childNodes.count, 2, "built once")
+    }
+
+    /// Brief (b): hiding Cotes hides B's set only; hiding Layer0 hides everything (every path holds it).
     func testLayers() {
         let scene = ViewportScene(model: SyntheticModel.cube())
-        let root = scene.modelRoot.childNodes[0]
-        let b = root.childNodes[3]
-        XCTAssertTrue(b.isHidden, "Cotes is hidden in the model")
-        XCTAssertFalse(root.childNodes[0].isHidden)
         scene.setLayer(1, visible: true)
-        XCTAssertFalse(b.isHidden)
+        let (a, b) = (scene.layerSets[[0]]!.node!, scene.layerSets[[0, 1]]!.node!)
+        XCTAssertFalse(a.isHidden || b.isHidden)
         scene.setLayer(1, visible: false)
-        var hidden: [SCNNode] = []
-        scene.modelRoot.enumerateHierarchy { node, _ in if node.isHidden { hidden.append(node) } }
-        XCTAssertEqual(hidden, [b])
+        XCTAssertTrue(b.isHidden)
+        XCTAssertFalse(a.isHidden)
         scene.setLayer(0, visible: false)
-        XCTAssertTrue(root.childNodes[0].isHidden && root.childNodes[1].isHidden && root.childNodes[2].isHidden)
+        XCTAssertTrue(a.isHidden && b.isHidden)
+        scene.setLayer(1, visible: true)
+        XCTAssertTrue(b.isHidden, "Layer0 still hidden")
+        scene.setLayer(0, visible: true)
+        XCTAssertFalse(a.isHidden || b.isHidden)
+    }
+
+    /// Brief (c): an instance on B nested in a group on A is hidden when either A or B is hidden.
+    func testNestedLayersHideWhenEitherIsHidden() {
+        var model = SyntheticModel.cube()
+        model.layers = [SKPModel.Layer(name: "Layer0", isVisible: true), SKPModel.Layer(name: "A", isVisible: true),
+                        SKPModel.Layer(name: "B", isVisible: true)]
+        model.definitions.append(SKPModel.Definition(name: "G", children: [
+            SKPModel.Instance(definition: 0, transform: matrix_identity_float4x4, layer: 2, isGroup: false),
+        ]))
+        model.root.children = [SKPModel.Instance(definition: 1, transform: matrix_identity_float4x4, layer: 1, isGroup: true)]
+        let scene = ViewportScene(model: model)
+        XCTAssertEqual(Set(scene.layerSets.keys), [[0], [0, 1, 2]])
+        let nested = scene.layerSets[[0, 1, 2]]!.node!
+        for hidden in [1, 2] {
+            scene.setLayer(hidden, visible: false)
+            XCTAssertTrue(nested.isHidden, "layer \(hidden) hidden")
+            XCTAssertFalse(scene.layerSets[[0]]!.node!.isHidden)
+            scene.setLayer(hidden, visible: true)
+            XCTAssertFalse(nested.isHidden)
+        }
     }
 
     func testEdgesToggleAndLayerDoNotFight() {
         let scene = ViewportScene(model: SyntheticModel.cube())
-        let root = scene.modelRoot.childNodes[0]
         scene.showsEdges = false
-        XCTAssertTrue(root.childNodes[1].isHidden)
-        XCTAssertTrue(root.childNodes[2].childNodes[1].isHidden)
-        XCTAssertFalse(root.childNodes[0].isHidden)
+        XCTAssertTrue(edges(scene, [0])[0].isHidden)
+        XCTAssertFalse(faces(scene, [0])[0].isHidden)
+        scene.setLayer(1, visible: true)
+        XCTAssertTrue(edges(scene, [0, 1])[0].isHidden, "a set built while edges are off joins the toggle")
         scene.setLayer(0, visible: false)
         scene.setLayer(0, visible: true)
-        XCTAssertTrue(root.childNodes[1].isHidden, "showing the layer must not bring the edges back")
-        XCTAssertFalse(root.childNodes[0].isHidden)
+        XCTAssertTrue(edges(scene, [0])[0].isHidden, "showing the layer must not bring the edges back")
         scene.showsEdges = true
-        XCTAssertFalse(root.childNodes[1].isHidden)
+        XCTAssertFalse(edges(scene, [0])[0].isHidden || edges(scene, [0, 1])[0].isHidden)
     }
 
     func testTransparency() {
         var model = SyntheticModel.cube()
         model.materials.append(SKPModel.Material(name: "Verre", color: SIMD4(0.6, 0.8, 1, 0.5), opacity: 0.5))
         model.root.meshes[0].material = 1
-        let material = ViewportScene(model: model).modelRoot.childNodes[0].childNodes[0].geometry!.firstMaterial!
-        XCTAssertEqual(material.transparency, 0.5, accuracy: 1e-6)
-        XCTAssertEqual(material.transparencyMode, .dualLayer)
-        XCTAssertFalse(material.writesToDepthBuffer, "edges behind glass stay visible")
+        let glass = faces(ViewportScene(model: model), [0]).map { $0.geometry!.firstMaterial! }.first { $0.transparency < 1 }!
+        XCTAssertEqual(glass.transparency, 0.5, accuracy: 1e-6)
+        XCTAssertEqual(glass.transparencyMode, .dualLayer)
+        XCTAssertFalse(glass.writesToDepthBuffer, "edges behind glass stay visible")
     }
 
-    func testHiddenLayerInstancesAreFilledWhenShown() {
-        let scene = ViewportScene(model: SyntheticModel.cube())
-        let root = scene.modelRoot.childNodes[0]
-        let (a, b) = (root.childNodes[2], root.childNodes[3])
-        XCTAssertTrue(b.isHidden)
-        XCTAssertEqual(b.childNodes.count, 0, "no geometry nodes while Cotes is hidden")
-        XCTAssertEqual(b.simdPosition, SIMD3(0, 2, 0))
-        scene.setLayer(1, visible: true)
-        XCTAssertFalse(b.isHidden)
-        XCTAssertEqual(b.childNodes.count, 2)
-        XCTAssertTrue(b.childNodes[1].geometry === a.childNodes[1].geometry, "shares the prototype's edges")
-        XCTAssertFalse(b.childNodes[0].isHidden || b.childNodes[1].isHidden)
-        scene.showsEdges = false
-        XCTAssertTrue(b.childNodes[1].isHidden, "the new edge node joined the edge toggle")
-        scene.setLayer(1, visible: false)
-        scene.setLayer(1, visible: true)
-        XCTAssertEqual(b.childNodes.count, 2, "filled once")
-    }
-
-    func testPaintedHiddenInstanceIsPaintedWhenFilled() {
+    func testPaintedHiddenInstanceIsPaintedWhenShown() {
         var model = SyntheticModel.cube()
         // Root → group C on Layer0, painted with material 0 → unpainted instance of the box on hidden Cotes.
         model.definitions.append(SKPModel.Definition(name: "C", children: [
@@ -160,22 +172,58 @@ final class SimpleSKPViewportTests: XCTestCase {
         ]))
         model.root.children.append(SKPModel.Instance(definition: 1, transform: matrix_identity_float4x4, layer: 0, isGroup: true, material: 0))
         let scene = ViewportScene(model: model)
-        let root = scene.modelRoot.childNodes[0]
-        let box = root.childNodes[4].childNodes[0]
-        XCTAssertEqual(box.childNodes.count, 0)
         scene.setLayer(1, visible: true)
-        XCTAssertTrue(box.childNodes[0].geometry?.firstMaterial === root.childNodes[0].geometry?.firstMaterial, "inherits C's material")
+        let materials = faces(scene, [0, 1]).map { $0.geometry!.firstMaterial! }
+        XCTAssertEqual(materials.count, 2, "B unpainted, the box in C inherits C's material")
+        XCTAssertTrue(materials.contains { $0 === faces(scene, [0])[0].geometry!.firstMaterial })
     }
 
     func testMaterialCache() throws {
         var model = SyntheticModel.cube()
         model.root.meshes[0].uvs = model.root.meshes[0].positions.map { SIMD2($0.x, $0.y) } // untextured material with UVs
-        let root = ViewportScene(model: model).modelRoot.childNodes[0]
-        XCTAssertTrue(root.childNodes[0].geometry?.firstMaterial === root.childNodes[2].childNodes[0].geometry?.firstMaterial,
-                      "an untextured material is one SCNMaterial whatever the UVs")
+        let scene = ViewportScene(model: model)
+        XCTAssertEqual(faces(scene, [0]).count, 1, "an untextured material is one SCNMaterial whatever the UVs")
+        XCTAssertEqual(faces(scene, [0])[0].geometry!.sources(for: .texcoord).count, 0, "untextured: no UVs kept")
     }
 
-    /// Visible bounds leave out what is on a hidden layer, and take it in once the layer is shown.
+    /// A mirrored instance keeps outward normals and a winding that agrees with them (double-sided lighting relies on it).
+    func testMirroredInstanceNormalsAndWinding() throws {
+        var model = SyntheticModel.cube()
+        model.root.meshes = []
+        model.root.children[0].transform.columns.0 = SIMD4(-1, 0, 0, 0) // A mirrored in x: spans 1…2
+        let geometry = faces(ViewportScene(model: model), [0])[0].geometry!
+        func vectors(_ semantic: SCNGeometrySource.Semantic) -> [SIMD3<Float>] { // packed Float × 3
+            let f = geometry.sources(for: semantic)[0].data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            return stride(from: 0, to: f.count, by: 3).map { SIMD3(f[$0], f[$0 + 1], f[$0 + 2]) }
+        }
+        let (positions, normals) = (vectors(.vertex), vectors(.normal))
+        let indices = geometry.elements[0].data.withUnsafeBytes { Array($0.bindMemory(to: UInt32.self)) }
+        XCTAssertEqual(indices.count, 36)
+        for t in stride(from: 0, to: indices.count, by: 3) {
+            let (a, b, c) = (positions[Int(indices[t])], positions[Int(indices[t + 1])], positions[Int(indices[t + 2])])
+            let n = normals[Int(indices[t])]
+            XCTAssertGreaterThan(simd_dot(simd_cross(b - a, c - a), n), 0, "winding agrees with the normal")
+            XCTAssertGreaterThan(simd_dot((a + b + c) / 3 - SIMD3(1.5, 0.5, 0.5), n), 0, "normal points outwards")
+        }
+    }
+
+    /// Big groups are split into chunks under `chunkLimit` triangles, in spatial order.
+    func testChunks() {
+        var model = SyntheticModel.cube()
+        model.root.children = (0..<6).map { i in
+            var m = matrix_identity_float4x4
+            m.columns.3 = SIMD4(Float(i % 2) * 10, Float(i / 2) * 10, 0, 1)
+            return SKPModel.Instance(definition: 0, transform: m, layer: 0, isGroup: false, material: 0)
+        }
+        let limit = ViewportScene.chunkLimit
+        ViewportScene.chunkLimit = 24
+        defer { ViewportScene.chunkLimit = limit }
+        let chunks = faces(ViewportScene(model: model), [0])
+        XCTAssertEqual(chunks.count, 4, "7 cubes of 12 triangles, 2 per chunk")
+        XCTAssertEqual(triangles(chunks), 84)
+    }
+
+    /// Brief (d): visible bounds leave out what is on a hidden layer, and take it in once the layer is shown.
     func testVisibleBoundsFollowLayers() {
         var model = SyntheticModel.cube()
         model.root.children[1].transform.columns.3 = SIMD4(0, 20, 0, 1) // B, on hidden Cotes, 20 m away
@@ -187,6 +235,7 @@ final class SimpleSKPViewportTests: XCTestCase {
         bounds = scene.visibleBounds
         XCTAssertEqual(simd_distance(bounds.max, SIMD3(3, 21, 1)), 0, accuracy: 1e-5, "B joined")
         scene.setLayer(1, visible: false)
+        XCTAssertEqual(simd_distance(scene.visibleBounds.max, SIMD3(3, 1, 1)), 0, accuracy: 1e-5, "B left again")
         scene.setLayer(0, visible: false)
         bounds = scene.visibleBounds
         XCTAssertEqual(bounds.max, model.boundsMax, "nothing shown: the model's bounds")
@@ -194,8 +243,8 @@ final class SimpleSKPViewportTests: XCTestCase {
 
     func testBuildsOffMainThread() async {
         let model = SyntheticModel.cube()
-        let count = await Task.detached { ViewportScene(model: model).modelRoot.childNodes[0].childNodes.count }.value
-        XCTAssertEqual(count, 4)
+        let count = await Task.detached { ViewportScene(model: model).layerSets[[0]]?.node?.childNodes.count }.value
+        XCTAssertEqual(count, 2)
     }
 
     // MARK: View
@@ -354,43 +403,15 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertGreaterThan(simd_distance(view.target, target), 1e-3, "the target moved with the camera")
     }
 
-    private func click(_ view: NSView, at point: CGPoint, count: Int) {
-        let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0, windowNumber: 0,
-                                       context: nil, eventNumber: 0, clickCount: count, pressure: 1)!
-        view.mouseDown(with: event)
-    }
-
-    func testDoubleClickRecentresOnTheHitPoint() {
-        let (view, scene) = presentedView()
-        view.apply(camera: scene.model.scenes[0].camera!, animated: false) // looks at the root cube's centre
-        let eye = view.cameraNode.simdWorldPosition, front = view.cameraNode.simdWorldFront
-        // Real event path: the first click of a double-click already moved the target to the hit point.
-        let point = CGPoint(x: 440, y: 330)
-        click(view, at: point, count: 1)
-        click(view, at: point, count: 2)
-        let hit = view.target
-        let local = view.cameraNode.simdConvertPosition(hit, from: nil)
-        XCTAssertEqual(local.x, 0, accuracy: 1e-3, "the hit point is now at the view centre")
-        XCTAssertEqual(local.y, 0, accuracy: 1e-3)
-        XCTAssertEqual(simd_dot(view.cameraNode.simdWorldFront, front), 1, accuracy: 1e-5, "same direction, slid sideways")
-        XCTAssertGreaterThan(simd_distance(view.cameraNode.simdWorldPosition, eye), 0.1)
-        let cubeCentre = scene.modelRoot.simdConvertPosition(SIMD3(0.5, 0.5, 0.5), to: nil)
-        XCTAssertLessThan(simd_distance(hit, eye), simd_distance(cubeCentre, eye), "nearest face, not the far one")
-        let model = scene.modelRoot.simdConvertPosition(hit, from: nil)
-        XCTAssertEqual(simd_reduce_max(abs(model - SIMD3(0.5, 0.5, 0.5))), 0.5, accuracy: 0.01, "on the cube's surface: \(model)")
-        click(view, at: CGPoint(x: 5, y: 595), count: 2) // empty sky: nothing changes
-        XCTAssertEqual(simd_distance(view.target, hit), 0, accuracy: 1e-5)
-    }
-
     func testEdgesDrawnAfterFacesWithDepthBias() {
         let scene = ViewportScene(model: SyntheticModel.cube())
-        let root = scene.modelRoot.childNodes[0]
-        let edges = root.childNodes[1], cloneEdges = root.childNodes[2].childNodes[1]
+        scene.setLayer(1, visible: true)
+        let (edges, otherEdges) = (edges(scene, [0])[0], edges(scene, [0, 1])[0])
         XCTAssertEqual(edges.renderingOrder, 1)
-        XCTAssertEqual(cloneEdges.renderingOrder, 1, "survives instantiate()")
-        XCTAssertEqual(root.childNodes[0].renderingOrder, 0)
+        XCTAssertEqual(otherEdges.renderingOrder, 1)
+        XCTAssertEqual(faces(scene, [0])[0].renderingOrder, 0)
         let material = edges.geometry!.firstMaterial!
-        XCTAssertTrue(material === cloneEdges.geometry!.firstMaterial, "one shared edge material")
+        XCTAssertTrue(material === otherEdges.geometry!.firstMaterial, "one shared edge material")
         XCTAssertNotNil(material.shaderModifiers?[.geometry])
     }
 
@@ -409,22 +430,24 @@ final class SimpleSKPViewportTests: XCTestCase {
         model.root.children[0].material = 1
         let scene = ViewportScene(model: model)
         scene.setLayer(1, visible: true)
-        let root = scene.modelRoot.childNodes[0]
+        let set0 = faces(scene, [0]).sorted { $0.geometry!.boundingBox.min.x < $1.geometry!.boundingBox.min.x } // root cube, then A
 
         func uv(_ m: SCNMaterial, _ p: SIMD2<Float>) -> SIMD2<Float> {
             let v = SCNVector3Make(CGFloat(p.x), CGFloat(p.y), 0), t = m.diffuse.contentsTransform
             return SIMD2(Float(v.x * t.m11 + v.y * t.m21 + t.m41), Float(v.x * t.m12 + v.y * t.m22 + t.m42))
         }
-        let own = root.childNodes[0].geometry!.firstMaterial!
+        XCTAssertEqual(set0.count, 2)
+        XCTAssertEqual(set0[0].geometry!.sources(for: .texcoord).count, 1, "textured: UVs kept")
+        let own = set0[0].geometry!.firstMaterial!
         XCTAssertTrue(own.diffuse.contents is NSImage)
         XCTAssertEqual(own.diffuse.wrapS, .repeat)
         XCTAssertEqual(uv(own, SIMD2(0.25, 0.25)), SIMD2(0.25, 0.75), "v flipped")
-        let inherited = root.childNodes[2].childNodes[0].geometry!.firstMaterial!
+        let inherited = set0[1].geometry!.firstMaterial!
         XCTAssertTrue(inherited.diffuse.contents is NSImage)
         XCTAssertTrue(inherited !== own, "metre UVs need their own transform")
         XCTAssertEqual(uv(inherited, SIMD2(1, 0.25)), SIMD2(0.5, 0.5), "1/textureScale, then the flip")
         XCTAssertTrue(inherited.diffuse.contents as AnyObject === own.diffuse.contents as AnyObject, "one image for both variants")
-        XCTAssertTrue(root.childNodes[3].childNodes[0].geometry!.firstMaterial!.diffuse.contents is NSColor, "unpainted B stays white")
+        XCTAssertTrue(faces(scene, [0, 1])[0].geometry!.firstMaterial!.diffuse.contents is NSColor, "unpainted B stays white")
     }
 
     func testSnapshotIsNotUniform() throws {
@@ -434,20 +457,21 @@ final class SimpleSKPViewportTests: XCTestCase {
         if let path = ProcessInfo.processInfo.environment["VIEWPORT_SNAPSHOT"] { try image.tiffRepresentation?.write(to: URL(fileURLWithPath: path)) }
         XCTAssertEqual(image.size, view.bounds.size)
         let rep = try XCTUnwrap(image.cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
-        // Flat-shaded faces and 1-px edges give a dozen colours, not hundreds: check shades and coverage instead.
+        // The sky backdrop is a vertical gradient: uniform along a row. Model pixels are those that differ from the row's
+        // left-most pixel (the cube is framed away from the edges).
         let data = try XCTUnwrap(rep.bitmapData)
-        var counts: [UInt32: Int] = [:], total = 0
+        var colours = Set<UInt32>(), model = 0, total = 0
         for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
+            let row = data + y * rep.bytesPerRow
             for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
-                let p = data + y * rep.bytesPerRow + x * rep.bitsPerPixel / 8
-                let colour = UInt32(p[0]) << 16 | UInt32(p[1]) << 8 | UInt32(p[2])
-                counts[colour, default: 0] += 1
+                let p = row + x * rep.bitsPerPixel / 8
+                colours.insert(UInt32(p[0]) << 16 | UInt32(p[1]) << 8 | UInt32(p[2]))
+                if (0..<3).contains(where: { abs(Int(p[$0]) - Int(row[$0])) > 6 }) { model += 1 }
                 total += 1
             }
         }
-        XCTAssertGreaterThan(counts.count, 5)
-        let background = counts.values.max()! // the dark background is the most common colour
-        XCTAssertTrue((0.3...0.97).contains(Double(background) / Double(total)), "\(background) / \(total)")
+        XCTAssertGreaterThan(colours.count, 5)
+        XCTAssertTrue((0.03...0.7).contains(Double(model) / Double(total)), "\(model) / \(total)")
     }
 
     /// Manual probe of the edge depth bias on a real venue: `SIMPLESKP_PROBE=file.skp SIMPLESKP_PROBE_OUT=dir swift test

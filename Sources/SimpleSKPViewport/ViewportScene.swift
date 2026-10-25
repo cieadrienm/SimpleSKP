@@ -2,37 +2,72 @@ import SceneKit
 import SimpleSKPCore
 
 /// Builds the SceneKit scene for a model. May be constructed off the main thread, right after `SKPReader.load`.
-/// Root node rotated −90° about X (Z up → Y up); one prototype node per definition, one child node per mesh batch
-/// (tagged with its layer), instances as copies of the prototype sharing its geometry; edges as `.line` elements.
-/// Instances on a hidden layer stay empty until the layer is first shown (venue models hide most of their nodes).
+/// Root node rotated −90° about X (Z up → Y up). The instance tree is flattened: SketchUp shows an entity iff every layer
+/// on its path is visible, so all faces sharing a layer set (the layers along their path) and a resolved material are
+/// merged into one geometry in model space, and all edges of a layer set into one `.line` geometry — a few hundred draw
+/// calls instead of one per instance. A layer set is built the first time all its layers are visible.
 public final class ViewportScene {
     public let model: SKPModel
     public let scene: SCNScene
     /// The Z-up → Y-up node: everything from `SKPModel` (positions, transforms, camera) lives under it verbatim.
     public let modelRoot = SCNNode()
-    /// Directional light the view attaches to its camera node (SketchUp's light follows the eye).
+    /// Node the view attaches to its camera; it holds the low ambient fill (the sun and the sky do the lighting).
     public let headlight = SCNNode()
+    /// The sun (D7): directional, elevation 45°, azimuth 135° clockwise from +X (from the south-west: the iso view, seen
+    /// from the south-east, then shows two differently lit faces and the shadows in front), soft cascaded shadows.
+    public let sun = SCNNode()
+
+    public var shadowsEnabled = true {
+        didSet { sun.light!.castsShadow = shadowsEnabled }
+    }
+
+    /// High: 3 cascades of 2048²; low: 1 of 1024², for a scene over 33 ms (the app decides; D7).
+    public private(set) var shadowQualityIsHigh = true
+
+    public func setShadowQuality(_ high: Bool) {
+        shadowQualityIsHigh = high
+        sun.light!.shadowCascadeCount = high ? 3 : 1
+        sun.light!.shadowMapSize = high ? CGSize(width: 2048, height: 2048) : CGSize(width: 1024, height: 1024)
+    }
+
+    /// The faces and edges drawn under one set of layers; `node` is nil until the set is first visible.
+    final class LayerSet {
+        let layers: [Int]
+        /// Indices into `placements` whose definition has meshes or edges on this exact set.
+        var placements: [Int] = []
+        var node: SCNNode?
+        init(layers: [Int]) { self.layers = layers }
+    }
+
+    /// A definition placed in the flattened tree (-1 = the root): model-space transform, material its unpainted faces
+    /// inherit, sorted layers along its path (its own instance layer included).
+    private struct Placement {
+        var definition: Int
+        var transform: simd_float4x4
+        var material: Int?
+        var layers: [Int]
+    }
 
     private var materials: [Int: SCNMaterial] = [:]
     private var images: [Int: NSImage?] = [:]
     private lazy var defaultMaterial = makeMaterial(nil, uvs: .none)
     private let edgeMaterial = SCNMaterial()
-    /// Kept after the build: empty instances are filled from them.
-    private var definitionNodes: [Int: SCNNode] = [:]
-    /// Instance nodes built while their layer was hidden, still empty: their definition and the material to paint.
-    private var pending: [ObjectIdentifier: (definition: Int, material: Int?)] = [:]
-    private var layerNodes: [Int: [SCNNode]] = [:]
-    private var edgeNodes = Set<SCNNode>()
+    private var placements: [Placement] = []
+    private(set) var layerSets: [[Int]: LayerSet] = [:]
+    private var setsByLayer: [Int: [LayerSet]] = [:]
+    private var edgeNodes: [SCNNode] = []
     private var hiddenLayers = Set<Int>()
     private var cachedVisibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
 
     public init(model: SKPModel) {
         self.model = model
         self.scene = SCNScene()
-        scene.background.contents = NSColor(red: 0.067, green: 0.075, blue: 0.09, alpha: 1)
+        scene.background.contents = Rendering.skyImage(backdrop: true)
+        scene.lightingEnvironment.contents = Rendering.skyImage()
+        scene.lightingEnvironment.intensity = 1
 
         edgeMaterial.lightingModel = .constant
-        edgeMaterial.diffuse.contents = NSColor(red: 0.13, green: 0.13, blue: 0.14, alpha: 1)
+        edgeMaterial.diffuse.contents = NSColor(white: 0.3, alpha: 1) // opaque: alpha-blended lines vanish behind HDR faces
         edgeMaterial.readsFromDepthBuffer = true
         edgeMaterial.writesToDepthBuffer = false
         edgeMaterial.shaderModifiers = [.geometry: Self.edgeBias]
@@ -41,201 +76,326 @@ public final class ViewportScene {
         hiddenLayers = Set(model.layers.indices.filter { !model.layers[$0].isVisible })
         modelRoot.name = "model"
         modelRoot.simdEulerAngles.x = -.pi / 2
-        let root = buildDefinition(model.root)
-        root.name = "root" // a definition named like "L3" must not join the layer index
-        modelRoot.addChildNode(root)
         scene.rootNode.addChildNode(modelRoot)
-        register(below: modelRoot)
+        place(-1, transform: matrix_identity_float4x4, material: nil, layers: [])
+        build(layerSets.values.filter(isVisible))
         if ProcessInfo.processInfo.environment["SIMPLESKP_TIMING"] == "1" {
-            print(String(format: "ViewportScene: %.3f s, %d layer nodes, %d empty instances", CFAbsoluteTimeGetCurrent() - start,
-                         layerNodes.values.reduce(0) { $0 + $1.count }, pending.count))
+            print(String(format: "ViewportScene: %.3f s, %d placements, %d layer sets (%d built), %d nodes", CFAbsoluteTimeGetCurrent() - start,
+                         placements.count, layerSets.count, layerSets.values.filter { $0.node != nil }.count,
+                         modelRoot.childNodes.reduce(0) { $0 + $1.childNodes.count }))
         }
 
-        let ambient = SCNLight()
-        ambient.type = .ambient
-        ambient.intensity = 350
-        let ambientNode = SCNNode()
-        ambientNode.light = ambient
-        scene.rootNode.addChildNode(ambientNode)
-        let sun = SCNLight()
-        sun.type = .directional
-        sun.intensity = 800
-        headlight.light = sun
+        let fill = SCNLight()
+        fill.type = .ambient
+        fill.intensity = 150 // interiors out of the sun are not pitch black
+        headlight.light = fill
+
+        let light = SCNLight()
+        light.type = .directional
+        light.intensity = 1000
+        light.castsShadow = true
+        light.shadowMode = .forward
+        light.shadowRadius = 3
+        light.shadowSampleCount = 8
+        light.automaticallyAdjustsShadowProjection = true
+        light.shadowColor = NSColor(white: 0, alpha: 0.55)
+        sun.light = light
+        sun.name = "sun"
+        setShadowQuality(true)
+        let azimuth = -Float.pi * 3 / 4, elevation = Float.pi / 4
+        let toSun = SIMD3(cos(azimuth) * cos(elevation), sin(azimuth) * cos(elevation), sin(elevation))
+        sun.simdLook(at: -toSun, up: SIMD3(0, 0, 1), localFront: SCNNode.simdLocalFront)
+        modelRoot.addChildNode(sun)
+        updateShadowDistance()
     }
 
-    /// Shows or hides every node (meshes, edges, instances) on a layer, by index into `model.layers`.
-    /// The first time a layer is shown, its empty instances are filled (main thread, like any scene edit).
+    /// Shows or hides everything on a layer, by index into `model.layers`: a layer set is shown iff all its layers are.
+    /// Sets shown for the first time are built here (main thread, like any scene edit).
     public func setLayer(_ index: Int, visible: Bool) {
         if visible { hiddenLayers.remove(index) } else { hiddenLayers.insert(index) }
         cachedVisibleBounds = nil
-        for node in layerNodes[index] ?? [] {
-            if visible, pending[ObjectIdentifier(node)] != nil {
-                fill(node)
-                register(below: node)
-            }
-            node.isHidden = !visible || (!showsEdges && edgeNodes.contains(node))
-        }
+        let sets = setsByLayer[index] ?? []
+        build(sets.filter { $0.node == nil && isVisible($0) })
+        for set in sets { set.node?.isHidden = !isVisible(set) }
+        updateShadowDistance()
+    }
+
+    /// Cascades spread over what is shown. The distance counts from the eye, which the framing puts up to ~2 diagonals
+    /// away: D7's diagonal × 1.5 cut the far shadows off in the iso view, × 4 covers it.
+    private func updateShadowDistance() {
+        let bounds = visibleBounds
+        sun.light!.maximumShadowDistance = CGFloat(simd_distance(bounds.min, bounds.max) * 4)
     }
 
     public var showsEdges: Bool = true {
-        didSet {
-            for node in edgeNodes {
-                let layer = Int(node.name!.dropFirst())!
-                node.isHidden = !showsEdges || hiddenLayers.contains(layer)
-            }
-        }
+        didSet { for node in edgeNodes { node.isHidden = !showsEdges } }
     }
 
-    /// Bounds of what is shown, in model space (metres, Z up): hidden subtrees and still-empty instances are left out.
+    /// Bounds of what is shown, in model space (metres, Z up): hidden layer sets are left out.
     /// The model's bounds when nothing is shown. Main thread; recomputed after a layer change.
     public var visibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>) {
         if let cachedVisibleBounds { return cachedVisibleBounds }
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
-        func walk(_ node: SCNNode, _ transform: simd_float4x4) {
-            for child in node.childNodes where !child.isHidden {
-                let m = transform * child.simdTransform
-                if let geometry = child.geometry {
-                    let (a, b) = geometry.boundingBox
-                    let (p, q) = (SIMD3<Float>(a), SIMD3<Float>(b))
-                    for i in 0..<8 {
-                        let corner = SIMD3(i & 1 == 0 ? p.x : q.x, i & 2 == 0 ? p.y : q.y, i & 4 == 0 ? p.z : q.z)
-                        let w = m * SIMD4(corner, 1)
-                        lo = simd_min(lo, SIMD3(w.x, w.y, w.z)); hi = simd_max(hi, SIMD3(w.x, w.y, w.z))
-                    }
-                }
-                walk(child, m)
+        for set in layerSets.values {
+            guard let node = set.node, !node.isHidden else { continue }
+            for child in node.childNodes where child.geometry != nil { // merged geometries are in model space
+                let (a, b) = child.geometry!.boundingBox
+                lo = simd_min(lo, SIMD3(a)); hi = simd_max(hi, SIMD3(b))
             }
         }
-        walk(modelRoot, matrix_identity_float4x4)
         let bounds = lo.x <= hi.x ? (lo, hi) : (model.boundsMin, model.boundsMax)
         cachedVisibleBounds = bounds
         return bounds
     }
 
-    /// Indexes the layer-tagged nodes under `node` (in the scene) and gives them their visibility.
-    private func register(below node: SCNNode) {
-        for child in node.childNodes {
-            child.enumerateHierarchy { node, _ in
-                guard let layer = Self.layer(of: node) else { return }
-                layerNodes[layer, default: []].append(node)
-                let isEdge = node.geometry?.elements.first?.primitiveType == .line
-                if isEdge { edgeNodes.insert(node) }
-                node.isHidden = hiddenLayers.contains(layer) || (isEdge && !showsEdges)
-            }
-        }
-    }
+    private func isVisible(_ set: LayerSet) -> Bool { set.layers.allSatisfy { !hiddenLayers.contains($0) } }
 
-    private static func layer(of node: SCNNode) -> Int? {
-        guard let name = node.name, name.first == "L" else { return nil }
-        return Int(name.dropFirst())
-    }
+    // MARK: - Flattening
 
-    // MARK: - Building
+    private func definition(_ index: Int) -> SKPModel.Definition { index < 0 ? model.root : model.definitions[index] }
 
-    private func buildDefinition(_ definition: SKPModel.Definition) -> SCNNode {
-        let node = SCNNode()
-        node.name = definition.name
-        for mesh in definition.meshes {
-            let child = SCNNode(geometry: geometry(mesh, material: mesh.material))
-            child.name = "L\(mesh.layer)"
-            node.addChildNode(child)
-        }
-        for edges in definition.edges where !edges.positions.isEmpty {
-            let indices = [UInt32](0..<UInt32(edges.positions.count))
-            let element = SCNGeometryElement(data: indices.withUnsafeBytes { Data($0) }, primitiveType: .line,
-                                             primitiveCount: indices.count / 2, bytesPerIndex: 4)
-            let geometry = SCNGeometry(sources: [vectorSource(edges.positions, .vertex)], elements: [element])
-            geometry.materials = [edgeMaterial]
-            let child = SCNNode(geometry: geometry)
-            child.name = "L\(edges.layer)"
-            child.renderingOrder = 1 // after the faces, so the depth test sees them
-            node.addChildNode(child)
+    /// Records a placement and joins it to the layer sets of its meshes and edges, then recurses into its instances.
+    private func place(_ index: Int, transform: simd_float4x4, material: Int?, layers: [Int]) {
+        let definition = definition(index)
+        let p = placements.count
+        placements.append(Placement(definition: index, transform: transform, material: material, layers: layers))
+        var joined: [[Int]] = []
+        for layer in definition.meshes.map(\.layer) + definition.edges.filter({ !$0.positions.isEmpty }).map(\.layer) {
+            let key = Self.adding(layer, to: layers)
+            guard !joined.contains(key) else { continue }
+            joined.append(key)
+            layerSet(key).placements.append(p)
         }
         for instance in definition.children {
-            let child: SCNNode
-            if hiddenLayers.contains(instance.layer) {
-                child = SCNNode()
-                pending[ObjectIdentifier(child)] = (instance.definition, instance.material)
-            } else {
-                child = instantiate(definitionNode(instance.definition))
-                if let material = instance.material { paint(child, model.definitions[instance.definition], material) }
+            place(instance.definition, transform: transform * instance.transform, material: instance.material ?? material,
+                  layers: Self.adding(instance.layer, to: layers))
+        }
+    }
+
+    private func layerSet(_ layers: [Int]) -> LayerSet {
+        if let set = layerSets[layers] { return set }
+        let set = LayerSet(layers: layers)
+        layerSets[layers] = set
+        for layer in layers { setsByLayer[layer, default: []].append(set) }
+        return set
+    }
+
+    private static func adding(_ layer: Int, to layers: [Int]) -> [Int] {
+        layers.contains(layer) ? layers : (layers + [layer]).sorted()
+    }
+
+    // MARK: - Merging
+
+    /// Faces of one placement's mesh (or one edge set when `material` is nil) going into a merged geometry.
+    private struct Piece { var placement: Int; var item: Int }
+
+    /// One merged geometry to build: a material (nil = edges), whether it carries UVs, its pieces and sizes.
+    private struct Chunk {
+        var set: LayerSet
+        var material: SCNMaterial?
+        var textured = false
+        var pieces: [Piece] = []
+        var vertices = 0
+        var indices = 0
+    }
+
+    /// Edge nodes' category: a pick passes `.categoryBitMask: 1` (faces) so lines, hit with a tolerance, never win.
+    public static let edgeCategory = 2
+
+    /// Chunks stay under this many triangles (or segments): spatially compact pieces keep frustum culling, shadow
+    /// cascades and hit tests cheap, for a few more draw calls.
+    static var chunkLimit = 250_000
+
+    /// Builds the nodes of `sets`: grouping (serial: materials are resolved and cached), merging (parallel), nodes (serial).
+    private func build(_ sets: [LayerSet]) {
+        guard !sets.isEmpty else { return }
+        var chunks: [Chunk] = []
+        for set in sets {
+            var groups: [ObjectIdentifier: [(piece: Piece, key: UInt32, size: Int, vertices: Int)]] = [:]
+            var groupMaterial: [ObjectIdentifier: SCNMaterial] = [:]
+            var edges: [(piece: Piece, key: UInt32, size: Int, vertices: Int)] = []
+            for p in set.placements {
+                let placement = placements[p], definition = definition(placement.definition)
+                for (i, mesh) in definition.meshes.enumerated() where Self.adding(mesh.layer, to: placement.layers) == set.layers {
+                    let material = resolvedMaterial(mesh, inherited: placement.material)
+                    let id = ObjectIdentifier(material)
+                    groupMaterial[id] = material
+                    groups[id, default: []].append((Piece(placement: p, item: i), spatialKey(mesh.positions.first ?? .zero, placement.transform),
+                                                    mesh.indices.count / 3, mesh.positions.count))
+                }
+                for (i, edgeSet) in definition.edges.enumerated()
+                where !edgeSet.positions.isEmpty && Self.adding(edgeSet.layer, to: placement.layers) == set.layers {
+                    edges.append((Piece(placement: p, item: i), spatialKey(edgeSet.positions.first ?? .zero, placement.transform),
+                                  edgeSet.positions.count / 2, edgeSet.positions.count))
+                }
             }
-            child.simdTransform = instance.transform
-            child.name = "L\(instance.layer)"
-            node.addChildNode(child)
+            func split(_ items: [(piece: Piece, key: UInt32, size: Int, vertices: Int)], _ material: SCNMaterial?) {
+                let textured = material?.diffuse.contents is NSImage
+                var chunk = Chunk(set: set, material: material, textured: textured)
+                for item in items.sorted(by: { $0.key < $1.key }) {
+                    if chunk.indices > 0, chunk.indices + item.size * 3 > Self.chunkLimit * 3 {
+                        chunks.append(chunk)
+                        chunk = Chunk(set: set, material: material, textured: textured)
+                    }
+                    chunk.pieces.append(item.piece)
+                    chunk.vertices += item.vertices
+                    chunk.indices += item.size * (material == nil ? 2 : 3)
+                }
+                if !chunk.pieces.isEmpty { chunks.append(chunk) }
+            }
+            for (id, items) in groups { split(items, groupMaterial[id]) }
+            split(edges, nil)
         }
-        return node
-    }
 
-    /// Copies a prototype subtree sharing its geometry: about twice as fast as `clone()`, which also copies
-    /// animations, actions and the other node attributes the scene never sets.
-    private func instantiate(_ prototype: SCNNode) -> SCNNode {
-        let node = SCNNode()
-        node.geometry = prototype.geometry
-        node.name = prototype.name
-        node.simdTransform = prototype.simdTransform
-        node.renderingOrder = prototype.renderingOrder
-        if let record = pending[ObjectIdentifier(prototype)] {
-            pending[ObjectIdentifier(node)] = record
-            if let layer = Self.layer(of: node), !hiddenLayers.contains(layer) { fill(node) } // shown since the prototype was built
-            return node
+        if ProcessInfo.processInfo.environment["SIMPLESKP_TIMING"] == "1" {
+            let faces = chunks.filter { $0.material != nil }, edges = chunks.filter { $0.material == nil }
+            let bytes = faces.reduce(0) { $0 + $1.vertices * ($1.textured ? 32 : 24) + $1.indices * 4 } + edges.reduce(0) { $0 + $1.vertices * 16 }
+            let largest = Dictionary(grouping: faces) { ObjectIdentifier($0.set) }.values.map { $0.reduce(0) { $0 + $1.indices / 3 } }.max() ?? 0
+            print(String(format: "ViewportScene: building %d layer sets, %d chunks, %.2f M triangles (largest set %.2f M), %.2f M segments, %.0f MB",
+                         sets.count, chunks.count, Double(faces.reduce(0) { $0 + $1.indices / 3 }) / 1e6, Double(largest) / 1e6,
+                         Double(edges.reduce(0) { $0 + $1.vertices / 2 }) / 1e6, Double(bytes) / 1_048_576))
         }
-        for child in prototype.childNodes { node.addChildNode(instantiate(child)) }
-        return node
-    }
-
-    /// Gives an empty instance node its definition's content (`register(below:)` is the caller's job).
-    private func fill(_ node: SCNNode) {
-        guard let record = pending.removeValue(forKey: ObjectIdentifier(node)) else { return }
-        for child in definitionNode(record.definition).childNodes { node.addChildNode(instantiate(child)) }
-        if let material = record.material { paint(node, model.definitions[record.definition], material) }
-    }
-
-    private func definitionNode(_ index: Int) -> SCNNode {
-        if let node = definitionNodes[index] { return node }
-        let node = buildDefinition(model.definitions[index])
-        definitionNodes[index] = node
-        return node
-    }
-
-    /// Gives the instance's material to the faces that have none, down through nested unpainted instances
-    /// (SketchUp inheritance). Children order mirrors `buildDefinition`: meshes, edge sets, instances.
-    private func paint(_ node: SCNNode, _ definition: SKPModel.Definition, _ material: Int) {
-        let children = node.childNodes
-        for (i, mesh) in definition.meshes.enumerated() where mesh.material == nil {
-            let copy = children[i].geometry!.copy() as! SCNGeometry
-            copy.materials = [scnMaterial(material, uvs: mesh.uvs == nil ? .none : .metres)]
-            children[i].geometry = copy
-        }
-        let offset = definition.meshes.count + definition.edges.filter { !$0.positions.isEmpty }.count
-        for (j, instance) in definition.children.enumerated() where instance.material == nil {
-            let child = children[offset + j]
-            if pending[ObjectIdentifier(child)] != nil {
-                pending[ObjectIdentifier(child)]!.material = material // painted when filled
-            } else {
-                paint(child, model.definitions[instance.definition], material)
+        var merged = [Merged](repeating: Merged(), count: chunks.count)
+        merged.withUnsafeMutableBufferPointer { out in
+            let out = out // the closure below may not capture an inout parameter
+            DispatchQueue.concurrentPerform(iterations: chunks.count) { i in
+                out[i] = chunks[i].material == nil ? mergeEdges(chunks[i]) : mergeFaces(chunks[i])
             }
         }
+
+        for set in sets {
+            let node = SCNNode()
+            node.name = set.layers.map(String.init).joined(separator: ",")
+            set.node = node
+            modelRoot.addChildNode(node)
+        }
+        for (chunk, data) in zip(chunks, merged) {
+            let child = SCNNode(geometry: chunk.material == nil ? edgeGeometry(data.positions, data.indices, count: chunk.vertices) : faceGeometry(chunk, data))
+            if chunk.material == nil {
+                child.categoryBitMask = Self.edgeCategory
+                child.castsShadow = false
+                child.renderingOrder = 1 // after the faces, so the depth test sees them
+                child.isHidden = !showsEdges
+                edgeNodes.append(child)
+            }
+            chunk.set.node!.addChildNode(child)
+        }
     }
 
-    private func geometry(_ mesh: SKPModel.Mesh, material: Int?) -> SCNGeometry {
-        var sources = [vectorSource(mesh.positions, .vertex), vectorSource(mesh.normals, .normal)]
-        if let uvs = mesh.uvs {
-            sources.append(SCNGeometrySource(data: uvs.withUnsafeBytes { Data($0) }, semantic: .texcoord, vectorCount: uvs.count,
-                                             usesFloatComponents: true, componentsPerVector: 2, bytesPerComponent: 4,
-                                             dataOffset: 0, dataStride: MemoryLayout<SIMD2<Float>>.stride))
+    /// Morton order of a point's model-space position on a 1024³ grid over the model's bounds.
+    private func spatialKey(_ point: SIMD3<Float>, _ transform: simd_float4x4) -> UInt32 {
+        let w = transform * SIMD4(point, 1)
+        let unit = (SIMD3(w.x, w.y, w.z) - model.boundsMin) / simd_max(model.boundsMax - model.boundsMin, SIMD3(repeating: 1e-6))
+        let cell = SIMD3<UInt32>(simd_clamp(unit, .zero, SIMD3(repeating: 1)) * 1023)
+        func spread(_ v: UInt32) -> UInt32 {
+            var x = v & 0x3ff
+            x = (x | x << 16) & 0x030000ff; x = (x | x << 8) & 0x0300f00f
+            x = (x | x << 4) & 0x030c30c3; x = (x | x << 2) & 0x09249249
+            return x
         }
-        let element = SCNGeometryElement(data: mesh.indices.withUnsafeBytes { Data($0) }, primitiveType: .triangles,
-                                         primitiveCount: mesh.indices.count / 3, bytesPerIndex: 4)
+        return spread(cell.x) | spread(cell.y) << 1 | spread(cell.z) << 2
+    }
+
+    /// A merged geometry's buffers, one per source: SceneKit copies a shared interleaved buffer once per source.
+    private struct Merged {
+        var positions = Data(), normals = Data(), uvs = Data(), indices = Data()
+    }
+
+    /// Positions, normals (and UVs when textured) in model space, packed `Float`s; 32-bit indices rebased per piece.
+    private func mergeFaces(_ chunk: Chunk) -> Merged {
+        var out = Merged(positions: Data(count: chunk.vertices * 12), normals: Data(count: chunk.vertices * 12),
+                         uvs: Data(count: chunk.textured ? chunk.vertices * 8 : 0), indices: Data(count: chunk.indices * 4))
+        out.positions.withUnsafeMutableBytes { pb in
+            out.normals.withUnsafeMutableBytes { nb in
+                out.uvs.withUnsafeMutableBytes { ub in
+                    out.indices.withUnsafeMutableBytes { ib in
+                        let pv = pb.bindMemory(to: Float.self).baseAddress!, nv = nb.bindMemory(to: Float.self).baseAddress!
+                        let uv = ub.bindMemory(to: SIMD2<Float>.self).baseAddress, ix = ib.bindMemory(to: UInt32.self).baseAddress!
+                        var vo = 0, io = 0, base: UInt32 = 0
+                        for piece in chunk.pieces {
+                            let placement = placements[piece.placement]
+                            let mesh = definition(placement.definition).meshes[piece.item]
+                            let m = placement.transform
+                            let linear = simd_float3x3(SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z), SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                                       SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+                            let normalMatrix = linear.inverse.transpose // what SceneKit applies per node
+                            // A mirrored placement reverses the winding: swap two indices so it agrees with the transformed normal.
+                            let (b, c) = simd_determinant(linear) < 0 ? (2, 1) : (1, 2)
+                            mesh.positions.withUnsafeBufferPointer { positions in
+                                mesh.normals.withUnsafeBufferPointer { normals in
+                                    for i in 0..<positions.count {
+                                        let p = m * SIMD4(positions[i], 1), n = simd_normalize(normalMatrix * normals[i])
+                                        let o = (vo + i) * 3
+                                        pv[o] = p.x; pv[o + 1] = p.y; pv[o + 2] = p.z
+                                        nv[o] = n.x; nv[o + 1] = n.y; nv[o + 2] = n.z
+                                    }
+                                }
+                            }
+                            if chunk.textured, let uv, let uvs = mesh.uvs { for (i, t) in uvs.enumerated() { uv[vo + i] = t } }
+                            mesh.indices.withUnsafeBufferPointer { idx in
+                                var t = 0
+                                while t < idx.count {
+                                    ix[io] = base + idx[t]; ix[io + 1] = base + idx[t + b]; ix[io + 2] = base + idx[t + c]
+                                    io += 3; t += 3
+                                }
+                            }
+                            vo += mesh.positions.count
+                            base += UInt32(mesh.positions.count)
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Packed segment end points in model space, with explicit indices (implicit ones were not re-tested after an unrelated crash).
+    private func mergeEdges(_ chunk: Chunk) -> Merged {
+        var out = Merged(positions: Data(count: chunk.vertices * 12))
+        out.indices = [UInt32](0..<UInt32(chunk.vertices)).withUnsafeBytes { Data($0) }
+        out.positions.withUnsafeMutableBytes { vb in
+            let v = vb.bindMemory(to: Float.self).baseAddress!
+            var vo = 0
+            for piece in chunk.pieces {
+                let placement = placements[piece.placement], m = placement.transform
+                for point in definition(placement.definition).edges[piece.item].positions {
+                    let p = m * SIMD4(point, 1)
+                    v[vo] = p.x; v[vo + 1] = p.y; v[vo + 2] = p.z
+                    vo += 3
+                }
+            }
+        }
+        return out
+    }
+
+    private func faceGeometry(_ chunk: Chunk, _ merged: Merged) -> SCNGeometry {
+        func source(_ data: Data, _ semantic: SCNGeometrySource.Semantic, components: Int) -> SCNGeometrySource {
+            SCNGeometrySource(data: data, semantic: semantic, vectorCount: chunk.vertices, usesFloatComponents: true,
+                              componentsPerVector: components, bytesPerComponent: 4, dataOffset: 0, dataStride: components * 4)
+        }
+        var sources = [source(merged.positions, .vertex, components: 3), source(merged.normals, .normal, components: 3)]
+        if chunk.textured { sources.append(source(merged.uvs, .texcoord, components: 2)) }
+        let element = SCNGeometryElement(data: merged.indices, primitiveType: .triangles, primitiveCount: chunk.indices / 3, bytesPerIndex: 4)
         let geometry = SCNGeometry(sources: sources, elements: [element])
-        geometry.materials = [material.map { scnMaterial($0, uvs: mesh.uvs == nil ? .none : .repeats) } ?? defaultMaterial]
+        geometry.materials = [chunk.material!]
         return geometry
     }
 
-    private func vectorSource(_ vectors: [SIMD3<Float>], _ semantic: SCNGeometrySource.Semantic) -> SCNGeometrySource {
-        SCNGeometrySource(data: vectors.withUnsafeBytes { Data($0) }, semantic: semantic, vectorCount: vectors.count,
-                          usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: 4,
-                          dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride)
+    private func edgeGeometry(_ vertices: Data, _ indices: Data, count: Int) -> SCNGeometry {
+        let source = SCNGeometrySource(data: vertices, semantic: .vertex, vectorCount: count, usesFloatComponents: true,
+                                       componentsPerVector: 3, bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
+        let element = SCNGeometryElement(data: indices, primitiveType: .line, primitiveCount: count / 2, bytesPerIndex: 4)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        geometry.materials = [edgeMaterial]
+        return geometry
+    }
+
+    /// SketchUp inheritance: a face without material takes the one of the nearest painted enclosing instance; its UVs
+    /// are then in metres. Unpainted all the way up: the default material.
+    private func resolvedMaterial(_ mesh: SKPModel.Mesh, inherited: Int?) -> SCNMaterial {
+        if let index = mesh.material { return scnMaterial(index, uvs: mesh.uvs == nil ? .none : .repeats) }
+        if let index = inherited { return scnMaterial(index, uvs: mesh.uvs == nil ? .none : .metres) }
+        return defaultMaterial
     }
 
     /// How a mesh's UVs are expressed: none, texture repeats (own material), metres (material inherited from an instance).
@@ -261,10 +421,11 @@ public final class ViewportScene {
 
     private func makeMaterial(_ index: Int?, uvs: UVs) -> SCNMaterial {
         let material = SCNMaterial()
-        material.lightingModel = .lambert
+        material.lightingModel = .physicallyBased
+        material.roughness.contents = 0.85
+        material.metalness.contents = 0
         material.isDoubleSided = true
-        material.isLitPerPixel = false
-        guard let index else { material.diffuse.contents = NSColor.white; return material }
+        guard let index else { material.diffuse.contents = NSColor(white: 0.96, alpha: 1); return material }
         let source = model.materials[index]
         if uvs != .none, let image = image(index) {
             material.diffuse.contents = image
