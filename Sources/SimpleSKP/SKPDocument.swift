@@ -80,6 +80,9 @@ final class SKPDocument: NSDocument {
     @objc func toggleEdges(_ sender: Any?) { model.toggleEdges() }
     @objc func togglePerspective(_ sender: Any?) { model.togglePerspective() }
     @objc func zoomExtents(_ sender: Any?) { model.zoomExtents() }
+    @objc func toggleShadows(_ sender: Any?) { model.toggleShadows() }
+    @objc func toggleAmbientOcclusion(_ sender: Any?) { model.toggleAmbientOcclusion() }
+    @objc func toggleFreeFlight(_ sender: Any?) { model.toggleFreeFlight() }
     @objc func previousScene(_ sender: Any?) { model.previousScene() }
     @objc func nextScene(_ sender: Any?) { model.nextScene() }
 
@@ -104,6 +107,15 @@ final class SKPDocument: NSDocument {
             return model.isReady
         case #selector(togglePerspective(_:)):
             item.state = model.isPerspective ? .on : .off
+            return model.isReady
+        case #selector(toggleShadows(_:)):
+            item.state = model.scene?.shadowsEnabled ?? false ? .on : .off
+            return model.isReady
+        case #selector(toggleAmbientOcclusion(_:)):
+            item.state = model.viewport.ambientOcclusionEnabled ? .on : .off
+            return model.isReady
+        case #selector(toggleFreeFlight(_:)):
+            item.state = model.isFreeFlying ? .on : .off
             return model.isReady
         case #selector(previousScene(_:)), #selector(nextScene(_:)):
             return model.isReady && !(model.skp?.scenes.isEmpty ?? true)

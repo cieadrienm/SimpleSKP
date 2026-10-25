@@ -43,6 +43,18 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertEqual(item(#selector(SKPDocument.togglePerspective(_:)))?.keyEquivalent, "p")
         XCTAssertEqual(item(#selector(SKPDocument.togglePerspective(_:)))?.keyEquivalentModifierMask, [.command, .option])
         XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleSidebarPanel(_:)))!), "⌥⌘S")
+        XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleFreeFlight(_:)))!), "⌥⌘F")
+        XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleShadows(_:)))!), "⌥⌘O")
+        XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleAmbientOcclusion(_:)))!), "⌥⌘A")
+    }
+
+    func testFreeFlyShowsHowToExit() {
+        let model = DocumentModel()
+        model.setModel(SyntheticModel.cube())
+        model.viewport.isFreeFlying = true
+        XCTAssertEqual(model.statusText, L("Vol libre — Échap pour sortir", "Free fly — Esc to exit"))
+        model.viewport.isFreeFlying = false
+        XCTAssertFalse(model.isFreeFlying)
     }
 
     func testDocumentControllerTypes() throws {

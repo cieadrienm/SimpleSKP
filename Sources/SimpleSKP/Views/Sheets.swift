@@ -98,7 +98,10 @@ struct ShortcutsView: View {
                 ("⌥⌘S", L("Barre latérale", "Sidebar")),
                 ("⌘E", L("Arêtes", "Edges")),
                 ("⌥⌘P", L("Perspective / Parallèle", "Perspective / Parallel")),
+                ("⌥⌘O", L("Ombres", "Shadows")),
+                ("⌥⌘A", L("Occlusion ambiante", "Ambient occlusion")),
                 ("⇧Z", L("Zoom étendu", "Zoom extents")),
+                ("⌥⌘F", L("Mode vol libre (Échap pour sortir)", "Free fly mode (Esc to exit)")),
                 ("⌘[ / ⌘]", L("Scène précédente / suivante", "Previous / next scene")),
                 ("⌘,", L("Réglages", "Settings")),
                 ("⌘?", L("Aide", "Help")),
@@ -106,10 +109,21 @@ struct ShortcutsView: View {
             ]),
             (L("Caméra", "Camera"), MainMenu.cameraViews.enumerated().map { ("⌘\($0.offset + 1)", $0.element.title) }),
             (L("Souris & trackpad", "Mouse & trackpad"), [
-                (L("glisser", "drag"), L("Orbite autour du point visé", "Orbit around the point under the cursor")),
-                (L("⇧-glisser, clic droit, bouton du milieu", "⇧-drag, right or middle drag"), L("Panoramique", "Pan")),
-                (L("molette, pincement", "scroll, pinch"), L("Zoom vers le curseur", "Zoom towards the cursor")),
-                (L("double-clic", "double-click"), L("Recentrer sur le point", "Recentre on the point")),
+                (L("glisser", "drag"), L("Orbite autour du point visé, avec inertie", "Orbit around the point under the cursor, with inertia")),
+                (L("⇧-glisser, bouton du milieu", "⇧-drag, middle drag"), L("Panoramique", "Pan")),
+                (L("molette, pincement", "wheel, pinch"), L("Zoom vers le curseur", "Zoom towards the cursor")),
+                (L("double-clic", "double-click"), L("Recentrer et approcher le point", "Recentre on the point and move closer")),
+                (L("deux doigts", "two fingers"), L("Orbite (ou zoom, voir Réglages)", "Orbit (or zoom, see Settings)")),
+                (L("⌥ + deux doigts", "⌥ + two fingers"), L("Panoramique", "Pan")),
+                (L("rotation à deux doigts", "two-finger rotate"), L("Tourner autour de la verticale", "Turn around the vertical")),
+            ]),
+            (L("Déplacement (touches physiques)", "Moving (physical keys)"), [
+                (L("clic droit tenu", "hold right button"), L("Regarder autour", "Look around")),
+                (L("Z Q S D / W A S D", "W A S D / Z Q S D"), L("Avancer, gauche, reculer, droite", "Forward, left, back, right")),
+                (L("flèches", "arrows"), L("Avancer, reculer, pas de côté", "Forward, back, sideways")),
+                (L("espace, E / C", "space, E / C"), L("Monter / descendre", "Up / down")),
+                ("⇧", L("Quatre fois plus vite", "Four times faster")),
+                (L("molette + clic droit", "wheel + right button"), L("Vitesse de déplacement", "Movement speed")),
             ]),
         ]
     }
@@ -146,7 +160,7 @@ struct ShortcutsView: View {
             }
         }
         .padding(20)
-        .frame(width: 900)
+        .frame(width: 1100)
         .background(Theme.panel.swiftUI)
     }
 }
@@ -162,8 +176,8 @@ struct HelpView: View {
              L("Ouvre un fichier SketchUp (.skp) et le montre en 3D en quelques secondes : la vignette du fichier d'abord, puis le modèle. C'est un visualiseur : rien n'est modifié ni enregistré.",
                "Opens a SketchUp file (.skp) and shows it in 3D within seconds: the file's thumbnail first, then the model. It is a viewer: nothing is changed or saved.")),
             (L("Naviguer", "Navigating"),
-             L("Glisser pour tourner autour du point visé ; ⇧-glisser, clic droit ou bouton du milieu pour se déplacer ; molette ou pincement pour zoomer vers le curseur ; double-clic pour recentrer. ⇧Z cadre tout le modèle, ⌘1 à ⌘7 donnent les vues standard, ⌥⌘P bascule perspective et parallèle, ⌘E montre ou cache les arêtes.",
-               "Drag to orbit around the point under the cursor; ⇧-drag, right or middle drag to pan; scroll or pinch to zoom towards the cursor; double-click to recentre. ⇧Z frames the whole model, ⌘1 to ⌘7 give the standard views, ⌥⌘P switches perspective and parallel, ⌘E shows or hides edges.")),
+             L("Quatre façons coexistent. Orbite : glisser tourne autour du point visé et continue sur son élan ; ⇧-glisser ou bouton du milieu pour le panoramique ; molette vers le curseur ; double-clic recentre et approche. Éditeur de jeu : clic droit tenu pour regarder autour, ZQSD (WASD en QWERTY) ou flèches pour avancer et se décaler, espace ou E pour monter, C pour descendre, ⇧ pour aller quatre fois plus vite, molette avec clic droit pour régler la vitesse. Trackpad : deux doigts pour l'orbite (ou le zoom, dans Réglages), ⌥ + deux doigts pour le panoramique, pincer pour zoomer, tourner pour pivoter autour de la verticale. Vol libre (⌥⌘F) : la souris oriente sans clic, le clavier déplace, Échap pour sortir. Un clic ou une touche arrête tout mouvement en cours. ⇧Z cadre tout le modèle, ⌘1 à ⌘7 donnent les vues standard, ⌥⌘P bascule perspective et parallèle, ⌘E montre ou cache les arêtes.",
+               "Four ways side by side. Orbit: drag to turn around the point under the cursor, it coasts on; ⇧-drag or middle drag to pan; the wheel zooms towards the cursor; double-click recentres and moves closer. Game editor: hold the right button to look around, WASD (ZQSD on AZERTY) or the arrows to move and strafe, space or E to go up, C to go down, ⇧ for four times faster, the wheel with the right button held sets the speed. Trackpad: two fingers orbit (or zoom, in Settings), ⌥ + two fingers pan, pinch to zoom, rotate to turn around the vertical. Free fly (⌥⌘F): the mouse looks without a click, the keys move, Esc to exit. A click or a key stops any motion. ⇧Z frames the whole model, ⌘1 to ⌘7 give the standard views, ⌥⌘P switches perspective and parallel, ⌘E shows or hides edges.")),
             (L("Scènes et calques", "Scenes and layers"),
              L("La barre latérale (⌥⌘S) liste les scènes du fichier : un clic y amène la caméra et applique les calques masqués de la scène ; ⌘[ et ⌘] passent à la précédente ou à la suivante. Les cases des calques montrent ou cachent leur contenu aussitôt.",
                "The sidebar (⌥⌘S) lists the file's scenes: a click moves the camera there and applies the scene's hidden layers; ⌘[ and ⌘] step to the previous or next one. The layer checkboxes show or hide their content at once.")),
@@ -171,8 +185,8 @@ struct HelpView: View {
              L("Le fichier est lu par le framework du SDK SketchUp, livré dans SimpleSKP.app : SketchUp n'a pas besoin d'être installé. Quand il l'est, « Ouvrir dans SketchUp » (⇧⌘O) y ouvre le fichier. Le chemin du framework est dans À propos. Le framework du SDK C de SketchUp (Trimble) est embarqué dans l'app sous la licence du SDK SketchUp ; le code de SimpleSKP est GPL v3.",
                "The file is read by the SketchUp SDK framework shipped inside SimpleSKP.app: SketchUp does not need to be installed. When it is, « Open in SketchUp » (⇧⌘O) opens the file there. The framework's path is in About. The SketchUp C SDK framework (Trimble) is embedded in the app under the SketchUp SDK licence; SimpleSKP's code is GPL v3.")),
             (L("Limites", "Limits"),
-             L("Visualiseur seulement : pas d'édition, d'export, d'ombres, de styles ni de plans de section.",
-               "Viewer only: no editing, export, shadows, styles or section planes.")),
+             L("Visualiseur seulement : pas d'édition, d'export, de styles ni de plans de section.",
+               "Viewer only: no editing, export, styles or section planes.")),
         ]
     }
 
@@ -225,6 +239,7 @@ struct HelpView: View {
 
 struct SettingsView: View {
     @State private var language = Localization.current
+    @State private var twoFingerScrollZooms = Preferences.twoFingerScrollZooms
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -240,6 +255,15 @@ struct SettingsView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.textDim.swiftUI)
                 .fixedSize(horizontal: false, vertical: true)
+            SectionHeader(L("Défilement à deux doigts", "Two-finger scrolling"))
+            Picker("", selection: $twoFingerScrollZooms) {
+                Text(L("Orbite", "Orbit")).tag(false)
+                Text(L("Zoom", "Zoom")).tag(true)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 200)
+            .onChange(of: twoFingerScrollZooms) { _, value in Preferences.twoFingerScrollZooms = value }
         }
         .padding(20)
         .frame(width: 380, alignment: .leading)

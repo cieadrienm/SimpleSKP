@@ -31,6 +31,12 @@ final class DocumentModel {
     var isPerspective = Preferences.isPerspective
     var showSidebar = false
     var loadSeconds: Double?
+    /// Mirrors the viewport, which ends free fly itself (Esc, lost focus): the status bar shows how to get out.
+    private(set) var isFreeFlying = false
+
+    init() {
+        viewport.onFreeFlyingChange = { [weak self] in self?.isFreeFlying = $0 }
+    }
 
     var scene: ViewportScene? {
         if case .ready(let scene) = state { return scene }
@@ -125,6 +131,20 @@ final class DocumentModel {
         if isReady { viewport.isPerspective = isPerspective }
     }
 
+    func toggleShadows() {
+        scene?.shadowsEnabled.toggle()
+        viewport.setNeedsDisplay(viewport.bounds)
+    }
+
+    func toggleAmbientOcclusion() {
+        viewport.ambientOcclusionEnabled.toggle()
+        viewport.setNeedsDisplay(viewport.bounds)
+    }
+
+    func toggleFreeFlight() {
+        if isReady { viewport.isFreeFlying.toggle() }
+    }
+
     func toggleEdges() {
         showsEdges.toggle()
         Preferences.showsEdges = showsEdges
@@ -166,6 +186,7 @@ final class DocumentModel {
     /// Left part of the status bar: the file's numbers once read, else the loading phase or the error.
     var statusText: String {
         if let error { return error.localizedDescription }
+        if isFreeFlying { return L("Vol libre — Échap pour sortir", "Free fly — Esc to exit") }
         if let skp {
             let size = visibleSize ?? skp.size
             let parts: [String?] = [

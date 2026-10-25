@@ -41,11 +41,13 @@ swift Scripts/make-icon.swift                 # redessine Resources/AppIcon.icns
 - **AppKit insère lui-même « Ouvrir l'élément récent »** (et « Plein écran ») dans l'app empaquetée : ne pas les construire à la main, vérifier le menu sur le bundle.
 - **Un seul modèle lu à la fois** : l'API du SDK n'est pas sûre entre threads (verrou global).
 - **Ne jamais tuer les apps d'Adrien** (eMotion, OSCScore, SimpleAudio, SketchUp tournent souvent). Lancer ses propres instances et les tuer par PID.
+- **Navigation (D6) : une seule caméra, `CameraRig`** (modèle, Z vertical, lacet/tangage, pas de roulis) ; jamais de `SCNTransaction` ni de `defaultCameraController` pour bouger la caméra, sinon un clic ne peut plus interrompre. Les touches de déplacement se lisent par `keyCode` (ZQSD AZERTY = WASD QWERTY). Tout chemin qui cache le curseur (clic droit, vol libre) le rend à la perte du focus : tests à l'appui.
+- **`SCNView.hitTest` ne trouve rien avant la première image** : le point visé se cherche par `hitTestWithSegment` sur la racine du modèle, arêtes exclues (touchées avec une tolérance, hors surface).
 - `timeout` n'existe pas sur macOS : surveiller un lancement avec une boucle `kill -0`.
 
 ## Architecture en une minute
 - `Sources/SimpleSKPCore/` — Foundation seulement : `SKPModel.swift` (le contrat figé), `SKPFileInfo` (version, vignette), `SketchUpAPI` (framework chargé par `dlopen`), `SKPReader` (fichier → `SKPModel` neutre, mètres, Z vertical), `Localization`, `SimpleUpdater`.
-- `Sources/SimpleSKPViewport/` — SceneKit : `ViewportScene` (modèle → `SCNScene`, Z→Y par la racine), `ViewportView` (navigation, vues standard, caméra).
+- `Sources/SimpleSKPViewport/` — SceneKit : `ViewportScene` (modèle → `SCNScene`, Z→Y par la racine), `CameraRig` (la caméra unique de D6 : position, lacet, tangage, inertie, touches, 60 Hz seulement en mouvement), `ViewportView` (événements souris, clavier, trackpad, vol libre ; vues standard).
 - `Sources/SimpleSKP/` — AppKit + SwiftUI : `App` (entrée et options), `AppDelegate`, `MainMenu`, `DocumentController`, `SKPDocument`, `ModelWindowController`, `DocumentModel`, `ContentView`, feuilles, `Snapshot`, `SelfTest`.
 - `Resources/` — `Info.plist` (gabarit `@VERSION@`), `SimpleSKP.entitlements`, `AppIcon.icns`, `fr.lproj`, `en.lproj`.
 - `Scripts/` — `bundle.sh`, `package-release.sh`, `make-icon.swift`.

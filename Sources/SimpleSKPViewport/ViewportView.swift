@@ -5,19 +5,27 @@ public enum StandardView: CaseIterable, Sendable {
     case iso, top, bottom, front, back, left, right
 }
 
-/// SketchUp-like navigation on top of `SCNView`'s camera controller (`.orbitTurntable`, horizon kept, no inertia):
-/// drag = orbit around the point under the cursor (hit test, else the model centre); ⇧-drag, right or middle
-/// drag = pan; scroll or pinch = zoom towards the cursor; double-click = recentre on the point; ⇧Z = zoom extents.
+/// D6 navigation over one `CameraRig`, four ways side by side: orbit (left drag, inertia; ⇧/middle drag = pan; wheel =
+/// zoom towards the cursor; double-click = recentre), game editor (right drag = look; WASD/ZQSD by keyCode, arrows,
+/// space/E/C/Q), trackpad (two fingers = orbit or zoom, ⌥ = pan, pinch = zoom, rotate = yaw), and free fly.
 /// Renders on demand only (`rendersContinuously = false`).
 public final class ViewportView: SCNView {
     public private(set) var viewportScene: ViewportScene?
     public let cameraNode = SCNNode()
+    private(set) lazy var rig = CameraRig(node: cameraNode)
 
-    private enum Drag { case orbit, pan }
-    private var drag = Drag.orbit
+    /// Réglages « Défilement à deux doigts : zoom » (Magic Mouse); orbit otherwise.
+    public static var twoFingerScrollZooms = false
+    /// Called when free fly starts or ends, whatever ended it (Esc, the menu, lost focus).
+    public var onFreeFlyingChange: ((Bool) -> Void)?
+
+    private enum Drag { case orbit, pan, look }
+    private var drag: Drag?
     private var lastPoint = CGPoint.zero
     private var zoomAnchor: SIMD3<Float>?
     private var lastWheel: TimeInterval = 0
+    /// NSCursor.hide() calls not yet balanced by unhide(): 0 or 1, checked by the tests.
+    private(set) var cursorHides = 0
 
     public override init(frame: NSRect, options: [String: Any]? = nil) {
         super.init(frame: frame, options: options)
@@ -37,21 +45,25 @@ public final class ViewportView: SCNView {
         backgroundColor = NSColor(red: 0.067, green: 0.075, blue: 0.09, alpha: 1)
         preferredFramesPerSecond = 60
         let camera = SCNCamera()
+        Rendering.configure(camera: camera)
         camera.automaticallyAdjustsZRange = true
         camera.projectionDirection = .vertical
         camera.fieldOfView = 35 // SketchUp's default
         cameraNode.camera = camera
         cameraNode.name = "camera"
+        rig.onChange = { [unowned self] in setNeedsDisplay(bounds) }
+        // Free fly reads mouseMoved; .inVisibleRect follows resizes by itself.
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
 
     public override var acceptsFirstResponder: Bool { true }
 
     private var camera: SCNCamera { cameraNode.camera! }
-    private var controller: SCNCameraController { defaultCameraController }
-    /// Orbit centre, world space.
-    var target: SIMD3<Float> {
-        get { SIMD3(controller.target) }
-        set { controller.target = SCNVector3(newValue) }
+    /// Orbit target straight ahead, world space.
+    var target: SIMD3<Float> { modelToWorld(rig.pose.target) }
+
+    public var ambientOcclusionEnabled = true {
+        didSet { Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera) }
     }
 
     /// Main thread: shows the scene, applies the file's camera if any, otherwise zooms to extents.
@@ -64,11 +76,7 @@ public final class ViewportView: SCNView {
         scene.headlight.removeFromParentNode()
         cameraNode.addChildNode(scene.headlight)
         pointOfView = cameraNode
-        controller.pointOfView = cameraNode
-        controller.interactionMode = .orbitTurntable
-        controller.inertiaEnabled = false
-        controller.automaticTarget = false
-        controller.worldUp = SCNVector3(0, 1, 0)
+        rig.setSpeed(diagonal: simd_distance(scene.model.boundsMin, scene.model.boundsMax))
         if let camera = scene.model.camera {
             apply(camera: camera, animated: false)
         } else {
@@ -77,90 +85,178 @@ public final class ViewportView: SCNView {
     }
 
     public func zoomExtents(animated: Bool) {
-        let back = -cameraNode.simdWorldFront
-        frame(direction: back.x.isFinite && simd_length(back) > 0.5 ? back : modelToWorld(vector: isoDirection),
-              up: cameraNode.simdWorldUp, animated: animated)
+        frame(rig.pose, animated: animated)
     }
 
     /// Frames the whole model from a standard direction.
     public func look(_ view: StandardView, animated: Bool) {
         let z = SIMD3<Float>(0, 0, 1), y = SIMD3<Float>(0, 1, 0)
-        let (direction, up): (SIMD3<Float>, SIMD3<Float>) = switch view {
-        case .iso: (isoDirection, z)
-        case .top: (z, y)
-        case .bottom: (-z, y)
-        case .front: (-y, z)
-        case .back: (y, z)
-        case .left: (SIMD3(-1, 0, 0), z)
-        case .right: (SIMD3(1, 0, 0), z)
+        let (forward, up): (SIMD3<Float>, SIMD3<Float>) = switch view {
+        case .iso: (-simd_normalize(SIMD3(1, -1, 1)), z)
+        case .top: (-z, y)
+        case .bottom: (z, y)
+        case .front: (y, z)
+        case .back: (-y, z)
+        case .left: (SIMD3(1, 0, 0), z)
+        case .right: (SIMD3(-1, 0, 0), z)
         }
-        frame(direction: modelToWorld(vector: direction), up: modelToWorld(vector: up), animated: animated)
+        var pose = rig.pose
+        (pose.yaw, pose.pitch) = CameraRig.orientation(forward: forward, up: up)
+        frame(pose, animated: animated)
     }
 
-    /// Applies a model-space camera (metres, Z up, vertical FOV) verbatim under the rotated root.
+    /// Applies a model-space camera (metres, Z up, vertical FOV) under the rotated root; roll is dropped.
     public func apply(camera model: SKPModel.Camera, animated: Bool) {
-        let worldTarget = modelToWorld(model.target)
-        animate(animated) {
-            cameraNode.simdPosition = model.position
-            cameraNode.simdLook(at: worldTarget, up: modelToWorld(vector: model.up), localFront: SCNNode.simdLocalFront)
-            camera.usesOrthographicProjection = !model.isPerspective
-            camera.fieldOfView = CGFloat(model.fovDegrees) // kept for a later switch to perspective
-            if !model.isPerspective { camera.orthographicScale = Double(model.orthoHeight / 2) }
-        }
-        target = worldTarget
+        camera.fieldOfView = CGFloat(model.fovDegrees) // kept for a later switch to perspective
+        let scale = model.isPerspective ? nil : Double(model.orthoHeight / 2)
+        camera.usesOrthographicProjection = !model.isPerspective // a projection change cannot be tweened: switch, then glide
+        if animated { rig.glide(to: CameraRig.pose(model), orthographicScale: scale) } else { rig.set(CameraRig.pose(model), orthographicScale: scale) }
         isPerspective = model.isPerspective
     }
 
     public var isPerspective: Bool = true {
         didSet {
             guard isPerspective == camera.usesOrthographicProjection else { return }
-            let tanHalf = tan(Double(camera.fieldOfView) * .pi / 360)
-            let eye = cameraNode.simdWorldPosition, front = cameraNode.simdWorldFront
-            // Zoomed past the target: its depth is negative; fall back to its distance so the ortho scale stays positive.
-            let along = simd_dot(target - eye, front)
-            let depth = along > 1e-3 ? along : max(simd_distance(target, eye), 1e-3)
+            rig.stop()
+            let tanHalf = Float(tan(Double(camera.fieldOfView) * .pi / 360))
             if isPerspective {
                 // Same framing: move along the view axis to the distance where the target plane fits the ortho height.
-                cameraNode.simdWorldPosition += front * (depth - Float(camera.orthographicScale / tanHalf))
+                let distance = Float(camera.orthographicScale) / tanHalf
+                rig.pose.position += rig.pose.forward * (rig.pose.distance - distance)
+                rig.pose.distance = distance
             } else {
-                camera.orthographicScale = Double(depth) * tanHalf
+                camera.orthographicScale = Double(rig.pose.distance * tanHalf)
             }
             camera.usesOrthographicProjection = !isPerspective
             setNeedsDisplay(bounds)
         }
     }
 
-    // MARK: - Navigation (event handlers stay one-liners over testable methods)
+    /// Free fly (⌥⌘F): the cursor is hidden and captured, the mouse looks without a click, the keys move.
+    /// Esc, the menu again, or losing the keyboard focus ends it.
+    public var isFreeFlying = false {
+        didSet {
+            guard isFreeFlying != oldValue else { return }
+            rig.stop()
+            if isFreeFlying {
+                window?.makeFirstResponder(self)
+                captureCursor(centre: true)
+            } else {
+                rig.keys = []
+                if drag != .look { releaseCursor() }
+            }
+            onFreeFlyingChange?(isFreeFlying)
+        }
+    }
+
+    // MARK: - Mouse (handlers stay short over testable methods)
 
     public override func mouseDown(with event: NSEvent) {
+        rig.stop()
+        window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
         lastPoint = point
+        if isFreeFlying { drag = nil; return }
+        if event.clickCount == 2 { drag = nil; recentre(at: point); return }
         drag = event.modifierFlags.contains(.shift) ? .pan : .orbit
-        if event.clickCount == 2 { recentre(at: point); return }
-        if let hit = hit(point) { target = hit }
+        beginPivot(at: point)
     }
-    public override func rightMouseDown(with event: NSEvent) { beginPan(event) } // no super: it would pop a context menu
-    public override func otherMouseDown(with event: NSEvent) { beginPan(event) }
+
+    public override func rightMouseDown(with event: NSEvent) { // no super: it would pop a context menu
+        rig.stop()
+        window?.makeFirstResponder(self)
+        drag = .look
+        captureCursor(centre: false)
+    }
+
+    public override func otherMouseDown(with event: NSEvent) {
+        rig.stop()
+        lastPoint = convert(event.locationInWindow, from: nil)
+        drag = .pan
+        beginPivot(at: lastPoint)
+    }
+
     public override func mouseDragged(with event: NSEvent) { dragged(event) }
     public override func rightMouseDragged(with event: NSEvent) { dragged(event) }
     public override func otherMouseDragged(with event: NSEvent) { dragged(event) }
 
+    public override func mouseMoved(with event: NSEvent) {
+        if isFreeFlying { mouseLook(dx: Float(event.deltaX), dy: Float(-event.deltaY)) }
+    }
+
+    public override func mouseUp(with event: NSEvent) {
+        if drag == .orbit { rig.release(time: event.timestamp) }
+        drag = nil
+    }
+
+    public override func rightMouseUp(with event: NSEvent) {
+        drag = nil
+        if !isFreeFlying { releaseCursor() }
+    }
+
+    public override func otherMouseUp(with event: NSEvent) { drag = nil }
+
+    private func dragged(_ event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let dx = Float(point.x - lastPoint.x), dy = Float(point.y - lastPoint.y)
+        lastPoint = point
+        if isFreeFlying || drag == .look {
+            mouseLook(dx: Float(event.deltaX), dy: Float(-event.deltaY)) // the captured cursor does not move: deltas only
+        } else if drag == .orbit {
+            orbit(dx: dx, dy: dy, time: event.timestamp)
+        } else if drag == .pan {
+            pan(dx: dx, dy: dy)
+        }
+    }
+
     public override func scrollWheel(with event: NSEvent) {
-        // One wheel notch ≈ 10 %; precise (trackpad) deltas are in points, ~10 per notch.
+        if !event.momentumPhase.isEmpty { return } // the rig's own inertia continues a two-finger orbit
+        let gesture = event.hasPreciseScrollingDeltas && !event.phase.isEmpty
+        // One wheel notch ≈ 10 %; precise deltas are in points, ~10 per notch.
         let notches = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 10 : event.scrollingDeltaY
-        // A wheel has no phases: a burst of notches less than 150 ms apart is one gesture (one hit test on huge models).
-        let wheel = event.phase.isEmpty && event.momentumPhase.isEmpty
-        let newGesture = event.phase == .began || (wheel && event.timestamp - lastWheel > 0.15)
-        if wheel { lastWheel = event.timestamp }
-        zoom(ratio: Float(pow(0.9, notches)), at: convert(event.locationInWindow, from: nil), newGesture: newGesture)
+        if drag == .look {
+            rig.speedScale *= Float(pow(1.25, notches))
+            return
+        }
+        let point = convert(event.locationInWindow, from: nil)
+        guard gesture else {
+            // A wheel has no phases: a burst of notches less than 150 ms apart is one gesture (one hit test on huge models).
+            let newGesture = event.timestamp - lastWheel > 0.15
+            lastWheel = event.timestamp
+            if newGesture { rig.stop() }
+            zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: newGesture)
+            return
+        }
+        if event.phase == .began { rig.stop(); beginPivot(at: point) }
+        let dx = Float(event.scrollingDeltaX), dy = Float(-event.scrollingDeltaY)
+        if event.modifierFlags.contains(.option) {
+            pan(dx: -dx, dy: -dy) // the model follows the fingers
+        } else if Self.twoFingerScrollZooms {
+            zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: event.phase == .began)
+        } else {
+            orbit(dx: dx, dy: dy, time: event.timestamp)
+        }
+        if event.phase == .ended || event.phase == .cancelled { rig.release(time: event.timestamp) }
     }
 
     public override func magnify(with event: NSEvent) {
+        if event.phase == .began { rig.stop() }
         zoom(ratio: Float(1 / max(0.1, 1 + event.magnification)), at: convert(event.locationInWindow, from: nil),
              newGesture: event.phase == .began)
     }
 
+    /// Two-finger rotation: yaw around the point under the fingers, never roll.
+    public override func rotate(with event: NSEvent) {
+        if event.phase == .began { rig.stop(); beginPivot(at: convert(event.locationInWindow, from: nil)) }
+        rig.orbit(yaw: event.rotation * .pi / 180, pitch: 0)
+    }
+
+    // MARK: - Keyboard
+
     public override func keyDown(with event: NSEvent) {
+        rig.stop()
+        if event.keyCode == 53, isFreeFlying { isFreeFlying = false; return } // Esc
+        if press(event) { return }
         if event.charactersIgnoringModifiers?.lowercased() == "z", event.modifierFlags.contains(.shift),
            event.modifierFlags.isDisjoint(with: [.command, .option, .control]) {
             zoomExtents(animated: true)
@@ -169,32 +265,98 @@ public final class ViewportView: SCNView {
         }
     }
 
-    private func beginPan(_ event: NSEvent) {
-        lastPoint = convert(event.locationInWindow, from: nil)
-        drag = .pan
-        if let hit = hit(lastPoint) { target = hit } // pan scale = depth under the cursor
+    /// A menu must not take ⇧Z from the movement keys while looking around (AZERTY: ⇧ + physical W types "Z").
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        window?.firstResponder === self && press(event) ? true : super.performKeyEquivalent(with: event)
     }
 
-    private func dragged(_ event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let dx = Float(point.x - lastPoint.x), dy = Float(point.y - lastPoint.y)
-        lastPoint = point
-        if drag == .orbit { orbit(dx: dx, dy: dy) } else { pan(dx: dx, dy: dy) }
+    public override func keyUp(with event: NSEvent) {
+        if CameraRig.moveKeys.contains(event.keyCode) { rig.keys.remove(event.keyCode) } else { super.keyUp(with: event) }
     }
 
-    /// View points, y up (AppKit). Dragging right turns the model right, like SketchUp.
-    func orbit(dx: Float, dy: Float) {
-        controller.rotateBy(x: -dx, y: dy)
-        setNeedsDisplay(bounds)
+    public override func flagsChanged(with event: NSEvent) {
+        rig.fast = event.modifierFlags.contains(.shift)
+        super.flagsChanged(with: event)
     }
 
-    /// View points, y up. The model follows the cursor about 1:1 at the target's depth.
+    /// Movement key by physical position. ⇧Z stays « zoom étendu » unless looking around or flying, where ⇧ means fast.
+    private func press(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, CameraRig.moveKeys.contains(event.keyCode),
+              event.modifierFlags.isDisjoint(with: [.command, .option, .control]) else { return false }
+        let shift = event.modifierFlags.contains(.shift)
+        if shift, event.charactersIgnoringModifiers?.lowercased() == "z", drag != .look, !isFreeFlying { return false }
+        rig.fast = shift
+        rig.keys.insert(event.keyCode)
+        return true
+    }
+
+    // MARK: - Focus: no path leaves the cursor hidden or a key held
+
+    public override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { releaseInput() }
+        return resigned
+    }
+
+    public override func viewWillMove(toWindow newWindow: NSWindow?) {
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        releaseInput()
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        NotificationCenter.default.addObserver(self, selector: #selector(windowResignedKey), name: NSWindow.didResignKeyNotification, object: window)
+    }
+
+    @objc private func windowResignedKey(_ note: Notification) { releaseInput() }
+
+    func releaseInput() {
+        drag = nil
+        isFreeFlying = false
+        rig.keys = []
+        releaseCursor()
+    }
+
+    /// Hides the cursor and detaches it from the mouse: it cannot leave the view, the events still carry the deltas.
+    private func captureCursor(centre: Bool) {
+        guard cursorHides == 0 else { return }
+        cursorHides += 1
+        NSCursor.hide()
+        guard let window, let screen = NSScreen.screens.first else { return } // headless tests: leave the real mouse alone
+        if centre {
+            let p = window.convertPoint(toScreen: convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil))
+            CGWarpMouseCursorPosition(CGPoint(x: p.x, y: screen.frame.maxY - p.y)) // CG: top-left origin
+        }
+        CGAssociateMouseAndMouseCursorPosition(0)
+    }
+
+    private func releaseCursor() {
+        guard cursorHides > 0 else { return }
+        cursorHides -= 1
+        CGAssociateMouseAndMouseCursorPosition(1)
+        NSCursor.unhide()
+    }
+
+    // MARK: - Navigation (view points, AppKit y up)
+
+    /// Dragging right turns the model right; dragging up makes the eye go down (SketchUp's feel).
+    func orbit(dx: Float, dy: Float, time: TimeInterval? = nil) {
+        let rate = orbitDegreesPerPoint * .pi / 180
+        rig.orbit(yaw: -dx * rate, pitch: dy * rate, time: time)
+    }
+
+    /// Mouse right turns right, mouse up looks up; the eye stays.
+    func mouseLook(dx: Float, dy: Float) {
+        let rate = lookDegreesPerPoint * .pi / 180
+        rig.look(yaw: -dx * rate, pitch: dy * rate)
+    }
+
+    /// The model follows the cursor about 1:1 at the pivot's depth.
     func pan(dx: Float, dy: Float) {
         let metresPerPoint = visibleHeight / Float(max(1, bounds.height))
-        let before = cameraNode.simdWorldPosition
-        controller.translateInCameraSpaceBy(x: -dx * metresPerPoint, y: -dy * metresPerPoint, z: 0)
-        target += cameraNode.simdWorldPosition - before // the controller leaves its target behind
-        setNeedsDisplay(bounds)
+        rig.pose.position -= (rig.pose.right * dx + rig.pose.up * dy) * metresPerPoint
     }
 
     /// ratio < 1 zooms in (distance or ortho height multiplied by ratio), towards `point`.
@@ -205,74 +367,91 @@ public final class ViewportView: SCNView {
             let metresPerPoint = visibleHeight / Float(max(1, bounds.height))
             let dx = Float(point.x - bounds.midX) * metresPerPoint, dy = Float(point.y - bounds.midY) * metresPerPoint
             camera.orthographicScale *= Double(ratio)
-            let before = cameraNode.simdWorldPosition
-            controller.translateInCameraSpaceBy(x: dx * (1 - ratio), y: dy * (1 - ratio), z: 0)
-            target += cameraNode.simdWorldPosition - before // as in pan()
+            rig.pose.position += (rig.pose.right * dx + rig.pose.up * dy) * (1 - ratio)
         } else {
             if newGesture { zoomAnchor = hit(point) }
-            let depth = simd_distance(cameraNode.simdWorldPosition, zoomAnchor ?? target)
-            controller.dolly(by: depth * (1 - ratio), onScreenPoint: point, viewport: bounds.size)
+            let pose = rig.pose
+            let ray = ray(through: point)
+            var next = pose
+            next.position += ray * simd_distance(pose.position, zoomAnchor ?? pose.target) * (1 - ratio)
+            // The target follows the point zoomed on; over the sky it travels with the eye.
+            if let zoomAnchor { next.distance = max(simd_dot(zoomAnchor - next.position, pose.forward), 1e-3) }
+            rig.pose = next
         }
-        setNeedsDisplay(bounds)
     }
 
-    /// Double-click: the clicked point becomes the target and the camera slides sideways until it sits on the view axis.
+    /// Double-click: glides (0.3 s) until the clicked point sits at the view centre, at a third of its depth (judgement
+    /// call: once instances are merged, the hit node's size says nothing about what was clicked).
     func recentre(at point: CGPoint) {
         guard let hit = hit(point) else { return }
-        let eye = cameraNode.simdWorldPosition, front = cameraNode.simdWorldFront
-        let offset = hit - (eye + front * simd_dot(hit - eye, front))
-        let position = cameraNode.simdWorldPosition + offset
-        animate(true, duration: 0.25) { cameraNode.simdWorldPosition = position }
-        target = hit
+        var next = rig.pose
+        next.distance = max(simd_dot(hit - next.position, next.forward) / 3, 1e-3)
+        next.position = hit - next.forward * next.distance
+        let scale = camera.usesOrthographicProjection ? camera.orthographicScale / 3 : nil
+        rig.glide(to: next, orthographicScale: scale, duration: 0.3)
+    }
+
+    /// Orbit and pan centre for a drag or gesture: the point under the cursor, else the target. The target moves to its
+    /// depth so the pan scale and the parallel switch follow what is under the hand.
+    private func beginPivot(at point: CGPoint) {
+        guard let hit = hit(point) else { rig.pivot = nil; return }
+        rig.pivot = hit
+        rig.pose.distance = max(simd_dot(hit - rig.pose.position, rig.pose.forward), 1e-3)
     }
 
     // MARK: - Helpers
 
+    private var tanHalfFOV: Float { Float(tan(camera.fieldOfView * .pi / 360)) }
+
     private var visibleHeight: Float {
-        if camera.usesOrthographicProjection { return Float(camera.orthographicScale) * 2 }
-        let distance = simd_distance(cameraNode.simdWorldPosition, target)
-        return 2 * distance * Float(tan(camera.fieldOfView * .pi / 360))
+        camera.usesOrthographicProjection ? Float(camera.orthographicScale) * 2 : 2 * rig.pose.distance * tanHalfFOV
     }
 
-    /// Nearest model point under `point` (results are sorted by distance). Back faces count: SketchUp rooms are
-    /// often single-sided walls facing outwards.
+    /// Model-space direction of the perspective ray through a view point.
+    private func ray(through point: CGPoint) -> SIMD3<Float> {
+        let pose = rig.pose, scale = tanHalfFOV / (Float(max(1, bounds.height)) / 2)
+        let x = Float(point.x - bounds.midX) * scale, y = Float(point.y - bounds.midY) * scale
+        return simd_normalize(pose.forward + pose.right * x + pose.up * y)
+    }
+
+    /// Nearest model point under `point`, model space (results are sorted by distance). Back faces count: SketchUp
+    /// rooms are often single-sided walls facing outwards. A segment test on the scene graph: `SCNView.hitTest` finds
+    /// nothing before a first frame.
     private func hit(_ point: CGPoint) -> SIMD3<Float>? {
-        hitTest(point, options: [.boundingBoxOnly: false, .backFaceCulling: false]).first.map { SIMD3<Float>($0.worldCoordinates) }
+        guard let root = viewportScene?.modelRoot, let bounds = viewportScene?.visibleBounds else { return nil }
+        let pose = rig.pose, reach = simd_distance(pose.position, (bounds.min + bounds.max) / 2) + simd_distance(bounds.min, bounds.max)
+        var from = pose.position, direction = ray(through: point)
+        if camera.usesOrthographicProjection {
+            let metresPerPoint = visibleHeight / Float(max(1, self.bounds.height))
+            from += (pose.right * Float(point.x - self.bounds.midX) + pose.up * Float(point.y - self.bounds.midY)) * metresPerPoint
+            direction = pose.forward
+        }
+        let to = from + direction * reach
+        return root.hitTestWithSegment(from: SCNVector3(from), to: SCNVector3(to), options: [SCNHitTestOption.backFaceCulling.rawValue: false])
+            .first { $0.node.geometry?.elements.first?.primitiveType != .line } // edges hit with a tolerance, off the surface
+            .map { worldToModel(SIMD3<Float>($0.worldCoordinates)) }
     }
-
-    private var isoDirection: SIMD3<Float> { simd_normalize(SIMD3(1, -1, 1)) }
 
     private func modelToWorld(_ point: SIMD3<Float>) -> SIMD3<Float> {
         viewportScene?.modelRoot.simdConvertPosition(point, to: nil) ?? point
     }
 
-    private func modelToWorld(vector: SIMD3<Float>) -> SIMD3<Float> {
-        viewportScene?.modelRoot.simdConvertVector(vector, to: nil) ?? vector
+    private func worldToModel(_ point: SIMD3<Float>) -> SIMD3<Float> {
+        viewportScene?.modelRoot.simdConvertPosition(point, from: nil) ?? point
     }
 
-    /// Puts the camera on `direction` (world, target → eye) at the distance that fits the visible bounding sphere.
-    private func frame(direction: SIMD3<Float>, up: SIMD3<Float>, animated: Bool) {
+    /// Keeps `pose`'s direction and puts the eye at the distance that fits the visible bounding sphere.
+    private func frame(_ direction: CameraRig.Pose, animated: Bool) {
         guard let bounds = viewportScene?.visibleBounds else { return }
-        let centre = modelToWorld((bounds.min + bounds.max) / 2)
+        let centre = (bounds.min + bounds.max) / 2
         let radius = max(simd_length(bounds.max - bounds.min) / 2, 0.01)
         let aspect = Float(max(1, self.bounds.width) / max(1, self.bounds.height))
         let vfov = Float(camera.fieldOfView) * .pi / 180
         let hfov = 2 * atan(tan(vfov / 2) * aspect)
-        let distance = radius / sin(min(vfov, hfov) / 2) * 1.05
-        animate(animated) {
-            cameraNode.simdWorldPosition = centre + simd_normalize(direction) * distance
-            cameraNode.simdLook(at: centre, up: up, localFront: SCNNode.simdLocalFront)
-            if camera.usesOrthographicProjection { camera.orthographicScale = Double(radius * 1.05 / min(1, aspect)) }
-        }
-        target = centre
-    }
-
-    private func animate(_ animated: Bool, duration: Double = 0.35, _ changes: () -> Void) {
-        SCNTransaction.begin()
-        SCNTransaction.animationDuration = animated ? duration : 0
-        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        changes()
-        SCNTransaction.commit()
-        setNeedsDisplay(bounds)
+        var pose = direction
+        pose.distance = radius / sin(min(vfov, hfov) / 2) * 1.05
+        pose.position = centre - pose.forward * pose.distance
+        let scale = camera.usesOrthographicProjection ? Double(radius * 1.05 / min(1, aspect)) : nil
+        if animated { rig.glide(to: pose, orthographicScale: scale) } else { rig.set(pose, orthographicScale: scale) }
     }
 }

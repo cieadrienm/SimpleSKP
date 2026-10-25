@@ -15,12 +15,24 @@ Visualiseur **SketchUp** natif, léger (13 Mo dont 11 pour le SDK SketchUp, zér
 
 ## Manipulation
 
+Quatre façons coexistent ; un clic ou une touche arrête tout mouvement en cours.
+
 | Geste | Effet |
 |---|---|
-| Glisser | Orbite autour du point visé |
-| ⇧-glisser, clic droit ou bouton du milieu | Panoramique |
-| Molette ou pincement | Zoom vers le curseur |
-| Double-clic | Recentrer sur le point |
+| Glisser | Orbite autour du point visé, avec inertie |
+| ⇧-glisser ou bouton du milieu | Panoramique |
+| Molette | Zoom vers le curseur |
+| Double-clic | Recentrer et approcher le point |
+| Clic droit tenu | Regarder autour (éditeur de jeu) |
+| ZQSD (WASD en QWERTY) ou flèches | Avancer, reculer, pas de côté (touches physiques) |
+| Espace ou E / C | Monter / descendre |
+| ⇧ avec les touches | Quatre fois plus vite |
+| Molette avec clic droit tenu | Vitesse de déplacement |
+| Deux doigts (trackpad) | Orbite, ou zoom (Réglages, pour la Magic Mouse) |
+| ⌥ + deux doigts | Panoramique |
+| Pincer | Zoom vers le curseur |
+| Rotation à deux doigts | Tourner autour de la verticale |
+| ⌥⌘F | Vol libre : la souris oriente sans clic, le clavier déplace, Échap pour sortir |
 | ⇧Z | Zoom étendu |
 
 ## Raccourcis
@@ -34,7 +46,10 @@ Visualiseur **SketchUp** natif, léger (13 Mo dont 11 pour le SDK SketchUp, zér
 | ⌥⌘S | Afficher / masquer la barre latérale |
 | ⌘E | Arêtes |
 | ⌥⌘P | Perspective / parallèle |
+| ⌥⌘O | Ombres |
+| ⌥⌘A | Occlusion ambiante |
 | ⇧Z | Zoom étendu |
+| ⌥⌘F | Mode vol libre (Échap pour sortir) |
 | ⌘[ / ⌘] | Scène précédente / suivante |
 | ⌘1 … ⌘7 | Iso, dessus, face, droite, arrière, gauche, dessous |
 | ⌘? | Aide |
