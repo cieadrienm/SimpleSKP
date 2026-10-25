@@ -4,3 +4,4 @@ build/
 *.xcodeproj
 *.xcworkspace
 .project-map/
+.superpowers/

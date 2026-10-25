@@ -129,10 +129,13 @@ public struct SKPModel: Sendable {
     public var fileInfo: SKPFileInfo
     /// Non-fatal note from the loader, e.g. file saved by a newer SketchUp (loaded anyway).
     public var loadWarning: String?
+    /// Temporary folder holding the written textures (`NSTemporaryDirectory()/SimpleSKP/<uuid>/`), nil when none;
+    /// the app deletes it when the document closes.
+    public var textureDirectory: URL?
 
-    public init(root: Definition, definitions: [Definition] = [], materials: [Material] = [], layers: [Layer], scenes: [Scene] = [], camera: Camera? = nil, boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>, stats: Stats = Stats(), fileInfo: SKPFileInfo, loadWarning: String? = nil) {
+    public init(root: Definition, definitions: [Definition] = [], materials: [Material] = [], layers: [Layer], scenes: [Scene] = [], camera: Camera? = nil, boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>, stats: Stats = Stats(), fileInfo: SKPFileInfo, loadWarning: String? = nil, textureDirectory: URL? = nil) {
         self.root = root; self.definitions = definitions; self.materials = materials; self.layers = layers; self.scenes = scenes; self.camera = camera
-        self.boundsMin = boundsMin; self.boundsMax = boundsMax; self.stats = stats; self.fileInfo = fileInfo; self.loadWarning = loadWarning
+        self.boundsMin = boundsMin; self.boundsMax = boundsMax; self.stats = stats; self.fileInfo = fileInfo; self.loadWarning = loadWarning; self.textureDirectory = textureDirectory
     }
 
     public var size: SIMD3<Float> { boundsMax - boundsMin }
