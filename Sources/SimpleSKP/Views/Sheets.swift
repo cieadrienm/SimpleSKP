@@ -67,8 +67,8 @@ struct AboutView: View {
                     Text("cie Adrien M — Compagnie Adrien M")
                         .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(Theme.text.swiftUI)
-                    Text(L("Licence publique générale GNU (GPL v3). Lit les fichiers avec le framework du SDK SketchUp de Trimble, livré dans l'app sous la licence du SDK SketchUp (pas GPL).",
-                           "GNU General Public License (GPL v3). Reads files with Trimble's SketchUp SDK framework, shipped in the app under the SketchUp SDK licence (not GPL)."))
+                    Text(L("Le framework du SDK C de SketchUp (Trimble) est embarqué dans l'app sous la licence du SDK SketchUp ; le code de SimpleSKP est GPL v3.",
+                           "The SketchUp C SDK framework (Trimble) is embedded in the app under the SketchUp SDK licence; SimpleSKP's code is GPL v3."))
                         .font(.system(size: 10.5))
                         .foregroundStyle(Theme.textFaint.swiftUI)
                         .fixedSize(horizontal: false, vertical: true)
@@ -168,8 +168,8 @@ struct HelpView: View {
              L("La barre latérale (⌥⌘S) liste les scènes du fichier : un clic y amène la caméra et applique les calques masqués de la scène ; ⌘[ et ⌘] passent à la précédente ou à la suivante. Les cases des calques montrent ou cachent leur contenu aussitôt.",
                "The sidebar (⌥⌘S) lists the file's scenes: a click moves the camera there and applies the scene's hidden layers; ⌘[ and ⌘] step to the previous or next one. The layer checkboxes show or hide their content at once.")),
             (L("Le SDK SketchUp est dans l'app", "The SketchUp SDK is inside the app"),
-             L("Le fichier est lu par le framework du SDK SketchUp, livré dans SimpleSKP.app : SketchUp n'a pas besoin d'être installé. Quand il l'est, « Ouvrir dans SketchUp » (⇧⌘O) y ouvre le fichier. Le chemin du framework est dans À propos.",
-               "The file is read by the SketchUp SDK framework shipped inside SimpleSKP.app: SketchUp does not need to be installed. When it is, « Open in SketchUp » (⇧⌘O) opens the file there. The framework's path is in About.")),
+             L("Le fichier est lu par le framework du SDK SketchUp, livré dans SimpleSKP.app : SketchUp n'a pas besoin d'être installé. Quand il l'est, « Ouvrir dans SketchUp » (⇧⌘O) y ouvre le fichier. Le chemin du framework est dans À propos. Le framework du SDK C de SketchUp (Trimble) est embarqué dans l'app sous la licence du SDK SketchUp ; le code de SimpleSKP est GPL v3.",
+               "The file is read by the SketchUp SDK framework shipped inside SimpleSKP.app: SketchUp does not need to be installed. When it is, « Open in SketchUp » (⇧⌘O) opens the file there. The framework's path is in About. The SketchUp C SDK framework (Trimble) is embedded in the app under the SketchUp SDK licence; SimpleSKP's code is GPL v3.")),
             (L("Limites", "Limits"),
              L("Visualiseur seulement : pas d'édition, d'export, d'ombres, de styles ni de plans de section.",
                "Viewer only: no editing, export, shadows, styles or section planes.")),

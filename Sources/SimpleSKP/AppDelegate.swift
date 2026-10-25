@@ -20,7 +20,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         documentController = DocumentController()
         NSApp.mainMenu = MainMenu.build(delegate: self)
         NSWindow.allowsAutomaticWindowTabbing = false
-        try? FileManager.default.removeItem(at: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("SimpleSKP"))
 
         let args = Array(CommandLine.arguments.dropFirst())
         func operand(after index: Int) -> String? {
@@ -32,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selfTestRequested = true
             selfTestFile = operand(after: index + 1)
         } else {
+            // Leftovers of a crashed session; not in the CLI modes, whose models may still load textures from there.
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("SimpleSKP"))
             Self.updater = SimpleUpdater()
         }
     }

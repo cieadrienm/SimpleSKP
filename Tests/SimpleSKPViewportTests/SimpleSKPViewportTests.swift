@@ -175,6 +175,23 @@ final class SimpleSKPViewportTests: XCTestCase {
                       "an untextured material is one SCNMaterial whatever the UVs")
     }
 
+    /// Visible bounds leave out what is on a hidden layer, and take it in once the layer is shown.
+    func testVisibleBoundsFollowLayers() {
+        var model = SyntheticModel.cube()
+        model.root.children[1].transform.columns.3 = SIMD4(0, 20, 0, 1) // B, on hidden Cotes, 20 m away
+        let scene = ViewportScene(model: model)
+        var bounds = scene.visibleBounds
+        XCTAssertEqual(simd_distance(bounds.min, SIMD3(0, 0, 0)), 0, accuracy: 1e-5)
+        XCTAssertEqual(simd_distance(bounds.max, SIMD3(3, 1, 1)), 0, accuracy: 1e-5, "root cube and A only")
+        scene.setLayer(1, visible: true)
+        bounds = scene.visibleBounds
+        XCTAssertEqual(simd_distance(bounds.max, SIMD3(3, 21, 1)), 0, accuracy: 1e-5, "B joined")
+        scene.setLayer(1, visible: false)
+        scene.setLayer(0, visible: false)
+        bounds = scene.visibleBounds
+        XCTAssertEqual(bounds.max, model.boundsMax, "nothing shown: the model's bounds")
+    }
+
     func testBuildsOffMainThread() async {
         let model = SyntheticModel.cube()
         let count = await Task.detached { ViewportScene(model: model).modelRoot.childNodes[0].childNodes.count }.value
@@ -261,8 +278,8 @@ final class SimpleSKPViewportTests: XCTestCase {
     }
 
     func testOrbitTurnsAroundWorldUpTowardsTheRight() {
-        let (view, scene) = presentedView()
-        let centre = scene.modelRoot.simdConvertPosition(scene.model.center, to: nil)
+        let (view, _) = presentedView()
+        let centre = view.target // framed on the visible bounds (hidden B left out)
         let before = view.cameraNode.simdWorldPosition, right = view.cameraNode.simdWorldRight
         view.orbit(dx: 50, dy: 0)
         let after = view.cameraNode.simdWorldPosition
@@ -277,8 +294,8 @@ final class SimpleSKPViewportTests: XCTestCase {
     }
 
     func testPanFollowsCursor() {
-        let (view, scene) = presentedView()
-        let centre = scene.modelRoot.simdConvertPosition(scene.model.center, to: nil)
+        let (view, _) = presentedView()
+        let centre = view.target // framed on the visible bounds (hidden B left out)
         let before = view.cameraNode.simdWorldPosition, right = view.cameraNode.simdWorldRight
         // Perspective projection by hand (projectPoint needs a rendered frame).
         func screenX(_ p: SIMD3<Float>) -> Float {
@@ -319,6 +336,24 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertEqual(view.cameraNode.camera!.orthographicScale, scale * 0.5, accuracy: 1e-6)
     }
 
+    func testParallelZoomKeepsThePointUnderTheCursor() {
+        let (view, scene) = presentedView()
+        view.isPerspective = false
+        let camera = view.cameraNode.camera!
+        // Orthographic projection by hand (projectPoint needs a rendered frame); AppKit y up.
+        func screen(_ p: SIMD3<Float>) -> SIMD2<Float> {
+            let local = view.cameraNode.simdConvertPosition(p, from: nil)
+            return SIMD2(400, 300) + SIMD2(local.x, local.y) / Float(camera.orthographicScale) * 300
+        }
+        let corner = scene.modelRoot.simdConvertPosition(SIMD3(1, 0, 1), to: nil)
+        let before = screen(corner)
+        XCTAssertGreaterThan(simd_distance(before, SIMD2(400, 300)), 20, "off the view centre")
+        let target = view.target
+        view.zoom(ratio: 0.8, at: CGPoint(x: CGFloat(before.x), y: CGFloat(before.y)))
+        XCTAssertEqual(simd_distance(screen(corner), before), 0, accuracy: 0.05, "stays under the cursor")
+        XCTAssertGreaterThan(simd_distance(view.target, target), 1e-3, "the target moved with the camera")
+    }
+
     private func click(_ view: NSView, at point: CGPoint, count: Int) {
         let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0, windowNumber: 0,
                                        context: nil, eventNumber: 0, clickCount: count, pressure: 1)!
@@ -352,7 +387,7 @@ final class SimpleSKPViewportTests: XCTestCase {
         let root = scene.modelRoot.childNodes[0]
         let edges = root.childNodes[1], cloneEdges = root.childNodes[2].childNodes[1]
         XCTAssertEqual(edges.renderingOrder, 1)
-        XCTAssertEqual(cloneEdges.renderingOrder, 1, "survives clone()")
+        XCTAssertEqual(cloneEdges.renderingOrder, 1, "survives instantiate()")
         XCTAssertEqual(root.childNodes[0].renderingOrder, 0)
         let material = edges.geometry!.firstMaterial!
         XCTAssertTrue(material === cloneEdges.geometry!.firstMaterial, "one shared edge material")

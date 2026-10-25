@@ -101,8 +101,9 @@ public struct SKPModel: Sendable {
         public var name: String
         public var camera: Camera?
         /// Indices into `SKPModel.layers` that the scene hides; every other layer is shown.
-        public var hiddenLayers: [Int]
-        public init(name: String, camera: Camera?, hiddenLayers: [Int] = []) { self.name = name; self.camera = camera; self.hiddenLayers = hiddenLayers }
+        /// nil: the scene does not save layer visibility, selecting it leaves the layers as they are (SketchUp).
+        public var hiddenLayers: [Int]?
+        public init(name: String, camera: Camera?, hiddenLayers: [Int]? = []) { self.name = name; self.camera = camera; self.hiddenLayers = hiddenLayers }
     }
 
     public struct Stats: Sendable {

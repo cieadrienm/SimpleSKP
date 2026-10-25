@@ -70,6 +70,30 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertTrue(model.statusText.contains("SketchUp 2023"), model.statusText)
     }
 
+    /// A scene that does not save layer visibility (nil) leaves the layers as they are, like SketchUp.
+    func testSceneWithoutSavedLayersKeepsVisibility() {
+        var cube = SyntheticModel.cube()
+        cube.scenes = [SKPModel.Scene(name: "Caméra seule", camera: cube.camera, hiddenLayers: nil)]
+        let model = DocumentModel()
+        model.setModel(cube)
+        model.toggleLayer(1)
+        model.selectScene(0)
+        XCTAssertEqual(model.selectedScene, 0)
+        XCTAssertEqual(model.layerVisible, [true, false])
+    }
+
+    /// The status bar gives the size of what is shown: hiding « Décor » (the cube at x = 1.5 m) narrows it.
+    func testStatusBarShowsVisibleSize() {
+        let model = DocumentModel()
+        model.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0.1)
+        let one = Format.decimal(1 as Float)
+        XCTAssertTrue(model.statusText.contains("\(Format.decimal(2.5 as Float)) × \(one) × \(one) m"), model.statusText)
+        model.toggleLayer(1)
+        XCTAssertTrue(model.statusText.contains("\(one) × \(one) × \(one) m"), model.statusText)
+        model.selectScene(0) // saves « all shown »
+        XCTAssertTrue(model.statusText.contains("\(Format.decimal(2.5 as Float)) × \(one) × \(one) m"), model.statusText)
+    }
+
     func testNumbersInBothLanguages() {
         let saved = Localization.current
         defer { Localization.current = saved }
@@ -171,6 +195,7 @@ final class DocumentOpenTests: XCTestCase {
 
     /// Closing before `.ready` cancels: the scene is never presented and nothing crashes or leaks.
     func testCloseDuringLoad() throws {
+        try XCTSkipUnless(SketchUpAPI.isAvailable, "SketchUp SDK not found: nothing loads, nothing to cancel")
         _ = NSApplication.shared
         _ = DocumentController()
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -190,10 +215,9 @@ final class DocumentOpenTests: XCTestCase {
         let settled = expectation(description: "settled")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { settled.fulfill() }
         wait(for: [settled], timeout: 5)
+        XCTAssertTrue(skp.cancelled.withLock { $0 }, "close() raised the flag the reader and the main-queue hop check")
         XCTAssertFalse(skp.model.isReady, "a closed document never presents its scene")
-        if let directory = skp.model.skp?.textureDirectory {
-            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
-        }
+        XCTAssertNil(skp.model.skp, "the loaded model was dropped, not presented")
         XCTAssertFalse(NSDocumentController.shared.documents.contains(skp))
     }
 }

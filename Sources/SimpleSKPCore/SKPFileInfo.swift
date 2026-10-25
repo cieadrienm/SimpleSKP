@@ -7,7 +7,7 @@ public struct SKPFileInfo: Sendable {
     public let fileSize: Int
     /// Raw version from the header, e.g. "17.3.116"; nil when the header is not SketchUp's.
     public let version: String?
-    /// Human label, e.g. "SketchUp 2017" (8 → "SketchUp 8", 13…23 → "SketchUp 2013…2023").
+    /// Human label, e.g. "SketchUp 2017" (3…12 → "SketchUp 3…12", 13…99 → "SketchUp 2013…2099").
     public let versionLabel: String?
     public let thumbnailPNG: Data?
 
@@ -49,7 +49,6 @@ public struct SKPFileInfo: Sendable {
     static func label(_ version: String) -> String {
         let major = Int(version.prefix { $0.isNumber }) ?? 0
         switch major {
-        case ...8: return "SketchUp 8"
         case 13...99: return "SketchUp 20\(String(format: "%02d", major))"
         default: return "SketchUp \(major)"
         }

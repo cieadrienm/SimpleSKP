@@ -12,13 +12,19 @@ VERSION="1.0.0"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 CONFIG="${1:-release}"
 
+APP="${APP:-build/SimpleSKP.app}"
+# It is deleted below: only ever a bundle under build/.
+if [[ "$APP" != build/*.app || "$APP" == *..* ]]; then
+    echo "error: APP must be a .app under build/ (got $APP)" >&2
+    exit 1
+fi
+
 if [ ! -f Resources/AppIcon.icns ]; then
     swift Scripts/make-icon.swift
 fi
 
 swift build -c "$CONFIG" --product SimpleSKP
 BIN="$(swift build -c "$CONFIG" --show-bin-path)"
-APP="${APP:-build/SimpleSKP.app}"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" build
 cp "$BIN/SimpleSKP" "$APP/Contents/MacOS/SimpleSKP"
@@ -29,6 +35,7 @@ if grep -q '@VERSION@\|@BUILD@' "$APP/Contents/Info.plist"; then
     echo "error: the version was not stamped into the app's Info.plist" >&2
     exit 1
 fi
+plutil -lint "$APP/Contents/Info.plist" >&2
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Localisations: AppKit shows its own strings (Sans titre / Untitled, Ouvrir / Open…) in French or English.
 for LPROJ in Resources/*.lproj; do

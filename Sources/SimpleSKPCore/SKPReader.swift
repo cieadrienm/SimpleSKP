@@ -55,8 +55,9 @@ public enum SKPReader {
                 SKPModel.Scene(
                     name: c.string(f.SUSceneGetName, scene),
                     camera: c.bool(f.SUSceneGetUseCamera, scene) ? c.ref(f.SUSceneGetCamera, scene).flatMap(c.camera) : nil,
-                    hiddenLayers: c.bool(f.SUSceneGetUseHiddenLayers, scene)
-                        ? c.refs(f.SUSceneGetNumLayers, f.SUSceneGetLayers, scene).compactMap { $0.flatMap { c.layerIndex[$0] } } : [])
+                    hiddenLayers: Self.hiddenLayers(saved: c.bool(f.SUSceneGetUseHiddenLayers, scene)) {
+                        c.refs(f.SUSceneGetNumLayers, f.SUSceneGetLayers, scene).compactMap { $0.flatMap { c.layerIndex[$0] } }
+                    })
             }
             c.stats.definitions = c.definitions.count
             c.stats.loadSeconds = Date().timeIntervalSince(start)
@@ -71,6 +72,9 @@ public enum SKPReader {
     }
 
     static let lock = NSLock()
+
+    /// A scene that does not save layer visibility has nil hidden layers: selecting it leaves the layers as they are.
+    static func hiddenLayers(saved: Bool, _ indices: () -> [Int]) -> [Int]? { saved ? indices() : nil }
     static let inch = 0.0254
 
     /// SketchUp transform (column-major `double[16]`, inches) → metres. A uniform scale is stored as 1/scale in

@@ -197,11 +197,17 @@ public final class ViewportView: SCNView {
         setNeedsDisplay(bounds)
     }
 
-    /// ratio < 1 zooms in (distance or ortho height multiplied by ratio), towards `point` in perspective.
-    /// The step is a fraction of the depth under the cursor (hit tested once per gesture), so it never crosses a wall.
+    /// ratio < 1 zooms in (distance or ortho height multiplied by ratio), towards `point`.
+    /// Perspective: the step is a fraction of the depth under the cursor (hit tested once per gesture), so it never
+    /// crosses a wall. Parallel: the camera slides towards the cursor so the point under it stays put.
     func zoom(ratio: Float, at point: CGPoint, newGesture: Bool = true) {
         if camera.usesOrthographicProjection {
+            let metresPerPoint = visibleHeight / Float(max(1, bounds.height))
+            let dx = Float(point.x - bounds.midX) * metresPerPoint, dy = Float(point.y - bounds.midY) * metresPerPoint
             camera.orthographicScale *= Double(ratio)
+            let before = cameraNode.simdWorldPosition
+            controller.translateInCameraSpaceBy(x: dx * (1 - ratio), y: dy * (1 - ratio), z: 0)
+            target += cameraNode.simdWorldPosition - before // as in pan()
         } else {
             if newGesture { zoomAnchor = hit(point) }
             let depth = simd_distance(cameraNode.simdWorldPosition, zoomAnchor ?? target)
@@ -244,12 +250,12 @@ public final class ViewportView: SCNView {
         viewportScene?.modelRoot.simdConvertVector(vector, to: nil) ?? vector
     }
 
-    /// Puts the camera on `direction` (world, target → eye) at the distance that fits the bounding sphere.
+    /// Puts the camera on `direction` (world, target → eye) at the distance that fits the visible bounding sphere.
     private func frame(direction: SIMD3<Float>, up: SIMD3<Float>, animated: Bool) {
-        guard let model = viewportScene?.model else { return }
-        let centre = modelToWorld(model.center)
-        let radius = max(simd_length(model.size) / 2, 0.01)
-        let aspect = Float(max(1, bounds.width) / max(1, bounds.height))
+        guard let bounds = viewportScene?.visibleBounds else { return }
+        let centre = modelToWorld((bounds.min + bounds.max) / 2)
+        let radius = max(simd_length(bounds.max - bounds.min) / 2, 0.01)
+        let aspect = Float(max(1, self.bounds.width) / max(1, self.bounds.height))
         let vfov = Float(camera.fieldOfView) * .pi / 180
         let hfov = 2 * atan(tan(vfov / 2) * aspect)
         let distance = radius / sin(min(vfov, hfov) / 2) * 1.05

@@ -9,8 +9,8 @@ import SwiftUI
 @MainActor
 final class SKPDocument: NSDocument {
     let model = DocumentModel()
-    /// Read off the main thread by the reader's `isCancelled`.
-    private let cancelled = OSAllocatedUnfairLock(initialState: false)
+    /// Read off the main thread by the reader's `isCancelled` (and by the tests).
+    let cancelled = OSAllocatedUnfairLock(initialState: false)
     private var loadStarted = false
 
     override class var autosavesInPlace: Bool { false }

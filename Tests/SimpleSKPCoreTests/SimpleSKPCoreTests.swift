@@ -28,6 +28,21 @@ final class SimpleSKPCoreTests: XCTestCase {
         XCTAssertNil(info.thumbnailPNG)
     }
 
+    func testVersionLabels() {
+        XCTAssertEqual(SKPFileInfo.label("3.0.1"), "SketchUp 3")
+        XCTAssertEqual(SKPFileInfo.label("7.1.6087"), "SketchUp 7")
+        XCTAssertEqual(SKPFileInfo.label("8.0.3161"), "SketchUp 8")
+        XCTAssertEqual(SKPFileInfo.label("13.0.4812"), "SketchUp 2013")
+        XCTAssertEqual(SKPFileInfo.label("23.0.396"), "SketchUp 2023")
+    }
+
+    /// A scene that does not save layer visibility maps to nil (layers left as they are), not to « all shown ».
+    func testSceneHiddenLayersMapping() {
+        XCTAssertNil(SKPReader.hiddenLayers(saved: false) { XCTFail("not read"); return [1] })
+        XCTAssertEqual(SKPReader.hiddenLayers(saved: true) { [1, 3] }, [1, 3])
+        XCTAssertEqual(SKPReader.hiddenLayers(saved: true) { [] }, [])
+    }
+
     func testNonSketchUpFile() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("simpleskp-random-\(UUID().uuidString).skp")
         try Data((0..<4096).map { _ in UInt8.random(in: 0...255) }).write(to: url)
@@ -69,8 +84,13 @@ final class SimpleSKPCoreTests: XCTestCase {
     // MARK: SketchUp API
 
     func testLocateSketchUp() throws {
-        let location = try XCTUnwrap(SketchUpAPI.locate())
-        XCTAssertTrue(location.appVersion?.hasPrefix("23") == true, "\(location)")
+        // Asserted on the SketchUp.app candidate itself: `$SIMPLESKP_SKETCHUP_SDK` may put another copy first.
+        let host = SketchUpAPI.candidates().first {
+            $0.appVersion != nil && FileManager.default.fileExists(atPath: $0.frameworkURL.appendingPathComponent("SketchUpAPI").path)
+        }
+        try XCTSkipUnless(host != nil, "no SketchUp.app installed")
+        XCTAssertNotNil(SketchUpAPI.locate())
+        XCTAssertFalse(host?.appVersion?.isEmpty ?? true, "\(String(describing: host))")
     }
 
     /// Runs `body` with environment variables set (nil: unset), then restores them.

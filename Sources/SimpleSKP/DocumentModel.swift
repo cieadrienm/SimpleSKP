@@ -20,8 +20,10 @@ final class DocumentModel {
     }
     private(set) var thumbnail: NSImage?
     var state: State = .loading(nil)
-    /// Set as soon as the reader returns, before the scene exists.
+    /// Set with the scene, in `present` (`setModel` alone in the tests).
     private(set) var skp: SKPModel?
+    /// Size of what is shown (status bar): the visible bounds, refreshed at `present` and after a layer or scene change.
+    private(set) var visibleSize: SIMD3<Float>?
     @ObservationIgnored let viewport = ViewportView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
     var selectedScene: Int?
     var layerVisible: [Bool] = []
@@ -57,6 +59,7 @@ final class DocumentModel {
         if !showsEdges { scene.showsEdges = false }
         state = .ready(scene)
         viewport.present(scene)
+        updateVisibleSize()
         if scene.model.camera == nil, viewport.isPerspective != isPerspective {
             viewport.isPerspective = isPerspective
         }
@@ -72,12 +75,14 @@ final class DocumentModel {
     func selectScene(_ index: Int) {
         guard let skp, skp.scenes.indices.contains(index) else { return }
         selectedScene = index
-        let hidden = Set(skp.scenes[index].hiddenLayers)
-        for layer in layerVisible.indices {
-            let visible = !hidden.contains(layer)
-            guard layerVisible[layer] != visible else { continue }   // a hall has 150 layers: touch only changes
-            layerVisible[layer] = visible
-            scene?.setLayer(layer, visible: visible)
+        if let hidden = skp.scenes[index].hiddenLayers.map(Set.init) {
+            for layer in layerVisible.indices {
+                let visible = !hidden.contains(layer)
+                guard layerVisible[layer] != visible else { continue }   // a hall has 150 layers: touch only changes
+                layerVisible[layer] = visible
+                scene?.setLayer(layer, visible: visible)
+            }
+            updateVisibleSize()
         }
         if isReady, let camera = skp.scenes[index].camera {
             viewport.apply(camera: camera, animated: true)
@@ -99,6 +104,11 @@ final class DocumentModel {
         guard layerVisible.indices.contains(index) else { return }
         layerVisible[index].toggle()
         scene?.setLayer(index, visible: layerVisible[index])
+        updateVisibleSize()
+    }
+
+    private func updateVisibleSize() {
+        visibleSize = scene.map { $0.visibleBounds.max - $0.visibleBounds.min }
     }
 
     func zoomExtents() {
@@ -157,7 +167,7 @@ final class DocumentModel {
     var statusText: String {
         if let error { return error.localizedDescription }
         if let skp {
-            let size = skp.size
+            let size = visibleSize ?? skp.size
             let parts: [String?] = [
                 info?.versionLabel ?? skp.fileInfo.versionLabel,
                 Format.count(skp.stats.faces, L("face", "face")),

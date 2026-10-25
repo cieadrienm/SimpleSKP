@@ -44,7 +44,7 @@ swift Scripts/make-icon.swift                 # redessine Resources/AppIcon.icns
 - `timeout` n'existe pas sur macOS : surveiller un lancement avec une boucle `kill -0`.
 
 ## Architecture en une minute
-- `Sources/SimpleSKPCore/` — Foundation seulement : `SKPFileInfo` (version, vignette), `SketchUpAPI` (framework chargé par `dlopen`), `SKPReader` (fichier → `SKPModel` neutre, mètres, Z vertical), `Localization`, `SimpleUpdater`.
+- `Sources/SimpleSKPCore/` — Foundation seulement : `SKPModel.swift` (le contrat figé), `SKPFileInfo` (version, vignette), `SketchUpAPI` (framework chargé par `dlopen`), `SKPReader` (fichier → `SKPModel` neutre, mètres, Z vertical), `Localization`, `SimpleUpdater`.
 - `Sources/SimpleSKPViewport/` — SceneKit : `ViewportScene` (modèle → `SCNScene`, Z→Y par la racine), `ViewportView` (navigation, vues standard, caméra).
 - `Sources/SimpleSKP/` — AppKit + SwiftUI : `App` (entrée et options), `AppDelegate`, `MainMenu`, `DocumentController`, `SKPDocument`, `ModelWindowController`, `DocumentModel`, `ContentView`, feuilles, `Snapshot`, `SelfTest`.
 - `Resources/` — `Info.plist` (gabarit `@VERSION@`), `SimpleSKP.entitlements`, `AppIcon.icns`, `fr.lproj`, `en.lproj`.

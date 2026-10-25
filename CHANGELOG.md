@@ -9,4 +9,6 @@
 - Barre d'état : version SketchUp, faces, arêtes, composants, dimensions en mètres, temps de chargement.
 - Interface française et anglaise ; feuilles À propos, Raccourcis, Aide, Mise à jour, Réglages.
 - Ligne de commande : `--version`, `--self-test`, `--snapshot`, `--lang`.
-- Signature Developer ID avec `disable-library-validation` pour charger le framework de Trimble.
+- Le SDK SketchUp est embarqué : `Scripts/bundle.sh` livre `SketchUpAPI.framework` dans `SimpleSKP.app/Contents/Frameworks` (aminci, sans en-têtes, re-signé avec l'identité de l'app) ; SketchUp n'a pas besoin d'être installé.
+- Calques masqués construits à la demande : leurs instances restent vides jusqu'au premier affichage (scène de la salle en 0,6 s au lieu de 2,95 s).
+- Le framework du SDK C de SketchUp (Trimble) est embarqué dans l'app sous la licence du SDK SketchUp ; le code de SimpleSKP est GPL v3.

@@ -24,6 +24,7 @@ public final class ViewportScene {
     private var layerNodes: [Int: [SCNNode]] = [:]
     private var edgeNodes = Set<SCNNode>()
     private var hiddenLayers = Set<Int>()
+    private var cachedVisibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
 
     public init(model: SKPModel) {
         self.model = model
@@ -66,6 +67,7 @@ public final class ViewportScene {
     /// The first time a layer is shown, its empty instances are filled (main thread, like any scene edit).
     public func setLayer(_ index: Int, visible: Bool) {
         if visible { hiddenLayers.remove(index) } else { hiddenLayers.insert(index) }
+        cachedVisibleBounds = nil
         for node in layerNodes[index] ?? [] {
             if visible, pending[ObjectIdentifier(node)] != nil {
                 fill(node)
@@ -82,6 +84,32 @@ public final class ViewportScene {
                 node.isHidden = !showsEdges || hiddenLayers.contains(layer)
             }
         }
+    }
+
+    /// Bounds of what is shown, in model space (metres, Z up): hidden subtrees and still-empty instances are left out.
+    /// The model's bounds when nothing is shown. Main thread; recomputed after a layer change.
+    public var visibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>) {
+        if let cachedVisibleBounds { return cachedVisibleBounds }
+        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        func walk(_ node: SCNNode, _ transform: simd_float4x4) {
+            for child in node.childNodes where !child.isHidden {
+                let m = transform * child.simdTransform
+                if let geometry = child.geometry {
+                    let (a, b) = geometry.boundingBox
+                    let (p, q) = (SIMD3<Float>(a), SIMD3<Float>(b))
+                    for i in 0..<8 {
+                        let corner = SIMD3(i & 1 == 0 ? p.x : q.x, i & 2 == 0 ? p.y : q.y, i & 4 == 0 ? p.z : q.z)
+                        let w = m * SIMD4(corner, 1)
+                        lo = simd_min(lo, SIMD3(w.x, w.y, w.z)); hi = simd_max(hi, SIMD3(w.x, w.y, w.z))
+                    }
+                }
+                walk(child, m)
+            }
+        }
+        walk(modelRoot, matrix_identity_float4x4)
+        let bounds = lo.x <= hi.x ? (lo, hi) : (model.boundsMin, model.boundsMax)
+        cachedVisibleBounds = bounds
+        return bounds
     }
 
     /// Indexes the layer-tagged nodes under `node` (in the scene) and gives them their visibility.
