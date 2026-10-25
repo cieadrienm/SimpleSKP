@@ -7,7 +7,7 @@ public enum StandardView: CaseIterable, Sendable {
 
 /// D6 navigation over one `CameraRig`, four ways side by side: orbit (left drag, inertia; ⇧/middle drag = pan; wheel =
 /// zoom towards the cursor; double-click = recentre), game editor (right drag = look; WASD/ZQSD by keyCode, arrows,
-/// space/E/C/Q), trackpad (two fingers = orbit or zoom, ⌥ = pan, pinch = zoom, rotate = yaw), and free fly.
+/// space/E/C), trackpad (two fingers = orbit or zoom, ⌥ = pan, pinch = zoom, rotate = yaw), and free fly.
 /// Renders on demand only (`rendersContinuously = false`).
 public final class ViewportView: SCNView {
     public private(set) var viewportScene: ViewportScene?
@@ -62,7 +62,7 @@ public final class ViewportView: SCNView {
     /// Orbit target straight ahead, world space.
     var target: SIMD3<Float> { modelToWorld(rig.pose.target) }
 
-    public var ambientOcclusionEnabled = true {
+    public var ambientOcclusionEnabled = false {
         didSet { Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera) }
     }
 
