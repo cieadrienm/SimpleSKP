@@ -17,11 +17,49 @@ public struct SKPFileInfo: Sendable {
 
     /// Reads only the first megabyte of the file. Throws `SKPError.unreadable` when the file cannot be read.
     public static func read(_ url: URL) throws -> SKPFileInfo {
-        fatalError("todo: Core agent")
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let header = try handle.read(upToCount: 1 << 20) ?? Data()
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? header.count
+            return parse(header: header, url: url, fileSize: size)
+        } catch {
+            throw SKPError.unreadable(url)
+        }
     }
 
     /// Parses an in-memory header (for tests and `read`).
     public static func parse(header: Data, url: URL, fileSize: Int) -> SKPFileInfo {
-        fatalError("todo: Core agent")
+        let version = parseVersion(header)
+        return SKPFileInfo(url: url, fileSize: fileSize, version: version, versionLabel: version.map(label), thumbnailPNG: thumbnail(header))
+    }
+
+    static func utf16(_ s: String) -> Data { s.data(using: .utf16LittleEndian)! }
+
+    static func parseVersion(_ data: Data) -> String? {
+        guard let magic = data.range(of: utf16("SketchUp Model")),
+              let open = data.range(of: utf16("{"), in: magic.upperBound..<data.endIndex),
+              open.lowerBound - magic.upperBound < 16,
+              let close = data.range(of: utf16("}"), in: open.upperBound..<min(data.endIndex, open.upperBound + 64))
+        else { return nil }
+        let version = String(data: data[open.upperBound..<close.lowerBound], encoding: .utf16LittleEndian)
+        return version?.isEmpty == false ? version : nil
+    }
+
+    static func label(_ version: String) -> String {
+        let major = Int(version.prefix { $0.isNumber }) ?? 0
+        switch major {
+        case ...8: return "SketchUp 8"
+        case 13...99: return "SketchUp 20\(String(format: "%02d", major))"
+        default: return "SketchUp \(major)"
+        }
+    }
+
+    static func thumbnail(_ data: Data) -> Data? {
+        guard let start = data.range(of: Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])),
+              let iend = data.range(of: Data("IEND".utf8), in: start.upperBound..<data.endIndex),
+              iend.upperBound + 4 <= data.endIndex
+        else { return nil }
+        return Data(data[start.lowerBound..<iend.upperBound + 4])
     }
 }
