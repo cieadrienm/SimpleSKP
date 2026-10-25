@@ -46,6 +46,7 @@ public final class ViewportView: SCNView {
         preferredFramesPerSecond = 60
         let camera = SCNCamera()
         Rendering.configure(camera: camera)
+        Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera)
         camera.automaticallyAdjustsZRange = true
         camera.projectionDirection = .vertical
         camera.fieldOfView = 35 // SketchUp's default
