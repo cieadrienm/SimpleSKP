@@ -69,6 +69,7 @@ final class SimpleSKPViewportTests: XCTestCase {
 
     func testNodesAndSharedGeometry() {
         let scene = ViewportScene(model: SyntheticModel.cube())
+        scene.setLayer(1, visible: true) // B is on the hidden "Cotes" layer: filled when shown
         let root = scene.modelRoot.childNodes[0]
         XCTAssertEqual(root.childNodes.count, 4) // mesh, edges, two instances
         let (mesh, edges, a, b) = (root.childNodes[0], root.childNodes[1], root.childNodes[2], root.childNodes[3])
@@ -129,6 +130,49 @@ final class SimpleSKPViewportTests: XCTestCase {
         let material = ViewportScene(model: model).modelRoot.childNodes[0].childNodes[0].geometry!.firstMaterial!
         XCTAssertEqual(material.transparency, 0.5, accuracy: 1e-6)
         XCTAssertEqual(material.transparencyMode, .dualLayer)
+        XCTAssertFalse(material.writesToDepthBuffer, "edges behind glass stay visible")
+    }
+
+    func testHiddenLayerInstancesAreFilledWhenShown() {
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        let root = scene.modelRoot.childNodes[0]
+        let (a, b) = (root.childNodes[2], root.childNodes[3])
+        XCTAssertTrue(b.isHidden)
+        XCTAssertEqual(b.childNodes.count, 0, "no geometry nodes while Cotes is hidden")
+        XCTAssertEqual(b.simdPosition, SIMD3(0, 2, 0))
+        scene.setLayer(1, visible: true)
+        XCTAssertFalse(b.isHidden)
+        XCTAssertEqual(b.childNodes.count, 2)
+        XCTAssertTrue(b.childNodes[1].geometry === a.childNodes[1].geometry, "shares the prototype's edges")
+        XCTAssertFalse(b.childNodes[0].isHidden || b.childNodes[1].isHidden)
+        scene.showsEdges = false
+        XCTAssertTrue(b.childNodes[1].isHidden, "the new edge node joined the edge toggle")
+        scene.setLayer(1, visible: false)
+        scene.setLayer(1, visible: true)
+        XCTAssertEqual(b.childNodes.count, 2, "filled once")
+    }
+
+    func testPaintedHiddenInstanceIsPaintedWhenFilled() {
+        var model = SyntheticModel.cube()
+        // Root → group C on Layer0, painted with material 0 → unpainted instance of the box on hidden Cotes.
+        model.definitions.append(SKPModel.Definition(name: "C", children: [
+            SKPModel.Instance(definition: 0, transform: matrix_identity_float4x4, layer: 1, isGroup: false),
+        ]))
+        model.root.children.append(SKPModel.Instance(definition: 1, transform: matrix_identity_float4x4, layer: 0, isGroup: true, material: 0))
+        let scene = ViewportScene(model: model)
+        let root = scene.modelRoot.childNodes[0]
+        let box = root.childNodes[4].childNodes[0]
+        XCTAssertEqual(box.childNodes.count, 0)
+        scene.setLayer(1, visible: true)
+        XCTAssertTrue(box.childNodes[0].geometry?.firstMaterial === root.childNodes[0].geometry?.firstMaterial, "inherits C's material")
+    }
+
+    func testMaterialCache() throws {
+        var model = SyntheticModel.cube()
+        model.root.meshes[0].uvs = model.root.meshes[0].positions.map { SIMD2($0.x, $0.y) } // untextured material with UVs
+        let root = ViewportScene(model: model).modelRoot.childNodes[0]
+        XCTAssertTrue(root.childNodes[0].geometry?.firstMaterial === root.childNodes[2].childNodes[0].geometry?.firstMaterial,
+                      "an untextured material is one SCNMaterial whatever the UVs")
     }
 
     func testBuildsOffMainThread() async {
@@ -210,6 +254,10 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertFalse(camera.usesOrthographicProjection)
         let newDepth = Double(simd_dot(view.target - view.cameraNode.simdWorldPosition, view.cameraNode.simdWorldFront))
         XCTAssertEqual(newDepth, depth / 2, accuracy: 1e-3, "the camera moved in to keep the parallel framing")
+        // Zoomed past the target: the parallel scale must stay positive.
+        view.cameraNode.simdWorldPosition = view.target + view.cameraNode.simdWorldFront * 3
+        view.isPerspective = false
+        XCTAssertGreaterThan(camera.orthographicScale, 0)
     }
 
     func testOrbitTurnsAroundWorldUpTowardsTheRight() {
@@ -324,7 +372,9 @@ final class SimpleSKPViewportTests: XCTestCase {
         model.root.meshes[0].uvs = uvs                // own textured material: UVs in repeats
         model.definitions[0].meshes[0].uvs = uvs      // nil material: UVs in metres, inherited by instance A
         model.root.children[0].material = 1
-        let root = ViewportScene(model: model).modelRoot.childNodes[0]
+        let scene = ViewportScene(model: model)
+        scene.setLayer(1, visible: true)
+        let root = scene.modelRoot.childNodes[0]
 
         func uv(_ m: SCNMaterial, _ p: SIMD2<Float>) -> SIMD2<Float> {
             let v = SCNVector3Make(CGFloat(p.x), CGFloat(p.y), 0), t = m.diffuse.contentsTransform
@@ -338,6 +388,7 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertTrue(inherited.diffuse.contents is NSImage)
         XCTAssertTrue(inherited !== own, "metre UVs need their own transform")
         XCTAssertEqual(uv(inherited, SIMD2(1, 0.25)), SIMD2(0.5, 0.5), "1/textureScale, then the flip")
+        XCTAssertTrue(inherited.diffuse.contents as AnyObject === own.diffuse.contents as AnyObject, "one image for both variants")
         XCTAssertTrue(root.childNodes[3].childNodes[0].geometry!.firstMaterial!.diffuse.contents is NSColor, "unpainted B stays white")
     }
 

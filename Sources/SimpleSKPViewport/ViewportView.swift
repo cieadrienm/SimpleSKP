@@ -17,6 +17,7 @@ public final class ViewportView: SCNView {
     private var drag = Drag.orbit
     private var lastPoint = CGPoint.zero
     private var zoomAnchor: SIMD3<Float>?
+    private var lastWheel: TimeInterval = 0
 
     public override init(frame: NSRect, options: [String: Any]? = nil) {
         super.init(frame: frame, options: options)
@@ -114,7 +115,10 @@ public final class ViewportView: SCNView {
         didSet {
             guard isPerspective == camera.usesOrthographicProjection else { return }
             let tanHalf = tan(Double(camera.fieldOfView) * .pi / 360)
-            let front = cameraNode.simdWorldFront, depth = simd_dot(target - cameraNode.simdWorldPosition, front)
+            let eye = cameraNode.simdWorldPosition, front = cameraNode.simdWorldFront
+            // Zoomed past the target: its depth is negative; fall back to its distance so the ortho scale stays positive.
+            let along = simd_dot(target - eye, front)
+            let depth = along > 1e-3 ? along : max(simd_distance(target, eye), 1e-3)
             if isPerspective {
                 // Same framing: move along the view axis to the distance where the target plane fits the ortho height.
                 cameraNode.simdWorldPosition += front * (depth - Float(camera.orthographicScale / tanHalf))
@@ -144,7 +148,10 @@ public final class ViewportView: SCNView {
     public override func scrollWheel(with event: NSEvent) {
         // One wheel notch ≈ 10 %; precise (trackpad) deltas are in points, ~10 per notch.
         let notches = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 10 : event.scrollingDeltaY
-        let newGesture = event.phase == .began || (event.phase.isEmpty && event.momentumPhase.isEmpty) // wheel: every notch
+        // A wheel has no phases: a burst of notches less than 150 ms apart is one gesture (one hit test on huge models).
+        let wheel = event.phase.isEmpty && event.momentumPhase.isEmpty
+        let newGesture = event.phase == .began || (wheel && event.timestamp - lastWheel > 0.15)
+        if wheel { lastWheel = event.timestamp }
         zoom(ratio: Float(pow(0.9, notches)), at: convert(event.locationInWindow, from: nil), newGesture: newGesture)
     }
 
@@ -221,9 +228,10 @@ public final class ViewportView: SCNView {
         return 2 * distance * Float(tan(camera.fieldOfView * .pi / 360))
     }
 
-    /// Nearest model point under `point` (results are sorted by distance).
+    /// Nearest model point under `point` (results are sorted by distance). Back faces count: SketchUp rooms are
+    /// often single-sided walls facing outwards.
     private func hit(_ point: CGPoint) -> SIMD3<Float>? {
-        hitTest(point, options: [.boundingBoxOnly: false]).first.map { SIMD3<Float>($0.worldCoordinates) }
+        hitTest(point, options: [.boundingBoxOnly: false, .backFaceCulling: false]).first.map { SIMD3<Float>($0.worldCoordinates) }
     }
 
     private var isoDirection: SIMD3<Float> { simd_normalize(SIMD3(1, -1, 1)) }
