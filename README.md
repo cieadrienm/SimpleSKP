@@ -72,15 +72,15 @@ SimpleSKP --lang fr|en                         # langue de l'interface
 
 | Mesure | Cible | Mesuré |
 |---|---|---|
-| Lancement de l'app empaquetée → vignette visible | < 0,3 s | à mesurer |
-| `04-Monticule.skp` (157 Ko) → 3D visible | < 0,5 s | à mesurer |
-| `MM_Arles_3D_V003.skp` (45 Mo) → 3D | < 4 s (lecture API 1,9 s) | à mesurer |
-| `B-SEINE MUSICALE…V40.skp` (97 Mo) → 3D | < 7 s (lecture API 2,9 s) | à mesurer |
-| Orbite sur la salle | 60 i/s sur Apple Silicon | à mesurer |
-| Mémoire | ≤ 3 × la taille du fichier | à mesurer |
-| Binaire | ≈ 3 Mo | à mesurer |
+| Lancement du binaire → capture PNG du petit modèle affiché | < 0,3 s pour la vignette | 0,9 s au total (vignette d'abord, lecture 0,18 s comprise) |
+| `04-Monticule.skp` (157 Ko) → 3D visible | < 0,5 s | lecture 0,18 s |
+| `MM_Arles_3D_V003.skp` (45 Mo, 35 textures) → 3D | < 4 s (lecture API 1,9 s) | lecture 2,3 s + scène 0,13 s ; lancement → capture 3,2 s |
+| `B-SEINE MUSICALE…V40.skp` (97 Mo, 14 758 composants, 641 572 arêtes, 151 calques) → 3D | < 7 s (lecture API 2,9 s) | lecture 3,7 s + scène 0,6 s (2,95 s avant les calques masqués construits à la demande) ; lancement → capture 6,0 s |
+| Orbite sur la salle | 60 i/s sur Apple Silicon | non mesuré |
+| Mémoire | ≤ 3 × la taille du fichier | pic pendant la lecture par le framework SketchUp : 0,95 Go (salle), 1,1 Go (Arles, textures décodées par SketchUp) ; empreinte une fois la scène affichée ≈ 0,7 Go pour la salle |
+| Binaire | ≈ 3 Mo | 1,4 Mo en release, 2,7 Mo empaqueté avec l'icône |
 
-Mesuré le : à mesurer.
+Mesuré le 25 octobre 2026 sur Apple Silicon, build release, cache disque chaud (`.build/release/SimpleSKP --snapshot` et `--self-test`, deux passes identiques).
 
 ## Crédits & Licence
 
