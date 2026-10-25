@@ -11,17 +11,239 @@ public enum StandardView: CaseIterable, Sendable {
 /// Renders on demand only (`rendersContinuously = false`).
 public final class ViewportView: SCNView {
     public private(set) var viewportScene: ViewportScene?
+    public let cameraNode = SCNNode()
+
+    private enum Drag { case orbit, pan }
+    private var drag = Drag.orbit
+    private var lastPoint = CGPoint.zero
+
+    public override init(frame: NSRect, options: [String: Any]? = nil) {
+        super.init(frame: frame, options: options)
+        setUp()
+    }
+
+    public required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setUp()
+    }
+
+    private func setUp() {
+        rendersContinuously = false
+        antialiasingMode = .multisampling4X
+        allowsCameraControl = false
+        autoenablesDefaultLighting = false
+        backgroundColor = NSColor(red: 0.067, green: 0.075, blue: 0.09, alpha: 1)
+        preferredFramesPerSecond = 60
+        let camera = SCNCamera()
+        camera.automaticallyAdjustsZRange = true
+        camera.projectionDirection = .vertical
+        cameraNode.camera = camera
+        cameraNode.name = "camera"
+    }
+
+    public override var acceptsFirstResponder: Bool { true }
+
+    private var camera: SCNCamera { cameraNode.camera! }
+    private var controller: SCNCameraController { defaultCameraController }
+    /// Orbit centre, world space.
+    var target: SIMD3<Float> {
+        get { SIMD3(controller.target) }
+        set { controller.target = SCNVector3(newValue) }
+    }
 
     /// Main thread: shows the scene, applies the file's camera if any, otherwise zooms to extents.
-    public func present(_ scene: ViewportScene) { fatalError("todo: Viewport agent") }
+    public func present(_ scene: ViewportScene) {
+        viewportScene = scene
+        self.scene = scene.scene
+        cameraNode.removeFromParentNode()
+        scene.modelRoot.addChildNode(cameraNode)
+        scene.headlight.removeFromParentNode()
+        cameraNode.addChildNode(scene.headlight)
+        pointOfView = cameraNode
+        controller.pointOfView = cameraNode
+        controller.interactionMode = .orbitTurntable
+        controller.inertiaEnabled = false
+        controller.automaticTarget = false
+        controller.worldUp = SCNVector3(0, 1, 0)
+        if let camera = scene.model.camera {
+            apply(camera: camera, animated: false)
+        } else {
+            look(.iso, animated: false) // the never-placed camera has no meaningful direction to keep
+        }
+    }
 
-    public func zoomExtents(animated: Bool) { fatalError("todo: Viewport agent") }
+    public func zoomExtents(animated: Bool) {
+        let back = -cameraNode.simdWorldFront
+        frame(direction: back.x.isFinite && simd_length(back) > 0.5 ? back : modelToWorld(vector: isoDirection),
+              up: cameraNode.simdWorldUp, animated: animated)
+    }
 
     /// Frames the whole model from a standard direction.
-    public func look(_ view: StandardView, animated: Bool) { fatalError("todo: Viewport agent") }
+    public func look(_ view: StandardView, animated: Bool) {
+        let z = SIMD3<Float>(0, 0, 1), y = SIMD3<Float>(0, 1, 0)
+        let (direction, up): (SIMD3<Float>, SIMD3<Float>) = switch view {
+        case .iso: (isoDirection, z)
+        case .top: (z, y)
+        case .bottom: (-z, y)
+        case .front: (-y, z)
+        case .back: (y, z)
+        case .left: (SIMD3(-1, 0, 0), z)
+        case .right: (SIMD3(1, 0, 0), z)
+        }
+        frame(direction: modelToWorld(vector: direction), up: modelToWorld(vector: up), animated: animated)
+    }
 
     /// Applies a model-space camera (metres, Z up, vertical FOV) verbatim under the rotated root.
-    public func apply(camera: SKPModel.Camera, animated: Bool) { fatalError("todo: Viewport agent") }
+    public func apply(camera model: SKPModel.Camera, animated: Bool) {
+        let worldTarget = modelToWorld(model.target)
+        animate(animated) {
+            cameraNode.simdPosition = model.position
+            cameraNode.simdLook(at: worldTarget, up: modelToWorld(vector: model.up), localFront: SCNNode.simdLocalFront)
+            camera.usesOrthographicProjection = !model.isPerspective
+            if model.isPerspective { camera.fieldOfView = CGFloat(model.fovDegrees) } else { camera.orthographicScale = Double(model.orthoHeight / 2) }
+        }
+        target = worldTarget
+        isPerspective = model.isPerspective
+    }
 
-    public var isPerspective: Bool = true { didSet { fatalError("todo: Viewport agent") } }
+    public var isPerspective: Bool = true {
+        didSet {
+            guard isPerspective == camera.usesOrthographicProjection else { return }
+            if !isPerspective {
+                let distance = simd_distance(cameraNode.simdWorldPosition, target)
+                camera.orthographicScale = Double(distance) * tan(Double(camera.fieldOfView) * .pi / 360)
+            }
+            camera.usesOrthographicProjection = !isPerspective
+            setNeedsDisplay(bounds)
+        }
+    }
+
+    // MARK: - Navigation (event handlers stay one-liners over testable methods)
+
+    public override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        lastPoint = point
+        if event.clickCount == 2 { recentre(at: point); return }
+        drag = event.modifierFlags.contains(.shift) ? .pan : .orbit
+        if let hit = hit(point) { target = hit }
+    }
+    public override func rightMouseDown(with event: NSEvent) { beginPan(event) } // no super: it would pop a context menu
+    public override func otherMouseDown(with event: NSEvent) { beginPan(event) }
+    public override func mouseDragged(with event: NSEvent) { dragged(event) }
+    public override func rightMouseDragged(with event: NSEvent) { dragged(event) }
+    public override func otherMouseDragged(with event: NSEvent) { dragged(event) }
+
+    public override func scrollWheel(with event: NSEvent) {
+        // One wheel notch ≈ 10 %; precise (trackpad) deltas are in points, ~10 per notch.
+        let notches = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 10 : event.scrollingDeltaY
+        zoom(ratio: Float(pow(0.9, notches)), at: convert(event.locationInWindow, from: nil))
+    }
+
+    public override func magnify(with event: NSEvent) {
+        zoom(ratio: Float(1 / max(0.1, 1 + event.magnification)), at: convert(event.locationInWindow, from: nil))
+    }
+
+    public override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers?.lowercased() == "z", event.modifierFlags.contains(.shift),
+           event.modifierFlags.isDisjoint(with: [.command, .option, .control]) {
+            zoomExtents(animated: true)
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    private func beginPan(_ event: NSEvent) {
+        lastPoint = convert(event.locationInWindow, from: nil)
+        drag = .pan
+    }
+
+    private func dragged(_ event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let dx = Float(point.x - lastPoint.x), dy = Float(point.y - lastPoint.y)
+        lastPoint = point
+        if drag == .orbit { orbit(dx: dx, dy: dy) } else { pan(dx: dx, dy: dy) }
+    }
+
+    /// View points, y up (AppKit). Dragging right turns the model right, like SketchUp.
+    func orbit(dx: Float, dy: Float) {
+        controller.rotateBy(x: -dx, y: dy)
+        setNeedsDisplay(bounds)
+    }
+
+    /// View points, y up. The model follows the cursor about 1:1 at the target's depth.
+    func pan(dx: Float, dy: Float) {
+        let metresPerPoint = visibleHeight / Float(max(1, bounds.height))
+        let before = cameraNode.simdWorldPosition
+        controller.translateInCameraSpaceBy(x: -dx * metresPerPoint, y: -dy * metresPerPoint, z: 0)
+        target += cameraNode.simdWorldPosition - before // the controller leaves its target behind
+        setNeedsDisplay(bounds)
+    }
+
+    /// ratio < 1 zooms in (distance or ortho height multiplied by ratio), towards `point` in perspective.
+    func zoom(ratio: Float, at point: CGPoint) {
+        if camera.usesOrthographicProjection {
+            camera.orthographicScale *= Double(ratio)
+        } else {
+            let distance = simd_distance(cameraNode.simdWorldPosition, target)
+            controller.dolly(by: distance * (1 - ratio), onScreenPoint: point, viewport: bounds.size)
+        }
+        setNeedsDisplay(bounds)
+    }
+
+    /// Double-click: the clicked point becomes the target, the camera slides by the same offset.
+    func recentre(at point: CGPoint) {
+        guard let hit = hit(point) else { return }
+        let offset = hit - target
+        let position = cameraNode.simdWorldPosition + offset
+        animate(true, duration: 0.25) { cameraNode.simdWorldPosition = position }
+        target = hit
+    }
+
+    // MARK: - Helpers
+
+    private var visibleHeight: Float {
+        if camera.usesOrthographicProjection { return Float(camera.orthographicScale) * 2 }
+        let distance = simd_distance(cameraNode.simdWorldPosition, target)
+        return 2 * distance * Float(tan(camera.fieldOfView * .pi / 360))
+    }
+
+    private func hit(_ point: CGPoint) -> SIMD3<Float>? {
+        hitTest(point, options: [.boundingBoxOnly: false, .firstFoundOnly: true]).first.map { SIMD3<Float>($0.worldCoordinates) }
+    }
+
+    private var isoDirection: SIMD3<Float> { simd_normalize(SIMD3(1, -1, 1)) }
+
+    private func modelToWorld(_ point: SIMD3<Float>) -> SIMD3<Float> {
+        viewportScene?.modelRoot.simdConvertPosition(point, to: nil) ?? point
+    }
+
+    private func modelToWorld(vector: SIMD3<Float>) -> SIMD3<Float> {
+        viewportScene?.modelRoot.simdConvertVector(vector, to: nil) ?? vector
+    }
+
+    /// Puts the camera on `direction` (world, target → eye) at the distance that fits the bounding sphere.
+    private func frame(direction: SIMD3<Float>, up: SIMD3<Float>, animated: Bool) {
+        guard let model = viewportScene?.model else { return }
+        let centre = modelToWorld(model.center)
+        let radius = max(simd_length(model.size) / 2, 0.01)
+        let aspect = Float(max(1, bounds.width) / max(1, bounds.height))
+        let vfov = Float(camera.fieldOfView) * .pi / 180
+        let hfov = 2 * atan(tan(vfov / 2) * aspect)
+        let distance = radius / sin(min(vfov, hfov) / 2) * 1.05
+        animate(animated) {
+            cameraNode.simdWorldPosition = centre + simd_normalize(direction) * distance
+            cameraNode.simdLook(at: centre, up: up, localFront: SCNNode.simdLocalFront)
+            if camera.usesOrthographicProjection { camera.orthographicScale = Double(radius * 1.05 / min(1, aspect)) }
+        }
+        target = centre
+    }
+
+    private func animate(_ animated: Bool, duration: Double = 0.35, _ changes: () -> Void) {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = animated ? duration : 0
+        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        changes()
+        SCNTransaction.commit()
+        setNeedsDisplay(bounds)
+    }
 }
