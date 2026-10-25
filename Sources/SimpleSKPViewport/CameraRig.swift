@@ -32,7 +32,7 @@ final class CameraRig {
     /// Movement keys by physical position (`keyCode`): ZQSD on AZERTY is WASD on QWERTY.
     static let forwardKeys: Set<UInt16> = [13, 126], backKeys: Set<UInt16> = [1, 125]
     static let leftKeys: Set<UInt16> = [0, 123], rightKeys: Set<UInt16> = [2, 124]
-    static let upKeys: Set<UInt16> = [49, 14], downKeys: Set<UInt16> = [8, 12]
+    static let upKeys: Set<UInt16> = [49, 14], downKeys: Set<UInt16> = [8]
     static let moveKeys = forwardKeys.union(backKeys).union(leftKeys).union(rightKeys).union(upKeys).union(downKeys)
 
     let node: SCNNode
@@ -73,9 +73,9 @@ final class CameraRig {
         next.position = centre + next.basis * pose.basis.transpose * (pose.position - centre)
         pose = next
         guard let time else { return }
-        // Synthetic events share one timestamp: count them a frame apart.
+        // Synthetic events share one timestamp: count them a frame apart. Coalesced events closer than 1/120 s cannot fling.
         let dt = Float(lastOrbitTime.map { time - $0 } ?? 0)
-        spin = SIMD2(yaw, pitch) / (dt > 0 ? dt : 1 / 60)
+        spin = SIMD2(yaw, pitch) / (dt > 0 ? max(dt, 1 / 120) : 1 / 60)
         lastOrbitTime = time
     }
 
@@ -118,13 +118,15 @@ final class CameraRig {
 
     // MARK: Conversions
 
-    /// Yaw and pitch looking along `forward`; straight up or down, the screen's `up` names the yaw.
+    /// Yaw and pitch looking along `forward` with the screen's `up`: the yaw comes from the screen's right, so a plan view
+    /// tilted past vertical (forward slightly south, up north) keeps its up with a pitch beyond ±90° instead of turning 180°.
     static func orientation(forward: SIMD3<Float>, up: SIMD3<Float>) -> (yaw: Float, pitch: Float) {
         let f = simd_normalize(forward)
-        let pitch = asin(min(1, max(-1, f.z)))
-        if abs(f.z) < 0.9999 { return (atan2(f.y, f.x), pitch) }
-        let s: Float = f.z < 0 ? 1 : -1
-        return (atan2(s * up.y, s * up.x), pitch)
+        var r = simd_cross(f, up)
+        r.z = 0 // a roll is dropped
+        if simd_length(r) < 1e-4 { r = SIMD3(f.y, -f.x, 0) } // up along forward (a broken camera): right from forward alone
+        let yaw = simd_length(r) < 1e-6 ? 0 : atan2(r.x, -r.y)
+        return (yaw, atan2(f.z, f.x * cos(yaw) + f.y * sin(yaw)))
     }
 
     /// The file's camera, roll dropped (D6).
@@ -171,8 +173,9 @@ final class CameraRig {
     private func startTicking() {
         guard timer == nil, isMoving else { return }
         lastTick = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            MainActor.assumeIsolated { self.tick() }
         }
         RunLoop.main.add(timer, forMode: .common) // keeps running during drags and menu tracking
         self.timer = timer

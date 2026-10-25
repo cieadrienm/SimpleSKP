@@ -8,6 +8,8 @@ enum Preferences {
         static let showSidebar = "showSidebar"
         static let showsEdges = "showsEdges"
         static let isPerspective = "isPerspective"
+        static let shadowsEnabled = "shadowsEnabled"
+        static let ambientOcclusionEnabled = "ambientOcclusionEnabled"
         static let twoFingerScrollZooms = "twoFingerScrollZooms"
     }
 
@@ -15,6 +17,8 @@ enum Preferences {
         Key.showSidebar: true,
         Key.showsEdges: true,
         Key.isPerspective: true,
+        Key.shadowsEnabled: true,
+        Key.ambientOcclusionEnabled: false, // no SSAO setting gave corner shading without floor bands or speckles (fix-navrender)
         Key.twoFingerScrollZooms: false,
     ]
 
@@ -36,6 +40,17 @@ enum Preferences {
     static var showsEdges: Bool {
         get { bool(Key.showsEdges) }
         set { UserDefaults.standard.set(newValue, forKey: Key.showsEdges) }
+    }
+
+    /// « Ombres » and « Occlusion ambiante » (D7: remembered), read when a document opens.
+    static var shadowsEnabled: Bool {
+        get { bool(Key.shadowsEnabled) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.shadowsEnabled) }
+    }
+
+    static var ambientOcclusionEnabled: Bool {
+        get { bool(Key.ambientOcclusionEnabled) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.ambientOcclusionEnabled) }
     }
 
     /// Used when the file has no saved camera; a saved camera keeps its own projection.

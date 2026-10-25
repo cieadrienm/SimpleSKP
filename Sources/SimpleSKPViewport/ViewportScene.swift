@@ -13,7 +13,9 @@ public final class ViewportScene {
     /// The Z-up → Y-up node: everything from `SKPModel` (positions, transforms, camera) lives under it verbatim.
     public let modelRoot = SCNNode()
     /// Node the view attaches to its camera; it holds the low ambient fill (the sun and the sky do the lighting).
-    public let headlight = SCNNode()
+    public let fill = SCNNode()
+    /// The former name of `fill` (D7 first had a headlight), kept for API compatibility.
+    public var headlight: SCNNode { fill }
     /// The sun (D7): directional, elevation 45°, azimuth 135° clockwise from +X (from the south-west: the iso view, seen
     /// from the south-east, then shows two differently lit faces and the shadows in front), soft cascaded shadows.
     public let sun = SCNNode()
@@ -86,10 +88,10 @@ public final class ViewportScene {
                          modelRoot.childNodes.reduce(0) { $0 + $1.childNodes.count }))
         }
 
-        let fill = SCNLight()
-        fill.type = .ambient
-        fill.intensity = 150 // interiors out of the sun are not pitch black
-        headlight.light = fill
+        let ambient = SCNLight()
+        ambient.type = .ambient
+        ambient.intensity = 150 // interiors out of the sun are not pitch black
+        fill.light = ambient
 
         let light = SCNLight()
         light.type = .directional
@@ -118,6 +120,15 @@ public final class ViewportScene {
         let sets = setsByLayer[index] ?? []
         build(sets.filter { $0.node == nil && isVisible($0) })
         for set in sets { set.node?.isHidden = !isVisible(set) }
+        updateShadowDistance()
+    }
+
+    /// Applies a whole layer state at once (a scene change): only the sets visible in the end are built.
+    public func setLayers(_ visible: [Bool]) {
+        hiddenLayers = Set(visible.indices.filter { !visible[$0] })
+        cachedVisibleBounds = nil
+        build(layerSets.values.filter { $0.node == nil && isVisible($0) })
+        for set in layerSets.values { set.node?.isHidden = !isVisible(set) }
         updateShadowDistance()
     }
 

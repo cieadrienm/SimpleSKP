@@ -109,10 +109,10 @@ final class SKPDocument: NSDocument {
             item.state = model.isPerspective ? .on : .off
             return model.isReady
         case #selector(toggleShadows(_:)):
-            item.state = model.scene?.shadowsEnabled ?? false ? .on : .off
+            item.state = model.shadowsEnabled ? .on : .off
             return model.isReady
         case #selector(toggleAmbientOcclusion(_:)):
-            item.state = model.viewport.ambientOcclusionEnabled ? .on : .off
+            item.state = model.ambientOcclusionEnabled ? .on : .off
             return model.isReady
         case #selector(toggleFreeFlight(_:)):
             item.state = model.isFreeFlying ? .on : .off

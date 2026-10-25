@@ -4,9 +4,9 @@ import Metal
 @testable import SimpleSKPViewport
 import SimpleSKPCore
 
-/// Frame-time harness (manual, needs SketchUp): the app's scene and camera (as ViewportView placed it on 2026-10-25,
-/// copied here so the navigation rewrite does not move the benchmark views) rendered offscreen by `SCNRenderer` at
-/// 2760×1640 with MSAA ×4, mean of N frames (CPU encode + GPU, serial).
+/// Frame-time harness (manual, needs SketchUp): the app's scene and camera (placed through `CameraRig` like the app,
+/// iso framed as on 2026-10-25) rendered offscreen by `SCNRenderer` at 2760×1640 with MSAA ×4, mean of N frames
+/// (CPU encode + GPU, serial).
 /// `SIMPLESKP_BENCH=file.skp [SIMPLESKP_BENCH_SCENES="VUE DESSUS COUPE,FOH"] [SIMPLESKP_BENCH_OUT=dir]
 ///  [SIMPLESKP_BENCH_REF=dir] [SIMPLESKP_BENCH_AO=0] [SIMPLESKP_BENCH_SHADOWS=0] [SIMPLESKP_BENCH_PLAIN=1]
 ///  swift test -c release -Xswiftc -enable-testing --filter FrameTimeHarness`
@@ -134,12 +134,13 @@ final class FrameTimeHarness: XCTestCase {
     }
 }
 
-/// The camera the app used when the baseline was measured: under the model root, SketchUp's 35° vertical FOV,
-/// file cameras verbatim, iso framed on the visible bounds for a 1380 × 820 pt view; headlight on the camera.
+/// The app's camera: under the model root, SketchUp's 35° vertical FOV, file cameras through `CameraRig` (roll dropped,
+/// as the viewport does), iso framed on the visible bounds for a 1380 × 820 pt view; the ambient fill on the camera.
 @MainActor
 private final class Rig {
     let node = SCNNode()
     let scene: ViewportScene
+    private lazy var rig = CameraRig(node: node)
 
     init(_ scene: ViewportScene) {
         self.scene = scene
@@ -149,27 +150,24 @@ private final class Rig {
         camera.fieldOfView = 35
         node.camera = camera
         scene.modelRoot.addChildNode(node)
-        node.addChildNode(scene.headlight)
+        node.addChildNode(scene.fill)
         if let c = scene.model.camera { apply(c) } else { iso() }
     }
 
     func apply(_ c: SKPModel.Camera) {
-        node.simdPosition = c.position
-        node.simdLook(at: scene.modelRoot.simdConvertPosition(c.target, to: nil),
-                      up: scene.modelRoot.simdConvertVector(c.up, to: nil), localFront: SCNNode.simdLocalFront)
         node.camera!.usesOrthographicProjection = !c.isPerspective
         node.camera!.fieldOfView = CGFloat(c.fovDegrees)
-        if !c.isPerspective { node.camera!.orthographicScale = Double(c.orthoHeight / 2) }
+        rig.set(CameraRig.pose(c), orthographicScale: c.isPerspective ? nil : Double(c.orthoHeight / 2))
     }
 
     func iso() {
         let bounds = scene.visibleBounds
-        let centre = scene.modelRoot.simdConvertPosition((bounds.min + bounds.max) / 2, to: nil)
         let radius = max(simd_length(bounds.max - bounds.min) / 2, 0.01)
         let vfov = Float(node.camera!.fieldOfView) * .pi / 180, hfov = 2 * atan(tan(vfov / 2) * 1380 / 820)
-        let direction = scene.modelRoot.simdConvertVector(simd_normalize(SIMD3(1, -1, 1)), to: nil)
-        node.simdWorldPosition = centre + direction * (radius / sin(min(vfov, hfov) / 2) * 1.05)
-        node.simdLook(at: centre, up: scene.modelRoot.simdConvertVector(SIMD3(0, 0, 1), to: nil), localFront: SCNNode.simdLocalFront)
-        if node.camera!.usesOrthographicProjection { node.camera!.orthographicScale = Double(radius * 1.05) }
+        var pose = CameraRig.Pose()
+        (pose.yaw, pose.pitch) = CameraRig.orientation(forward: -simd_normalize(SIMD3(1, -1, 1)), up: SIMD3(0, 0, 1))
+        pose.distance = radius / sin(min(vfov, hfov) / 2) * 1.05
+        pose.position = (bounds.min + bounds.max) / 2 - pose.forward * pose.distance
+        rig.set(pose, orthographicScale: node.camera!.usesOrthographicProjection ? Double(radius * 1.05) : nil)
     }
 }

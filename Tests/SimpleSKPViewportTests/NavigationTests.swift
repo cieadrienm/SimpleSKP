@@ -20,9 +20,14 @@ final class NavigationTests: XCTestCase {
                            context: nil, eventNumber: 0, clickCount: clicks, pressure: 1)!
     }
 
-    private func key(_ code: UInt16, _ characters: String, up: Bool = false, flags: NSEvent.ModifierFlags = []) -> NSEvent {
+    private func key(_ code: UInt16, _ characters: String, up: Bool = false, flags: NSEvent.ModifierFlags = [], repeated: Bool = false) -> NSEvent {
         NSEvent.keyEvent(with: up ? .keyUp : .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
-                         context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
+                         context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: repeated, keyCode: code)!
+    }
+
+    private func flags(_ flags: NSEvent.ModifierFlags, keyCode: UInt16) -> NSEvent {
+        NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
+                         context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode)!
     }
 
     /// Mouse motion with deltas (AppKit's factory cannot set them), deltaY down-positive like the hardware.
@@ -203,6 +208,8 @@ final class NavigationTests: XCTestCase {
         view.scrollWheel(with: NSEvent(cgEvent: event)!)
         XCTAssertGreaterThan(view.rig.speedScale, 1)
         XCTAssertEqual(view.rig.pose.position, position, "no zoom while looking")
+        for _ in 0..<40 { view.scrollWheel(with: NSEvent(cgEvent: event)!) }
+        XCTAssertEqual(view.rig.speedScale, 16, "clamped")
         view.rightMouseUp(with: mouse(.rightMouseUp, CGPoint(x: 400, y: 300)))
     }
 
@@ -306,16 +313,129 @@ final class NavigationTests: XCTestCase {
     func testAmbientOcclusionFollowsProjection() {
         let (view, scene) = presented()
         let camera = view.cameraNode.camera!
-        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 1)
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0.7, accuracy: 1e-6)
         view.isPerspective = false
         XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0)
         view.isPerspective = true
-        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 1)
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0.7, accuracy: 1e-6)
         var parallel = scene.model.scenes[0].camera!
         parallel.isPerspective = false
         view.apply(camera: parallel, animated: true)
         XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0, "a scene glide to a parallel view")
         view.apply(camera: scene.model.scenes[0].camera!, animated: false)
-        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 1)
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0.7, accuracy: 1e-6)
+    }
+
+    // MARK: Review fixes
+
+    /// A SketchUp plan view pitched 7° past vertical (forward slightly south, up north) keeps its screen up.
+    func testPlanViewPastVerticalKeepsItsUp() {
+        let forward = simd_normalize(SIMD3<Float>(0, -0.126, -0.992)), up = simd_normalize(SIMD3<Float>(0, 0.992, -0.126))
+        var pose = CameraRig.Pose()
+        (pose.yaw, pose.pitch) = CameraRig.orientation(forward: forward, up: up)
+        XCTAssertLessThan(acos(min(1, simd_dot(pose.forward, forward))) * 180 / .pi, 0.1)
+        XCTAssertLessThan(acos(min(1, simd_dot(pose.up, up))) * 180 / .pi, 0.1, "not turned 180°")
+        XCTAssertLessThan(pose.pitch, -.pi / 2, "past vertical")
+    }
+
+    /// Every camera of the reference files: the rig's orientation is the look-at's (roll aside), within 0.1°.
+    func testReferenceFileCamerasMatchLookAt() throws {
+        guard SketchUpAPI.locate() != nil else { throw XCTSkip("SketchUp not installed") }
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/VerreMirroir.skp").path
+        let files = [fixture, "/Users/adrien/Dropbox/AMCB-MM-Diff/TOUR 2018/0930-Arles/3D/MM_Arles_3D_V003.skp",
+                     "/Users/adrien/Downloads/B-SEINE MUSICALE-GRANDE SALLE TECHNIQ V40.skp"].filter { FileManager.default.fileExists(atPath: $0) }
+        var worst: (error: Float, name: String) = (0, "")
+        var count = 0
+        for file in files {
+            let model = try SKPReader.load(URL(fileURLWithPath: file))
+            let cameras = [("file camera", model.camera)] + model.scenes.map { ($0.name, $0.camera) }
+            for case let (name, camera?) in cameras {
+                let node = SCNNode()
+                node.simdPosition = camera.position
+                node.simdLook(at: camera.target, up: camera.up, localFront: SCNNode.simdLocalFront)
+                let pose = CameraRig.pose(camera)
+                let error = max(acos(min(1, simd_dot(pose.forward, node.simdWorldFront))), acos(min(1, simd_dot(pose.up, node.simdWorldUp)))) * 180 / .pi
+                if error > worst.error { worst = (error, "\((file as NSString).lastPathComponent) / \(name)") }
+                count += 1
+            }
+        }
+        print("Camera orientation: \(count) cameras, worst \(worst.error)° (\(worst.name))")
+        XCTAssertLessThan(worst.error, 0.1, worst.name)
+    }
+
+    /// A scene glide to a parallel view starts from the framing shown (no jump of the scale), and back.
+    func testProjectionChangeGlidesFromTheShownFraming() {
+        let (view, scene) = presented()
+        let camera = view.cameraNode.camera!
+        let tanHalf = Double(tan(camera.fieldOfView * .pi / 360))
+        camera.orthographicScale = 123 // stale value from an earlier parallel view
+        let shown = Double(view.rig.pose.distance) * tanHalf
+        var parallel = scene.model.scenes[0].camera!
+        parallel.isPerspective = false
+        parallel.orthoHeight = 3
+        view.apply(camera: parallel, animated: true)
+        XCTAssertTrue(camera.usesOrthographicProjection)
+        XCTAssertEqual(camera.orthographicScale, shown, accuracy: 1e-4, "first frame: the perspective framing")
+        view.rig.step(dt: 1)
+        XCTAssertEqual(camera.orthographicScale, 1.5, accuracy: 1e-6, "orthoHeight / 2 at the end")
+
+        let pose = view.rig.pose
+        view.apply(camera: scene.model.scenes[0].camera!, animated: true)
+        let distance = Float(1.5 / tanHalf)
+        let start = pose.position + pose.forward * (pose.distance - distance)
+        XCTAssertEqual(simd_distance(view.rig.pose.position, start), 0, accuracy: 1e-4, "the equivalent eye position")
+        view.apply(camera: parallel, animated: false)
+        XCTAssertEqual(camera.orthographicScale, 1.5, accuracy: 1e-6)
+    }
+
+    /// A two-finger orbit coasts after the fingers lift (the end event carries no motion).
+    func testTrackpadOrbitCoasts() {
+        let (view, _) = presented()
+        view.scrollWheel(with: scroll(dx: 20, dy: 0, phase: 1))
+        view.scrollWheel(with: scroll(dx: 20, dy: 0, phase: 2))
+        view.scrollWheel(with: scroll(dx: 0, dy: 0, phase: 4))
+        XCTAssertTrue(view.rig.isMoving, "coasts")
+        let yaw = view.rig.pose.yaw
+        view.rig.step(dt: 1.0 / 60)
+        XCTAssertLessThan(view.rig.pose.yaw, yaw, "keeps turning the same way")
+        for _ in 0..<120 { view.rig.step(dt: 1.0 / 60) }
+        XCTAssertFalse(view.rig.isMoving, "the spin decays")
+    }
+
+    /// AZERTY: holding Z then pressing ⇧ goes faster; it is not ⇧Z (zoom extents).
+    func testShiftWhileHoldingZIsFastNotZoomExtents() {
+        let (view, _) = presented()
+        view.keyDown(with: key(13, "z"))
+        view.flagsChanged(with: flags(.shift, keyCode: 56))
+        view.keyDown(with: key(13, "Z", flags: .shift, repeated: true))
+        XCTAssertTrue(view.rig.fast)
+        XCTAssertEqual(view.rig.keys, [13])
+        view.keyUp(with: key(13, "z", up: true))
+        XCTAssertFalse(view.rig.isMoving, "no zoom extents glide")
+    }
+
+    /// AppKit sends no keyUp for a key released while ⌘ is held: ⌘ lets go of the movement keys.
+    func testCommandReleasesHeldKeys() {
+        let (view, _) = presented()
+        view.keyDown(with: key(13, "z"))
+        XCTAssertTrue(view.rig.isMoving)
+        view.flagsChanged(with: flags(.command, keyCode: 55))
+        XCTAssertTrue(view.rig.keys.isEmpty)
+        XCTAssertFalse(view.rig.isMoving)
+    }
+
+    /// Double-click in parallel: a third of the scale, the eye keeps its depth (the near plane must not cut the model).
+    func testParallelDoubleClickScalesOnly() {
+        let (view, _) = presented()
+        view.isPerspective = false
+        let camera = view.cameraNode.camera!
+        let pose = view.rig.pose, scale = camera.orthographicScale
+        view.recentre(at: CGPoint(x: 440, y: 330))
+        view.rig.step(dt: 1)
+        XCTAssertEqual(camera.orthographicScale, scale / 3, accuracy: 1e-6)
+        let depth = simd_dot(view.rig.pose.target - view.rig.pose.position, pose.forward)
+        XCTAssertEqual(simd_dot(view.rig.pose.position - pose.position, pose.forward), 0, accuracy: 1e-3, "no move along the view axis")
+        XCTAssertGreaterThan(depth, 0)
     }
 }

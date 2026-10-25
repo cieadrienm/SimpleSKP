@@ -72,9 +72,9 @@ public final class ViewportView: SCNView {
         self.scene = scene.scene
         cameraNode.removeFromParentNode()
         scene.modelRoot.addChildNode(cameraNode)
-        cameraNode.childNodes.forEach { $0.removeFromParentNode() } // the previous scene's headlight
-        scene.headlight.removeFromParentNode()
-        cameraNode.addChildNode(scene.headlight)
+        cameraNode.childNodes.forEach { $0.removeFromParentNode() } // the previous scene's fill
+        scene.fill.removeFromParentNode()
+        cameraNode.addChildNode(scene.fill)
         pointOfView = cameraNode
         rig.setSpeed(diagonal: simd_distance(scene.model.boundsMin, scene.model.boundsMax))
         if let camera = scene.model.camera {
@@ -107,12 +107,13 @@ public final class ViewportView: SCNView {
 
     /// Applies a model-space camera (metres, Z up, vertical FOV) under the rotated root; roll is dropped.
     public func apply(camera model: SKPModel.Camera, animated: Bool) {
+        // A projection change cannot be tweened: switch with the same framing (didSet, which also re-applies SSAO), then
+        // glide from there. To parallel with the FOV still shown; to perspective with the new one.
+        if !model.isPerspective { isPerspective = false }
         camera.fieldOfView = CGFloat(model.fovDegrees) // kept for a later switch to perspective
-        let scale = model.isPerspective ? nil : Double(model.orthoHeight / 2)
-        camera.usesOrthographicProjection = !model.isPerspective // a projection change cannot be tweened: switch, then glide
-        Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera)
-        if animated { rig.glide(to: CameraRig.pose(model), orthographicScale: scale) } else { rig.set(CameraRig.pose(model), orthographicScale: scale) }
         isPerspective = model.isPerspective
+        let scale = model.isPerspective ? nil : Double(model.orthoHeight / 2)
+        if animated { rig.glide(to: CameraRig.pose(model), orthographicScale: scale) } else { rig.set(CameraRig.pose(model), orthographicScale: scale) }
     }
 
     public var isPerspective: Bool = true {
@@ -217,7 +218,7 @@ public final class ViewportView: SCNView {
         // One wheel notch ≈ 10 %; precise deltas are in points, ~10 per notch.
         let notches = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 10 : event.scrollingDeltaY
         if drag == .look {
-            rig.speedScale *= Float(pow(1.25, notches))
+            rig.speedScale = min(16, max(1.0 / 16, rig.speedScale * Float(pow(1.25, notches))))
             return
         }
         let point = convert(event.locationInWindow, from: nil)
@@ -230,6 +231,8 @@ public final class ViewportView: SCNView {
             return
         }
         if event.phase == .began { rig.stop(); beginPivot(at: point) }
+        // The end carries no motion: orbiting by zero would zero the spin before it can coast.
+        if event.phase == .ended || event.phase == .cancelled { rig.release(time: event.timestamp); return }
         let dx = Float(event.scrollingDeltaX), dy = Float(-event.scrollingDeltaY)
         if event.modifierFlags.contains(.option) {
             pan(dx: -dx, dy: -dy) // the model follows the fingers
@@ -238,7 +241,6 @@ public final class ViewportView: SCNView {
         } else {
             orbit(dx: dx, dy: dy, time: event.timestamp)
         }
-        if event.phase == .ended || event.phase == .cancelled { rig.release(time: event.timestamp) }
     }
 
     public override func magnify(with event: NSEvent) {
@@ -247,10 +249,10 @@ public final class ViewportView: SCNView {
              newGesture: event.phase == .began)
     }
 
-    /// Two-finger rotation: yaw around the point under the fingers, never roll.
+    /// Two-finger rotation: yaw around the point under the fingers, never roll; the model turns with the fingers.
     public override func rotate(with event: NSEvent) {
         if event.phase == .began { rig.stop(); beginPivot(at: convert(event.locationInWindow, from: nil)) }
-        rig.orbit(yaw: event.rotation * .pi / 180, pitch: 0)
+        rig.orbit(yaw: -event.rotation * .pi / 180, pitch: 0)
     }
 
     // MARK: - Keyboard
@@ -278,6 +280,7 @@ public final class ViewportView: SCNView {
 
     public override func flagsChanged(with event: NSEvent) {
         rig.fast = event.modifierFlags.contains(.shift)
+        if event.modifierFlags.contains(.command) { rig.keys = [] } // AppKit sends no keyUp for a key released under ⌘
         super.flagsChanged(with: event)
     }
 
@@ -286,6 +289,8 @@ public final class ViewportView: SCNView {
         guard event.type == .keyDown, CameraRig.moveKeys.contains(event.keyCode),
               event.modifierFlags.isDisjoint(with: [.command, .option, .control]) else { return false }
         let shift = event.modifierFlags.contains(.shift)
+        // A held key: ⇧ pressed meanwhile means fast, never ⇧Z (AZERTY: holding Z then ⇧).
+        if rig.keys.contains(event.keyCode) || event.isARepeat { rig.fast = shift; return true }
         if shift, event.charactersIgnoringModifiers?.lowercased() == "z", drag != .look, !isFreeFlying { return false }
         rig.fast = shift
         rig.keys.insert(event.keyCode)
@@ -383,13 +388,15 @@ public final class ViewportView: SCNView {
     }
 
     /// Double-click: glides (0.3 s) until the clicked point sits at the view centre, at a third of its depth (judgement
-    /// call: once instances are merged, the hit node's size says nothing about what was clicked).
+    /// call: once instances are merged, the hit node's size says nothing about what was clicked). Parallel: a third of
+    /// the scale, the eye keeps its depth (closer in, the near plane would cut the model).
     func recentre(at point: CGPoint) {
         guard let hit = hit(point) else { return }
         var next = rig.pose
-        next.distance = max(simd_dot(hit - next.position, next.forward) / 3, 1e-3)
+        let parallel = camera.usesOrthographicProjection
+        next.distance = max(simd_dot(hit - next.position, next.forward) / (parallel ? 1 : 3), 1e-3)
         next.position = hit - next.forward * next.distance
-        let scale = camera.usesOrthographicProjection ? camera.orthographicScale / 3 : nil
+        let scale = parallel ? camera.orthographicScale / 3 : nil
         rig.glide(to: next, orthographicScale: scale, duration: 0.3)
     }
 

@@ -52,7 +52,7 @@ final class RenderingTests: XCTestCase {
         Rendering.configure(camera: camera)
         XCTAssertTrue(camera.wantsHDR)
         XCTAssertFalse(camera.wantsExposureAdaptation)
-        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 1)
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0.7, accuracy: 1e-6)
         Rendering.setAmbientOcclusion(false, on: camera)
         XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0)
         camera.usesOrthographicProjection = true

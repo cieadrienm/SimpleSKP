@@ -106,6 +106,26 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertTrue(model.statusText.contains("\(Format.decimal(2.5 as Float)) × \(one) × \(one) m"), model.statusText)
     }
 
+    /// D7: Ombres and Occlusion ambiante are remembered: written on toggle, read by the next document.
+    func testShadowsAndOcclusionAreRemembered() {
+        let keys = [Preferences.Key.shadowsEnabled, Preferences.Key.ambientOcclusionEnabled]
+        keys.forEach(UserDefaults.standard.removeObject(forKey:))
+        defer { keys.forEach(UserDefaults.standard.removeObject(forKey:)) }
+        let first = DocumentModel()
+        first.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0)
+        let (shadows, occlusion) = (first.shadowsEnabled, first.ambientOcclusionEnabled)
+        XCTAssertEqual(first.scene?.shadowsEnabled, shadows)
+        XCTAssertEqual(first.viewport.ambientOcclusionEnabled, occlusion)
+        first.toggleShadows()
+        first.toggleAmbientOcclusion()
+        XCTAssertEqual(Preferences.shadowsEnabled, !shadows)
+        XCTAssertEqual(Preferences.ambientOcclusionEnabled, !occlusion)
+        let next = DocumentModel()
+        next.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0)
+        XCTAssertEqual(next.scene?.shadowsEnabled, !shadows)
+        XCTAssertEqual(next.viewport.ambientOcclusionEnabled, !occlusion)
+    }
+
     func testNumbersInBothLanguages() {
         let saved = Localization.current
         defer { Localization.current = saved }

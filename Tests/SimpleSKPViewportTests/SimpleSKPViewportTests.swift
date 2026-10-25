@@ -102,6 +102,17 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertEqual(scene.layerSets[[0, 1]]!.node!.childNodes.count, 2, "built once")
     }
 
+    /// A scene change applies its layers at once: B's set, shown only midway of a layer-by-layer change, is not built.
+    func testSetLayersBuildsOnlyTheFinalState() {
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        scene.setLayers([false, true])
+        XCTAssertNil(scene.layerSets[[0, 1]]!.node, "Layer0 hidden: B's set stays unbuilt")
+        XCTAssertTrue(scene.layerSets[[0]]!.node!.isHidden)
+        scene.setLayers([true, true])
+        XCTAssertFalse(scene.layerSets[[0]]!.node!.isHidden)
+        XCTAssertFalse(scene.layerSets[[0, 1]]!.node!.isHidden)
+    }
+
     /// Brief (b): hiding Cotes hides B's set only; hiding Layer0 hides everything (every path holds it).
     func testLayers() {
         let scene = ViewportScene(model: SyntheticModel.cube())

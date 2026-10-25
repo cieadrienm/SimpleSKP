@@ -7,22 +7,22 @@ public enum Rendering {
     public static func configure(camera: SCNCamera) {
         camera.wantsHDR = true
         camera.wantsExposureAdaptation = false
-        camera.exposureOffset = -0.5
+        camera.exposureOffset = -0.8 // −0.5 clipped the sunlit Arles floor to white
         camera.automaticallyAdjustsZRange = true
-        camera.screenSpaceAmbientOcclusionRadius = 0.4
-        camera.screenSpaceAmbientOcclusionBias = 0.03
-        camera.screenSpaceAmbientOcclusionDepthThreshold = 0.3
+        camera.screenSpaceAmbientOcclusionRadius = 0.3
+        camera.screenSpaceAmbientOcclusionBias = 0.08
+        camera.screenSpaceAmbientOcclusionDepthThreshold = 2 // 0.3–1 banded open floors and speckled far walls
         camera.bloomIntensity = 0
         camera.motionBlurIntensity = 0
         camera.colorFringeIntensity = 0
         setAmbientOcclusion(true, on: camera)
     }
 
-    /// Toggles screen-space ambient occlusion (intensity 1 when on, 0 when off). SceneKit's SSAO assumes a perspective
+    /// Toggles screen-space ambient occlusion (intensity 0.7 when on, 0 when off; the app's default is off). SceneKit's SSAO assumes a perspective
     /// depth buffer: in a parallel projection it blackens whole faces and streaks floors, so it stays off there —
     /// call again after switching projection.
     public static func setAmbientOcclusion(_ enabled: Bool, on camera: SCNCamera) {
-        camera.screenSpaceAmbientOcclusionIntensity = enabled && !camera.usesOrthographicProjection ? 1 : 0
+        camera.screenSpaceAmbientOcclusionIntensity = enabled && !camera.usesOrthographicProjection ? 0.7 : 0
     }
 
     /// Procedural sky, equirectangular 512 × 256 (top row = zenith): soft blue zenith, warm white horizon, grey ground.

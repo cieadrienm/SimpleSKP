@@ -34,6 +34,8 @@ final class DocumentModel {
     var layerVisible: [Bool] = []
     var showsEdges = Preferences.showsEdges
     var isPerspective = Preferences.isPerspective
+    var shadowsEnabled = Preferences.shadowsEnabled
+    var ambientOcclusionEnabled = Preferences.ambientOcclusionEnabled
     var showSidebar = false
     var loadSeconds: Double?
     /// Mirrors the viewport, which ends free fly itself (Esc, lost focus): the status bar shows how to get out.
@@ -68,6 +70,8 @@ final class DocumentModel {
         setModel(scene.model)
         loadSeconds = seconds
         if !showsEdges { scene.showsEdges = false }
+        scene.shadowsEnabled = shadowsEnabled
+        viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
         state = .ready(scene)
         viewport.present(scene)
         updateVisibleSize()
@@ -87,12 +91,8 @@ final class DocumentModel {
         guard let skp, skp.scenes.indices.contains(index) else { return }
         selectedScene = index
         if let hidden = skp.scenes[index].hiddenLayers.map(Set.init) {
-            for layer in layerVisible.indices {
-                let visible = !hidden.contains(layer)
-                guard layerVisible[layer] != visible else { continue }   // a hall has 150 layers: touch only changes
-                layerVisible[layer] = visible
-                scene?.setLayer(layer, visible: visible)
-            }
+            layerVisible = layerVisible.indices.map { !hidden.contains($0) }
+            scene?.setLayers(layerVisible) // at once: no layer set visible only midway gets built
             updateVisibleSize()
         }
         if isReady, let camera = skp.scenes[index].camera {
@@ -137,12 +137,16 @@ final class DocumentModel {
     }
 
     func toggleShadows() {
-        scene?.shadowsEnabled.toggle()
+        shadowsEnabled.toggle()
+        Preferences.shadowsEnabled = shadowsEnabled
+        scene?.shadowsEnabled = shadowsEnabled
         viewport.setNeedsDisplay(viewport.bounds)
     }
 
     func toggleAmbientOcclusion() {
-        viewport.ambientOcclusionEnabled.toggle()
+        ambientOcclusionEnabled.toggle()
+        Preferences.ambientOcclusionEnabled = ambientOcclusionEnabled
+        viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
         viewport.setNeedsDisplay(viewport.bounds)
     }
 
