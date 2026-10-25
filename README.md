@@ -90,8 +90,8 @@ SimpleSKP --lang fr|en                         # langue de l'interface
 |---|---|---|
 | Lancement du binaire → capture PNG du petit modèle affiché | < 0,3 s pour la vignette | 0,9 s au total (vignette d'abord, lecture 0,18 s comprise) |
 | `04-Monticule.skp` (157 Ko) → 3D visible | < 0,5 s | lecture 0,18 s |
-| `MM_Arles_3D_V003.skp` (45 Mo, 35 textures) → 3D | < 4 s (lecture API 1,9 s) | lecture 2,3 s + scène 0,13 s ; lancement → capture 3,2 s |
-| `B-SEINE MUSICALE…V40.skp` (97 Mo, 14 758 composants, 641 572 arêtes, 151 calques) → 3D | < 7 s (lecture API 2,9 s) | lecture 3,7 s + scène 0,6 s (2,95 s avant les calques masqués construits à la demande) ; lancement → capture 6,0 s |
+| `MM_Arles_3D_V003.skp` (45 Mo, 35 textures) → 3D | < 4 s (lecture API 1,9 s) | lecture 2,3 s + scène 0,13 s ; lancement de l'app empaquetée (SDK embarqué seul) → capture 3,9 s |
+| `B-SEINE MUSICALE…V40.skp` (97 Mo, 14 758 composants, 641 572 arêtes, 151 calques) → 3D | < 7 s (lecture API 2,9 s) | lecture 3,7 s + scène 0,15 s (2,95 s avant les calques à la demande et la fusion des instances) ; lancement de l'app empaquetée (SDK embarqué seul) → capture 4,9 s |
 | Orbite sur la salle | 60 i/s sur Apple Silicon | M2 Max, 2760 × 1640, MSAA ×4, `SCNRenderer`, instances fusionnées, rendu ombré (ombres + occlusion) : caméra du fichier 142 i/s ; iso 118 i/s (17 avant la fusion) ; « VUE DESSUS COUPE » 53 i/s (10 avant, 128 sans ombrage) ; « FOH » 207 i/s ; Arles > 400 i/s ; scène construite en 0,15 s |
 | Mémoire | ≤ 3 × la taille du fichier | salle : empreinte 1,2 Go une fois la vue du fichier affichée, 1,5 Go en iso, 2,5 Go après « VUE DESSUS COUPE » (calques en plus) ; `--snapshot` de la salle : pic d'empreinte 1,16 Go, RSS max 1,43 Go ; Arles : pic 0,47 Go |
 | Binaire | ≈ 3 Mo | 1,4 Mo en release, 2,7 Mo empaqueté avec l'icône ; 13 Mo avec le SDK SketchUp (11 Mo, aminci à arm64, sans en-têtes) |
