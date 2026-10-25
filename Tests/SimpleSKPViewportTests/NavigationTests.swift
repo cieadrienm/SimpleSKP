@@ -313,6 +313,8 @@ final class NavigationTests: XCTestCase {
     func testAmbientOcclusionFollowsProjection() {
         let (view, scene) = presented()
         let camera = view.cameraNode.camera!
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0, "off by default, like the app")
+        view.ambientOcclusionEnabled = true
         XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0.7, accuracy: 1e-6)
         view.isPerspective = false
         XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0)
