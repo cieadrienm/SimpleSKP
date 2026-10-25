@@ -2,7 +2,6 @@ import AppKit
 import SimpleSKPCore
 import SimpleSKPViewport
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The model window: sidebar (scenes, layers) | 3D viewport, over the status bar.
 struct ContentView: View {
@@ -22,18 +21,14 @@ struct ContentView: View {
         }
         .background(Theme.background.swiftUI)
         .preferredColorScheme(.dark)
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            for provider in providers {
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url, url.pathExtension.lowercased() == "skp" else { return }
-                    DispatchQueue.main.async {
-                        NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
-                            if let error { NSApp.presentError(error) }
-                        }
-                    }
+        .dropDestination(for: URL.self) { urls, _ in
+            let files = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == "skp" }
+            for url in files {
+                NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
+                    if let error { NSApp.presentError(error) }
                 }
             }
-            return true
+            return !files.isEmpty
         }
     }
 

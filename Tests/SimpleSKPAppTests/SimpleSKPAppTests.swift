@@ -34,6 +34,15 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertEqual(camera?.items.map(\.tag), Array(0..<7))
         let file = menu.items.first { $0.title == L("Fichier", "File") }?.submenu
         XCTAssertFalse(file?.items.contains { $0.action == #selector(NSDocument.save(_:)) } ?? true, "a viewer has no Save")
+        let view = try! XCTUnwrap(menu.items.first { $0.title == L("Présentation", "View") }?.submenu)
+        func item(_ action: Selector) -> NSMenuItem? { view.items.first { $0.action == action } }
+        XCTAssertEqual(item(#selector(SKPDocument.zoomExtents(_:)))?.keyEquivalent.lowercased(), "z")
+        XCTAssertEqual(item(#selector(SKPDocument.zoomExtents(_:)))?.keyEquivalentModifierMask, [.shift], "⇧Z, no ⌘")
+        XCTAssertEqual(item(#selector(SKPDocument.toggleSidebarPanel(_:)))?.keyEquivalent, "s")
+        XCTAssertEqual(item(#selector(SKPDocument.toggleSidebarPanel(_:)))?.keyEquivalentModifierMask, [.command, .option])
+        XCTAssertEqual(item(#selector(SKPDocument.togglePerspective(_:)))?.keyEquivalent, "p")
+        XCTAssertEqual(item(#selector(SKPDocument.togglePerspective(_:)))?.keyEquivalentModifierMask, [.command, .option])
+        XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleSidebarPanel(_:)))!), "⌥⌘S")
     }
 
     func testDocumentControllerTypes() throws {
@@ -61,11 +70,19 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertTrue(model.statusText.contains("SketchUp 2023"), model.statusText)
     }
 
-    func testFrenchNumbers() {
-        guard !Localization.isEnglish else { return }
+    func testNumbersInBothLanguages() {
+        let saved = Localization.current
+        defer { Localization.current = saved }
+        Localization.current = .fr
         XCTAssertEqual(Format.count(184_320, "face"), "184\u{202F}320 faces")
+        XCTAssertEqual(Format.count(0, "face"), "0 face")
         XCTAssertEqual(Format.decimal(48.04 as Float), "48,0")
         XCTAssertEqual(Format.seconds(1.94), "1,9 s")
+        Localization.current = .en
+        XCTAssertEqual(Format.count(184_320, "face"), "184,320 faces")
+        XCTAssertEqual(Format.count(0, "face"), "0 faces")
+        XCTAssertEqual(Format.count(1, "face"), "1 face")
+        XCTAssertEqual(Format.seconds(1.94), "1.9 s")
     }
 
     func testSidebarHiddenWithoutScenesAndSingleLayer() {
@@ -83,9 +100,8 @@ final class SimpleSKPAppTests: XCTestCase {
         let model = DocumentModel()
         let cube = SyntheticModel.cube()
         model.info = cube.fileInfo
-        model.present(ViewportScene(model: cube), seconds: 0.1)
+        let (rep, viewportRect) = try XCTUnwrap(Snapshot.render(model: model, presenting: ViewportScene(model: cube), seconds: 0.1))
         XCTAssertTrue(model.isReady)
-        let (rep, viewportRect) = try XCTUnwrap(Snapshot.render(model: model))
         let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("simpleskp-test-\(UUID().uuidString).png")
         try png.write(to: url)
@@ -151,5 +167,33 @@ final class DocumentOpenTests: XCTestCase {
         XCTAssertNil(skp.model.error)
         XCTAssertEqual(skp.model.skp?.stats.faces, 18)
         XCTAssertNotNil(skp.model.loadSeconds)
+    }
+
+    /// Closing before `.ready` cancels: the scene is never presented and nothing crashes or leaks.
+    func testCloseDuringLoad() throws {
+        _ = NSApplication.shared
+        _ = DocumentController()
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/VerreMirroir.skp")
+        let opened = expectation(description: "opened")
+        var document: NSDocument?
+        NSDocumentController.shared.openDocument(withContentsOf: fixture, display: false) { doc, _, _ in
+            document = doc
+            opened.fulfill()
+        }
+        wait(for: [opened], timeout: 10)
+        let skp = try XCTUnwrap(document as? SKPDocument)
+        skp.makeWindowControllers()
+        skp.startLoading()
+        skp.close()
+        // Long enough for the background load of 18 faces and its main-queue hop (an expectation drains the queue).
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { settled.fulfill() }
+        wait(for: [settled], timeout: 5)
+        XCTAssertFalse(skp.model.isReady, "a closed document never presents its scene")
+        if let directory = skp.model.skp?.textureDirectory {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+        XCTAssertFalse(NSDocumentController.shared.documents.contains(skp))
     }
 }

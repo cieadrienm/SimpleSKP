@@ -2,12 +2,13 @@ import AppKit
 import SimpleSKPCore
 import UniformTypeIdentifiers
 
-/// Opens `.skp` files only. `DocumentController()` made first becomes `NSDocumentController.shared`.
+/// Opens `.skp` files only; no `defaultType`, so no untitled document can be made. `DocumentController()` made first becomes `NSDocumentController.shared`.
 final class DocumentController: NSDocumentController {
     static let skpType = "com.sketchup.skp"
     static let contentType = UTType(importedAs: skpType)
 
-    override var defaultType: String? { Self.skpType }
+    /// Without an Info.plist (`swift run`, tests) AppKit knows no document class and disables « Ouvrir… ».
+    override var documentClassNames: [String] { [NSStringFromClass(SKPDocument.self)] }
 
     override func documentClass(forType typeName: String) -> AnyClass? {
         SKPDocument.self
@@ -21,12 +22,12 @@ final class DocumentController: NSDocumentController {
 
     override func beginOpenPanel(_ openPanel: NSOpenPanel, forTypes inTypes: [String]?, completionHandler: @escaping (Int) -> Void) {
         configurePanel(openPanel)
-        super.beginOpenPanel(openPanel, forTypes: inTypes, completionHandler: completionHandler)
+        super.beginOpenPanel(openPanel, forTypes: nil, completionHandler: completionHandler)
     }
 
     override func runModalOpenPanel(_ openPanel: NSOpenPanel, forTypes types: [String]?) -> Int {
         configurePanel(openPanel)
-        return super.runModalOpenPanel(openPanel, forTypes: types)
+        return super.runModalOpenPanel(openPanel, forTypes: nil)
     }
 
     func configurePanel(_ panel: NSOpenPanel) {

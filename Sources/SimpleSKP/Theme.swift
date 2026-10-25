@@ -5,8 +5,6 @@ import SwiftUI
 enum Theme {
     static let background = NSColor(hex: 0x111317)
     static let panel = NSColor(hex: 0x16191E)
-    static let lane = NSColor(hex: 0x181B21)
-    static let laneSelected = NSColor(hex: 0x1F2530)
     static let header = NSColor(hex: 0x14171C)
     static let separator = NSColor(hex: 0x0B0C0F)
     static let text = NSColor(hex: 0xE6E8EC)
@@ -14,7 +12,6 @@ enum Theme {
     static let textFaint = NSColor(hex: 0x565D6A)
     static let accent = NSColor(hex: 0xFFB454)
     static let alive = NSColor(hex: 0x9ECE6A)
-    static let tcp = NSColor(hex: 0x5CE1E6)
     static let warning = NSColor(hex: 0xF2D96B)
     static let danger = NSColor(hex: 0xFF5C57)
 }

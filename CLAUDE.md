@@ -20,6 +20,8 @@ swift build                                   # .build/debug/SimpleSKP
 swift test                                    # SimpleSKPCoreTests + SimpleSKPViewportTests + SimpleSKPAppTests
 .build/debug/SimpleSKP --self-test [fichier.skp]
 .build/debug/SimpleSKP --snapshot /tmp/simpleskp.png [fichier.skp]
+SIMPLESKP_SNAPSHOT_WINDOW=about .build/debug/SimpleSKP --snapshot /tmp/skp-about.png   # about|shortcuts|help|settings
+SIMPLESKP_SNAPSHOT_MENU=Présentation .build/debug/SimpleSKP --snapshot /dev/null [fichier.skp]   # liste le menu validé
 Scripts/bundle.sh                             # build/SimpleSKP.app signée, release, installée dans /Applications
 INSTALL=0 Scripts/bundle.sh                   # sans installer
 swift Scripts/make-icon.swift                 # redessine Resources/AppIcon.icns et AppIcon.png

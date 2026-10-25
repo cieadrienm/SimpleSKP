@@ -17,6 +17,7 @@ class HostedWindowController {
         if let window {
             window.title = titleProvider()
             window.contentView = hosting
+            window.setContentSize(hosting.fittingSize)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return

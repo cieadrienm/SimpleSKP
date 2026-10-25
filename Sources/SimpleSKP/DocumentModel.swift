@@ -204,9 +204,9 @@ enum Format {
         formatter(decimals: 1).string(from: NSNumber(value: Double(value))) ?? "\(value)"
     }
 
-    /// "184 320 faces", "1 face".
+    /// "184 320 faces", "1 face", "0 face" in French, "0 faces" in English.
     static func count(_ value: Int, _ singular: String) -> String {
-        "\(integer(value)) \(singular)\(value > 1 ? "s" : "")"
+        "\(integer(value)) \(singular)\(Localization.isEnglish ? (value == 1 ? "" : "s") : (value > 1 ? "s" : ""))"
     }
 
     /// "1,9 s".

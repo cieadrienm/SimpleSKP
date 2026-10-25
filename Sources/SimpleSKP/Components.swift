@@ -32,14 +32,12 @@ struct TextButton: View {
     let title: String
     var symbol: String? = nil
     var prominent: Bool = false
-    var tint: Color? = nil
     var compact: Bool = false
     let action: () -> Void
 
     @State private var hovering = false
 
     var body: some View {
-        let activeColor = tint ?? Theme.accent.swiftUI
         Button(action: action) {
             HStack(spacing: 5) {
                 if let symbol {
@@ -51,14 +49,13 @@ struct TextButton: View {
                     .lineLimit(1)
             }
             .fixedSize(horizontal: true, vertical: false)
-            .foregroundStyle(prominent ? Theme.background.swiftUI : (tint ?? Theme.text.swiftUI))
+            .foregroundStyle(prominent ? Theme.background.swiftUI : Theme.text.swiftUI)
             .padding(.horizontal, compact ? 8 : 11)
             .padding(.vertical, compact ? 4 : 5)
             .background(
                 RoundedRectangle(cornerRadius: 5)
                     .fill(
-                        prominent ? activeColor.opacity(hovering ? 0.9 : 1)
-                            : (tint != nil ? activeColor.opacity(hovering ? 0.22 : 0.14) : Color.white.opacity(hovering ? 0.11 : 0.07))
+                        prominent ? Theme.accent.swiftUI.opacity(hovering ? 0.9 : 1) : Color.white.opacity(hovering ? 0.11 : 0.07)
                     )
             )
             .contentShape(Rectangle())
