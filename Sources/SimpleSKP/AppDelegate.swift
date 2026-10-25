@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Leftovers of a crashed session; not in the CLI modes, whose models may still load textures from there.
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("SimpleSKP"))
             Self.updater = SimpleUpdater()
+            RemoteControlServer.shared.start()
         }
     }
 

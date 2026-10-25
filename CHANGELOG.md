@@ -1,5 +1,16 @@
 # Changelog — SimpleSKP
 
+## 1.2.0 — 2026-10-25
+- **Pilotage OSC, OSCQuery (`OSCScore`), API HTTP `/v1` & serveur MCP (`simpleskp-mcp`)** :
+  - Serveur **OSC UDP** sur le port **`9150`** (`SIMPLESKP_OSC_IN_PORT`) et retour OSC en direct sur **`127.0.0.1:9151`** (`SIMPLESKP_OSC_OUT_PORT`, activable dans les Réglages).
+  - Serveur **OSCQuery & API HTTP `/v1`** sur le port **`17950`** (`SIMPLESKP_API_PORT`) annoncé automatiquement en **Bonjour (`_oscjson._tcp.` et `_osc._udp.`)** pour une découverte zéro-conf dans **OSCScore** : pistes 3D `Vec3` pour `/simpleskp/camera/position`, `/simpleskp/camera/target` et `/simpleskp/light/position`, pistes 2D pour `/simpleskp/camera/orientation` et `/simpleskp/sun/angles`, piste couleur `RGBA` pour `/simpleskp/backdrop/color`, et pistes scalaires/triggers pour `/simpleskp/camera/fov`, `/simpleskp/camera/focal`, `/simpleskp/camera/exposure`, scènes, calques et styles de rendu.
+  - Serveur **MCP (`simpleskp-mcp`)** livré dans `SimpleSKP.app/Contents/MacOS/simpleskp-mcp` avec 8 outils (`simpleskp_state`, `simpleskp_help`, `simpleskp_open`, `simpleskp_camera`, `simpleskp_scene`, `simpleskp_layers`, `simpleskp_rendering`, `simpleskp_snapshot`).
+- **Réglages fins de la caméra & Optique (`camera.aperture` dans la barre d'outils)** :
+  - Réglage continu de l'**angle d'ouverture vertical (FOV)** de `10°` à `120°` et de la **focale équivalente 24×36 (`mm`)** avec 5 objectifs rapides (`14 mm`, `24 mm`, `35 mm`, `50 mm`, `85 mm`).
+  - Positionnement exact de la caméra en mètres (**X, Y, Z**) avec boutons de pas `±0,5 m`, raccourcis **`Œil 1,70 m`**, **`Au centre`** et **`Horizon 0°`**.
+  - Réglage direct de l'**orientation** (**Azimut / Lacet** `-180°…180°` et **Inclinaison / Tangage** `-89°…89°`, distance à la cible) et de l'**exposition HDR** (`-3,0…+3,0 EV`).
+- **Éclairage ponctuel calibré** : intensité nominale (`100 %`) portée à `2 600 lm` avec atténuation douce à longue portée et redessin immédiat de la vue 3D à chaque modification des curseurs.
+
 ## 1.1.0 — 2026-10-25
 - **Barre d'outils complète (`TopBar`)** : accès direct à toutes les fonctions sans passer par les menus ou les raccourcis (ouverture, Finder, SketchUp, réinitialisation de la vue `Z`, zoom étendu `⇧Z`, vues standard `Iso`/`Dessus`/`Face`/`Droite`/`Arrière`/`Gauche`/`Dessous`, bascule Perspective/Parallèle, mode Vol libre, styles de rendu, arêtes, ombres, mode d'éclairage Soleil/Ponctuel, réglage du soleil/lumière/SSAO/fond, grille & axes, sélecteur de scènes, copie et export PNG).
 - **Touche `Z` pour réinitialiser la vue** (et `⇧Z` pour le zoom étendu) + repère d'orientation 3D interactif (axes X rouge, Y vert, Z bleu) et barre de zoom rapide en surimpression de la vue 3D.

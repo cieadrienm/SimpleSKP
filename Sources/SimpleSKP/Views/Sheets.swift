@@ -95,7 +95,8 @@ struct AboutView: View {
                     HStack(spacing: 6) {
                         statusPill("SDK SketchUp C", color: location != nil ? Theme.alive.swiftUI : Theme.danger.swiftUI)
                         statusPill("Metal 3D PBR", color: Theme.accent.swiftUI)
-                        statusPill("macOS 15+", color: Theme.textDim.swiftUI)
+                        statusPill("OSC :\(RemoteControlServer.shared.oscInPort)", color: Color(red: 0.78, green: 0.57, blue: 0.92))
+                        statusPill("OSCQuery / MCP :\(RemoteControlServer.shared.httpPort)", color: Color(red: 0.36, green: 0.88, blue: 0.90))
                     }
                     .padding(.top, 2)
                 }
@@ -339,6 +340,7 @@ struct HelpView: View {
         case navigation
         case rendering
         case scenesAndLayers
+        case oscAndMCP
         case sdkAndFiles
 
         var id: String { rawValue }
@@ -346,9 +348,10 @@ struct HelpView: View {
         var title: String {
             switch self {
             case .overview: return L("Vue d'ensemble", "Overview")
-            case .navigation: return L("Navigation 3D", "3D Navigation")
-            case .rendering: return L("Rendu & Soleil", "Rendering & Sun")
+            case .navigation: return L("Navigation & Caméra", "Navigation & Camera")
+            case .rendering: return L("Rendu & Éclairage", "Rendering & Lighting")
             case .scenesAndLayers: return L("Scènes & Calques", "Scenes & Layers")
+            case .oscAndMCP: return L("OSC, OSCScore & MCP", "OSC, OSCScore & MCP")
             case .sdkAndFiles: return L("SDK & Fichiers", "SDK & Files")
             }
         }
@@ -359,6 +362,7 @@ struct HelpView: View {
             case .navigation: return "move.3d"
             case .rendering: return "sun.max"
             case .scenesAndLayers: return "square.3.layers.3d"
+            case .oscAndMCP: return "dot.radiowaves.left.and.right"
             case .sdkAndFiles: return "shippingbox"
             }
         }
@@ -528,6 +532,20 @@ struct HelpView: View {
                    L("Le bas de la barre latérale résume les dimensions de la boîte englobante visible, le nombre de faces, d'arêtes, de composants et l'aperçu des matériaux.",
                      "The bottom of the sidebar summarizes visible bounding-box dimensions, face/edge/component counts, and material swatches."))
 
+        case .oscAndMCP:
+            heading(L("Pilotage OSC, découverte OSCScore & serveur MCP", "OSC control, OSCScore discovery & MCP server"))
+            paragraph(L("SimpleSKP s'annonce automatiquement sur le réseau local en Bonjour (_oscjson._tcp. sur le port 17950 et _osc._udp. sur le port 9150). Il apparaît immédiatement dans l'explorateur OSCQuery d'OSCScore avec les plages de coordonnées adaptées à la maquette ouverte.",
+                        "SimpleSKP automatically advertises itself on the local network via Bonjour (_oscjson._tcp. on port 17950 and _osc._udp. on port 9150). It immediately appears in OSCScore's OSCQuery browser with coordinate ranges tailored to the open model."))
+            bullet(L("Caméra dans OSCScore (UDP :9150, retour :9151)", "Camera in OSCScore (UDP :9150, feedback :9151)"),
+                   L("/simpleskp/camera/position <x y z> (m), /simpleskp/camera/target <tx ty tz> (m), /simpleskp/camera/orientation <yaw pitch> (°), /simpleskp/camera/fov <10..120> (°), /simpleskp/camera/focal <5..135> (mm), /simpleskp/camera/exposure <-3..3> (EV), /simpleskp/camera/eye_height [1.70]. Lorsque le retour OSC est actif, déplacer la caméra à la souris émet sa trajectoire vers OSCScore.",
+                     "/simpleskp/camera/position <x y z> (m), /simpleskp/camera/target <tx ty tz> (m), /simpleskp/camera/orientation <yaw pitch> (°), /simpleskp/camera/fov <10..120> (°), /simpleskp/camera/focal <5..135> (mm), /simpleskp/camera/exposure <-3..3> (EV), /simpleskp/camera/eye_height [1.70]. When OSC feedback is enabled, moving the camera with the mouse streams its trajectory to OSCScore."))
+            bullet(L("Scènes, styles et éclairage en OSC", "Scenes, styles and lighting over OSC"),
+                   L("/simpleskp/scene/index <i>, /simpleskp/scene/name <s>, /simpleskp/scene/next, /simpleskp/style <textured|clay|xray|wireframe>, /simpleskp/lighting/mode <sun|point>, /simpleskp/sun/angles <az el>, /simpleskp/light/position <x y z>, /simpleskp/light/intensity <0..3>.",
+                     "/simpleskp/scene/index <i>, /simpleskp/scene/name <s>, /simpleskp/scene/next, /simpleskp/style <textured|clay|xray|wireframe>, /simpleskp/lighting/mode <sun|point>, /simpleskp/sun/angles <az el>, /simpleskp/light/position <x y z>, /simpleskp/light/intensity <0..3>."))
+            bullet(L("API HTTP /v1 & Serveur MCP (simpleskp-mcp)", "HTTP /v1 API & MCP Server (simpleskp-mcp)"),
+                   L("Le binaire simpleskp-mcp (livré dans SimpleSKP.app/Contents/MacOS/simpleskp-mcp) expose les outils simpleskp_state, simpleskp_open, simpleskp_camera, simpleskp_scene, simpleskp_layers, simpleskp_rendering et simpleskp_snapshot via l'API HTTP locale 127.0.0.1:17950/v1.",
+                     "The simpleskp-mcp binary (bundled in SimpleSKP.app/Contents/MacOS/simpleskp-mcp) exposes simpleskp_state, simpleskp_open, simpleskp_camera, simpleskp_scene, simpleskp_layers, simpleskp_rendering, and simpleskp_snapshot tools via the local HTTP API at 127.0.0.1:17950/v1."))
+
         case .sdkAndFiles:
             heading(L("SDK SketchUp embarqué et interopérabilité", "Embedded SketchUp SDK and interoperability"))
             paragraph(L("SimpleSKP embarque directement SketchUpAPI.framework dans son paquet d'application : SketchUp Pro n'a pas besoin d'être installé sur le Mac pour ouvrir des fichiers .skp.",
@@ -628,6 +646,7 @@ struct SettingsView: View {
     @State private var showsGrid = Preferences.showsGrid
     @State private var backdropStyle = Preferences.backdropStyle
     @State private var customBackdropColor = Preferences.customBackdropColor
+    @State private var oscFeedbackEnabled = Preferences.oscFeedbackEnabled
     @State private var autoCheckUpdates = AppDelegate.updater?.autoCheckOnLaunch ?? true
 
     var body: some View {
@@ -765,9 +784,24 @@ struct SettingsView: View {
 
             Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
 
+            SectionHeader(L("OSC, OSCScore & MCP", "OSC, OSCScore & MCP"))
+            HStack(spacing: 12) {
+                Toggle(L("Retour OSC vers OSCScore (:\(Preferences.oscOutPort))", "OSC feedback to OSCScore (:\(Preferences.oscOutPort))"), isOn: $oscFeedbackEnabled)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.text.swiftUI)
+                    .onChange(of: oscFeedbackEnabled) { _, value in Preferences.oscFeedbackEnabled = value }
+                Spacer()
+                Text("OSC UDP :\(RemoteControlServer.shared.oscInPort) · HTTP/OSCQuery :\(RemoteControlServer.shared.httpPort)")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+            }
+
+            Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
             SectionHeader(L("Confidentialité", "Privacy"))
-            Text(L("SimpleSKP fonctionne intégralement en local. Aucune télémétrie ni donnée de modèle n'est collectée. La seule connexion réseau concerne la vérification des mises à jour sur GitHub Releases.",
-                   "SimpleSKP runs entirely locally. No telemetry or model data is ever collected. The only network connection is checking GitHub Releases for updates."))
+            Text(L("SimpleSKP fonctionne intégralement en local : écoute OSC UDP (port \(RemoteControlServer.shared.oscInPort)), retour OSC (\(Preferences.oscOutHost):\(Preferences.oscOutPort)), API HTTP / OSCQuery / MCP (port \(RemoteControlServer.shared.httpPort)) et annonce Bonjour (_oscjson._tcp). La seule connexion externe concerne la vérification des mises à jour sur GitHub Releases.",
+                   "SimpleSKP runs locally: UDP OSC input (port \(RemoteControlServer.shared.oscInPort)), OSC feedback (\(Preferences.oscOutHost):\(Preferences.oscOutPort)), HTTP / OSCQuery / MCP API (port \(RemoteControlServer.shared.httpPort)) and Bonjour advertisement (_oscjson._tcp). The only external connection checks GitHub Releases for updates."))
                 .font(.system(size: 10.5))
                 .foregroundStyle(Theme.textDim.swiftUI)
                 .fixedSize(horizontal: false, vertical: true)

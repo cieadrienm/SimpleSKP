@@ -86,6 +86,121 @@ public final class ViewportView: SCNView {
         rig.pose.position
     }
 
+    /// Full current camera pose in SketchUp model coordinates (metres, Z up, yaw/pitch in radians).
+    public var cameraPose: CameraRig.Pose {
+        get { rig.pose }
+        set { rig.set(newValue) }
+    }
+
+    /// Vertical field of view in degrees (`10 ... 120`, default `35`).
+    public var fieldOfView: Float {
+        get { Float(camera.fieldOfView) }
+        set {
+            let clamped = max(10.0, min(120.0, newValue))
+            camera.fieldOfView = CGFloat(clamped)
+            requestRedraw()
+            onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
+        }
+    }
+
+    /// Camera HDR exposure offset in EV (`-3.0 ... 3.0`, default `-0.62`).
+    public var exposureOffset: Float {
+        get { Float(camera.exposureOffset) }
+        set {
+            let clamped = max(-3.0, min(3.0, newValue))
+            camera.exposureOffset = CGFloat(clamped)
+            requestRedraw()
+            onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
+        }
+    }
+
+    /// Half-height in metres when in parallel (orthographic) projection.
+    public var orthographicScale: Float {
+        get { Float(camera.orthographicScale) }
+        set {
+            camera.orthographicScale = Double(max(0.01, min(10_000.0, newValue)))
+            requestRedraw()
+            onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
+        }
+    }
+
+    /// Movement speed multiplier (`0.0625 ... 16.0`, default `1.0`).
+    public var movementSpeedScale: Float {
+        get { rig.speedScale }
+        set {
+            rig.speedScale = max(1.0 / 16.0, min(16.0, newValue))
+            onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
+        }
+    }
+
+    /// 35mm full-frame (24 mm sensor height) focal length in mm for a vertical FOV in degrees.
+    public static func focalLengthMM(forVerticalFOVDegrees fov: Float) -> Float {
+        let clamped = max(5.0, min(160.0, fov))
+        let tanHalf = tan(clamped * .pi / 360.0)
+        return max(1.0, 12.0 / max(1e-4, tanHalf))
+    }
+
+    /// Vertical FOV in degrees for a 35mm full-frame (24 mm sensor height) focal length in mm.
+    public static func verticalFOVDegrees(forFocalLengthMM focal: Float) -> Float {
+        let clamped = max(4.0, min(300.0, focal))
+        let fov = atan(12.0 / clamped) * 360.0 / .pi
+        return max(10.0, min(120.0, fov))
+    }
+
+    /// Updates one or more camera pose components in place (eye position, yaw/pitch in degrees, orbit target distance).
+    public func setCameraPose(
+        position: SIMD3<Float>? = nil,
+        yawDegrees: Float? = nil,
+        pitchDegrees: Float? = nil,
+        distance: Float? = nil
+    ) {
+        var next = rig.pose
+        if let position { next.position = position }
+        if let yawDegrees { next.yaw = yawDegrees * .pi / 180.0 }
+        if let pitchDegrees {
+            let clampedDeg = max(-89.0, min(89.0, pitchDegrees))
+            next.pitch = clampedDeg * .pi / 180.0
+        }
+        if let distance { next.distance = max(0.05, distance) }
+        rig.set(next)
+    }
+
+    /// Orbits around the current target by `(dYawDegrees, dPitchDegrees)`.
+    public func orbitByDegrees(yaw dYawDegrees: Float, pitch dPitchDegrees: Float) {
+        rig.stop()
+        rig.orbit(yaw: dYawDegrees * .pi / 180.0, pitch: dPitchDegrees * .pi / 180.0)
+    }
+
+    /// Places the camera at `position` looking directly at `target` (roll dropped, horizon level).
+    public func setCameraLookAt(position: SIMD3<Float>, target: SIMD3<Float>, animated: Bool = false) {
+        let delta = target - position
+        let dist = max(simd_length(delta), 0.05)
+        let dir = dist > 1e-4 ? delta / dist : SIMD3<Float>(0, 1, 0)
+        let (yaw, pitch) = CameraRig.orientation(forward: dir, up: SIMD3<Float>(0, 0, 1))
+        let next = CameraRig.Pose(position: position, yaw: yaw, pitch: pitch, distance: dist)
+        if animated {
+            rig.glide(to: next)
+        } else {
+            rig.set(next)
+        }
+    }
+
+    /// Aims the camera from its current position towards `target`.
+    public func setCameraTarget(_ target: SIMD3<Float>, animated: Bool = false) {
+        setCameraLookAt(position: rig.pose.position, target: target, animated: animated)
+    }
+
+    /// Levels the camera horizon (`pitch = 0°`) while keeping its eye position and azimuth.
+    public func levelHorizon(animated: Bool = false) {
+        var next = rig.pose
+        next.pitch = 0
+        if animated {
+            rig.glide(to: next, duration: 0.2)
+        } else {
+            rig.set(next)
+        }
+    }
+
     /// Forces an immediate on-demand SceneKit redraw even when only light or camera post-processing properties changed.
     public func requestRedraw() {
         let pos = cameraNode.simdPosition

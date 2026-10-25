@@ -73,6 +73,7 @@ struct ViewportRepresentable: NSViewRepresentable {
 
 struct TopBar: View {
     let model: DocumentModel
+    @State private var showCameraPopover = false
     @State private var showLightingPopover = false
 
     private static let primaryViews: [(view: StandardView, label: String, shortcut: String)] = [
@@ -204,6 +205,19 @@ struct TopBar: View {
                                "Free fly mode with mouse and keyboard (⌥⌘F, Esc to exit)")
                 ) {
                     model.toggleFreeFlight()
+                }
+
+                IconButton(
+                    symbol: "camera.aperture",
+                    active: showCameraPopover || abs(model.cameraFOV - 35) > 0.5 || abs(model.cameraExposure - (-0.62)) > 0.05,
+                    disabled: !model.isReady,
+                    tooltip: L("Réglages fins de la caméra : angle d'ouverture (FOV / focale mm), position XYZ, orientation et exposition",
+                               "Fine camera settings: field of view (FOV / focal length mm), XYZ position, orientation and exposure")
+                ) {
+                    showCameraPopover.toggle()
+                }
+                .popover(isPresented: $showCameraPopover, arrowEdge: .bottom) {
+                    CameraPopover(model: model)
                 }
             }
 
@@ -374,6 +388,294 @@ struct TopBar: View {
         Rectangle()
             .fill(Theme.separator.swiftUI)
             .frame(width: 1, height: 18)
+    }
+}
+
+// MARK: - Fine Camera Settings Popover
+
+struct CameraPopover: View {
+    let model: DocumentModel
+
+    private static let focalPresets: [(mm: Float, label: String)] = [
+        (14, "14 mm"),
+        (24, "24 mm"),
+        (35, "35 mm"),
+        (50, "50 mm"),
+        (85, "85 mm"),
+    ]
+
+    var body: some View {
+        let posRange = model.cameraCoordinateRange
+        let span = max(Float(posRange.upperBound - posRange.lowerBound), 1.0)
+        let step = max(0.05, Double((span / 100.0).rounded(.toNearestOrAwayFromZero)))
+
+        VStack(alignment: .leading, spacing: 11) {
+            // 1. Optics & Field of View
+            SectionHeader(L("Optique & Angle d'ouverture", "Optics & Field of View")) {
+                Button {
+                    model.setCameraFOV(35)
+                    model.setCameraExposure(-0.62)
+                    model.setCameraSpeedScale(1.0)
+                } label: {
+                    Text(L("Défaut (35°)", "Default (35°)"))
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Theme.accent.swiftUI)
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 4) {
+                ToolbarPillButton(
+                    title: L("Perspective", "Perspective"),
+                    symbol: "view.3d",
+                    active: model.isPerspective
+                ) {
+                    model.setPerspective(true)
+                }
+                ToolbarPillButton(
+                    title: L("Parallèle (Ortho)", "Parallel (Ortho)"),
+                    symbol: "square.grid.2x2",
+                    active: !model.isPerspective
+                ) {
+                    model.setPerspective(false)
+                }
+            }
+
+            if model.isPerspective {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text(L("Angle d'ouverture (FOV)", "Field of view (FOV)"))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text("\(Int(model.cameraFOV.rounded()))° · \(Int(model.cameraFocalLengthMM.rounded())) mm")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    HStack(spacing: 6) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(model.cameraFOV) },
+                                set: { model.setCameraFOV(Float($0)) }
+                            ),
+                            in: 10.0...120.0
+                        )
+                        .tint(Theme.accent.swiftUI)
+
+                        HStack(spacing: 2) {
+                            stepButton("minus") { model.setCameraFOV(model.cameraFOV - 1) }
+                            stepButton("plus") { model.setCameraFOV(model.cameraFOV + 1) }
+                        }
+                    }
+
+                    HStack(spacing: 4) {
+                        Text(L("Focale 24×36 :", "35mm focal:"))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Theme.textFaint.swiftUI)
+                        Spacer()
+                        ForEach(Self.focalPresets, id: \.mm) { preset in
+                            let presetFOV = ViewportView.verticalFOVDegrees(forFocalLengthMM: preset.mm)
+                            ToolbarPillButton(
+                                title: preset.label,
+                                active: abs(model.cameraFOV - presetFOV) < 1.2
+                            ) {
+                                model.setCameraFocalLength(preset.mm)
+                            }
+                        }
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text(L("Demi-hauteur ortho", "Ortho half-height"))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text(String(format: "%.2f m", model.cameraOrthoScale))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(model.cameraOrthoScale) },
+                            set: { model.setCameraOrthoScale(Float($0)) }
+                        ),
+                        in: model.cameraDistanceRange
+                    )
+                    .tint(Theme.accent.swiftUI)
+                }
+            }
+
+            Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
+            // 2. Camera Position XYZ & Quick Actions
+            SectionHeader(L("Position de la caméra (m)", "Camera position (m)"))
+            cameraCoordRow(
+                axis: "X",
+                color: NSColor(srgbRed: 0.92, green: 0.28, blue: 0.26, alpha: 1.0),
+                value: model.cameraPosition.x,
+                range: posRange,
+                step: Float(step)
+            ) { newX in
+                model.setCameraPosition(SIMD3<Float>(newX, model.cameraPosition.y, model.cameraPosition.z))
+            }
+            cameraCoordRow(
+                axis: "Y",
+                color: NSColor(srgbRed: 0.25, green: 0.78, blue: 0.36, alpha: 1.0),
+                value: model.cameraPosition.y,
+                range: posRange,
+                step: Float(step)
+            ) { newY in
+                model.setCameraPosition(SIMD3<Float>(model.cameraPosition.x, newY, model.cameraPosition.z))
+            }
+            cameraCoordRow(
+                axis: "Z",
+                color: NSColor(srgbRed: 0.24, green: 0.54, blue: 0.96, alpha: 1.0),
+                value: model.cameraPosition.z,
+                range: posRange,
+                step: Float(step)
+            ) { newZ in
+                model.setCameraPosition(SIMD3<Float>(model.cameraPosition.x, model.cameraPosition.y, newZ))
+            }
+
+            HStack(spacing: 5) {
+                ToolbarPillButton(
+                    title: L("Œil 1,70 m", "Eye 1.70 m"),
+                    symbol: "figure.stand",
+                    active: false
+                ) {
+                    model.setCameraEyeHeight(1.70)
+                }
+                ToolbarPillButton(
+                    title: L("Au centre", "Center"),
+                    symbol: "scope",
+                    active: false
+                ) {
+                    model.centerCameraInModel()
+                }
+                ToolbarPillButton(
+                    title: L("Horizon 0°", "Horizon 0°"),
+                    symbol: "level",
+                    active: abs(model.cameraPitchDegrees) < 0.5
+                ) {
+                    model.levelCameraHorizon()
+                }
+            }
+
+            Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
+            // 3. Orientation (Azimut / Inclinaison) & Exposition
+            SectionHeader(L("Orientation & Exposition", "Orientation & Exposure"))
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(L("Azimut (Lacet)", "Azimuth (Yaw)"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim.swiftUI)
+                    Spacer()
+                    Text("\(Int(model.cameraYawDegrees.rounded()))°")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(model.cameraYawDegrees) },
+                        set: { model.setCameraOrientation(yawDegrees: Float($0)) }
+                    ),
+                    in: -180.0...180.0
+                )
+                .controlSize(.small)
+                .tint(Theme.accent.swiftUI)
+
+                HStack {
+                    Text(L("Inclinaison (Tangage)", "Tilt (Pitch)"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim.swiftUI)
+                    Spacer()
+                    Text("\(Int(model.cameraPitchDegrees.rounded()))°")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(model.cameraPitchDegrees) },
+                        set: { model.setCameraOrientation(pitchDegrees: Float($0)) }
+                    ),
+                    in: -89.0...89.0
+                )
+                .controlSize(.small)
+                .tint(Theme.accent.swiftUI)
+
+                HStack {
+                    Text(L("Exposition HDR", "HDR exposure"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim.swiftUI)
+                    Spacer()
+                    Text(String(format: "%+.2f EV", model.cameraExposure))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(model.cameraExposure) },
+                        set: { model.setCameraExposure(Float($0)) }
+                    ),
+                    in: -2.5...2.5
+                )
+                .controlSize(.small)
+                .tint(Theme.accent.swiftUI)
+            }
+        }
+        .padding(14)
+        .frame(width: 332)
+        .background(Theme.panel.swiftUI)
+        .preferredColorScheme(.dark)
+    }
+
+    private func cameraCoordRow(
+        axis: String,
+        color: NSColor,
+        value: Float,
+        range: ClosedRange<Double>,
+        step: Float,
+        onChange: @escaping (Float) -> Void
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(axis)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color(nsColor: color))
+                .frame(width: 14, alignment: .leading)
+
+            Slider(
+                value: Binding(
+                    get: { Double(value) },
+                    set: { onChange(Float($0)) }
+                ),
+                in: range
+            )
+            .controlSize(.small)
+            .tint(Color(nsColor: color))
+
+            Text(String(format: "%+.2f m", value))
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Theme.text.swiftUI)
+                .frame(width: 58, alignment: .trailing)
+
+            HStack(spacing: 2) {
+                stepButton("minus") { onChange(value - step) }
+                stepButton("plus") { onChange(value + step) }
+            }
+        }
+    }
+
+    private func stepButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .frame(width: 16, height: 16)
+                .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.textDim.swiftUI)
     }
 }
 
@@ -1252,6 +1554,13 @@ struct StatusBar: View {
                 Chip(text: warning, tint: Theme.warning.swiftUI).help(warning)
             }
             Spacer(minLength: 8)
+            if RemoteControlServer.shared.isOSCListening {
+                Text("OSC :\(RemoteControlServer.shared.oscInPort)")
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                    .help(L("Serveur OSC actif (UDP :\(RemoteControlServer.shared.oscInPort)) · OSCQuery & MCP (TCP :\(RemoteControlServer.shared.httpPort))",
+                            "OSC server active (UDP :\(RemoteControlServer.shared.oscInPort)) · OSCQuery & MCP (TCP :\(RemoteControlServer.shared.httpPort))"))
+                Divider().frame(height: 12)
+            }
             if let seconds = model.loadSeconds {
                 Text(Format.seconds(seconds))
                 Divider().frame(height: 12)

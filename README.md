@@ -16,6 +16,11 @@ Visualiseur **SketchUp** natif, léger (13 Mo dont 11 pour le SDK SketchUp, zér
 - **Calques & Inspecteur** : recherche/filtrage instantané des calques par nom, boutons **Tout / Aucun**, bouton **Solo** au survol d'un calque, et résumé **Modèle & Matériaux** (dimensions, statistiques, nuancier des matériaux).
 - **Dimensions en mètres** dans la barre d'état, avec version SketchUp du fichier, faces, arêtes et composants.
 - **Vues standard** : Iso, Dessus, Face, Droite, Arrière, Gauche, Dessous (`⌘1…⌘7`), **Réinitialiser la vue** (`Z`) et **Zoom étendu** (`⇧Z`).
+- **Caméra & Optique (popover `camera.aperture`)** : réglage fin de l'**angle d'ouverture vertical (FOV)** (`10°…120°`), **focale équivalente 24×36 (`mm`)** avec objectifs rapides (`14`, `24`, `35`, `50`, `85 mm`), coordonnées **X, Y, Z** (`m`), raccourcis **`Œil 1,70 m`**, **`Au centre`** et **`Horizon 0°`**, **Azimut / Inclinaison** en degrés et **exposition HDR** (`-3…+3 EV`).
+- **Pilotage OSC, OSCScore (OSCQuery Bonjour `_oscjson._tcp.`), API HTTP `/v1` & MCP (`simpleskp-mcp`)** :
+  - **OSC UDP entrée** sur `0.0.0.0:9150` (`SIMPLESKP_OSC_IN_PORT`) et **retour OSC UDP** sur `127.0.0.1:9151` (`SIMPLESKP_OSC_OUT_PORT`).
+  - **OSCQuery & API HTTP `/v1`** sur `:17950` (`SIMPLESKP_API_PORT`), annoncés automatiquement en Bonjour (`_oscjson._tcp.`) pour l'exploration et l'enregistrement de pistes dans **OSCScore** (`/simpleskp/camera/position`, `/simpleskp/camera/target`, `/simpleskp/camera/orientation`, `/simpleskp/camera/fov`, `/simpleskp/camera/focal`, `/simpleskp/camera/exposure`, scènes, calques, styles, soleil, lumière ponctuelle).
+  - **Serveur MCP** `SimpleSKP.app/Contents/MacOS/simpleskp-mcp` (`simpleskp_state`, `simpleskp_help`, `simpleskp_open`, `simpleskp_camera`, `simpleskp_scene`, `simpleskp_layers`, `simpleskp_rendering`, `simpleskp_snapshot`).
 - **Perspective / parallèle** (`⌥⌘P`) et **arêtes** affichables ou masquées (`⌘E`).
 - **Copie d'image** (`⌘C`), **export PNG** (`⇧⌘E`) et **ouverture dans SketchUp** (`⇧⌘O`).
 - Glisser-déposer d'un `.skp` sur la fenêtre ou l'icône, plusieurs fichiers ouverts, Ouvrir récent, restauration des fenêtres.

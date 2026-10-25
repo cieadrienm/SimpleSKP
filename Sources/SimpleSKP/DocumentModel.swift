@@ -50,8 +50,14 @@ final class DocumentModel {
     var sunAzimuthDegrees: Float = -135
     var sunElevationDegrees: Float = 45
     var activeStandardView: StandardView? = nil
+    var cameraPosition: SIMD3<Float> = .zero
     var cameraYaw: Float = 0
     var cameraPitch: Float = 0
+    var cameraDistance: Float = 1
+    var cameraFOV: Float = 35
+    var cameraExposure: Float = -0.62
+    var cameraOrthoScale: Float = 1
+    var cameraSpeedScale: Float = 1
     var showSidebar = false
     var loadSeconds: Double?
     /// Mirrors the viewport, which ends free fly itself (Esc, lost focus): the status bar shows how to get out.
@@ -60,19 +66,53 @@ final class DocumentModel {
     var flashMessage: String? = nil
     /// Used by `Snapshot.render` so `cacheDisplay` composites the 3D Metal render below SwiftUI HUD overlays.
     var snapshotPreviewImage: NSImage? = nil
+    /// Callback invoked when the camera state changes so `RemoteControlServer` can emit OSC feedback if enabled.
+    @ObservationIgnored var onCameraFeedback: ((DocumentModel) -> Void)?
 
     init() {
         viewport.onFreeFlyingChange = { [weak self] in self?.isFreeFlying = $0 }
-        viewport.onPoseChange = { [weak self] yaw, pitch, _ in
+        viewport.onPoseChange = { [weak self] _, _, _ in
             guard let self else { return }
-            self.cameraYaw = yaw
-            self.cameraPitch = pitch
+            self.syncCameraStateFromViewport()
+            self.onCameraFeedback?(self)
         }
         viewport.onResetView = { [weak self] isPersp in
             guard let self else { return }
             self.activeStandardView = nil
             self.isPerspective = isPersp
+            self.syncCameraStateFromViewport()
         }
+    }
+
+    func syncCameraStateFromViewport() {
+        let pose = viewport.cameraPose
+        cameraPosition = pose.position
+        cameraYaw = pose.yaw
+        cameraPitch = pose.pitch
+        cameraDistance = pose.distance
+        cameraFOV = viewport.fieldOfView
+        cameraExposure = viewport.exposureOffset
+        cameraOrthoScale = viewport.orthographicScale
+        cameraSpeedScale = viewport.movementSpeedScale
+    }
+
+    var cameraTarget: SIMD3<Float> {
+        viewport.cameraPose.target
+    }
+
+    var cameraYawDegrees: Float {
+        let deg = (cameraYaw * 180.0 / .pi).truncatingRemainder(dividingBy: 360.0)
+        if deg > 180.0 { return deg - 360.0 }
+        if deg < -180.0 { return deg + 360.0 }
+        return deg
+    }
+
+    var cameraPitchDegrees: Float {
+        cameraPitch * 180.0 / .pi
+    }
+
+    var cameraFocalLengthMM: Float {
+        ViewportView.focalLengthMM(forVerticalFOVDegrees: cameraFOV)
     }
 
     var scene: ViewportScene? {
@@ -125,6 +165,7 @@ final class DocumentModel {
             viewport.isPerspective = isPerspective
         }
         isPerspective = viewport.isPerspective
+        syncCameraStateFromViewport()
     }
 
     func fail(_ error: Error) {
@@ -145,6 +186,7 @@ final class DocumentModel {
         if isReady, let camera = skp.scenes[index].camera {
             viewport.apply(camera: camera, animated: true)
             isPerspective = camera.isPerspective
+            syncCameraStateFromViewport()
         }
     }
 
@@ -219,9 +261,117 @@ final class DocumentModel {
     }
 
     func togglePerspective() {
-        isPerspective.toggle()
-        Preferences.isPerspective = isPerspective
-        if isReady { viewport.isPerspective = isPerspective }
+        setPerspective(!isPerspective)
+    }
+
+    func setPerspective(_ enabled: Bool) {
+        guard isPerspective != enabled || (isReady && viewport.isPerspective != enabled) else { return }
+        isPerspective = enabled
+        Preferences.isPerspective = enabled
+        if isReady {
+            viewport.isPerspective = enabled
+            syncCameraStateFromViewport()
+        }
+    }
+
+    func setCameraFOV(_ degrees: Float) {
+        let clamped = max(10.0, min(120.0, degrees))
+        cameraFOV = clamped
+        viewport.fieldOfView = clamped
+    }
+
+    func setCameraFocalLength(_ mm: Float) {
+        let fov = ViewportView.verticalFOVDegrees(forFocalLengthMM: mm)
+        setCameraFOV(fov)
+    }
+
+    func setCameraExposure(_ ev: Float) {
+        let clamped = max(-3.0, min(3.0, ev))
+        cameraExposure = clamped
+        viewport.exposureOffset = clamped
+    }
+
+    func setCameraOrthoScale(_ scale: Float) {
+        let clamped = max(0.05, min(10_000.0, scale))
+        cameraOrthoScale = clamped
+        viewport.orthographicScale = clamped
+    }
+
+    func setCameraSpeedScale(_ scale: Float) {
+        let clamped = max(1.0 / 16.0, min(16.0, scale))
+        cameraSpeedScale = clamped
+        viewport.movementSpeedScale = clamped
+    }
+
+    func setCameraPosition(_ position: SIMD3<Float>) {
+        activeStandardView = nil
+        viewport.setCameraPose(position: position)
+        syncCameraStateFromViewport()
+    }
+
+    func setCameraOrientation(yawDegrees: Float? = nil, pitchDegrees: Float? = nil) {
+        activeStandardView = nil
+        viewport.setCameraPose(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
+        syncCameraStateFromViewport()
+    }
+
+    func setCameraDistance(_ distance: Float) {
+        viewport.setCameraPose(distance: max(0.05, distance))
+        syncCameraStateFromViewport()
+    }
+
+    func setCameraTarget(_ target: SIMD3<Float>, animated: Bool = false) {
+        activeStandardView = nil
+        viewport.setCameraTarget(target, animated: animated)
+        syncCameraStateFromViewport()
+    }
+
+    func setCameraLookAt(position: SIMD3<Float>, target: SIMD3<Float>, animated: Bool = false) {
+        activeStandardView = nil
+        viewport.setCameraLookAt(position: position, target: target, animated: animated)
+        syncCameraStateFromViewport()
+    }
+
+    func orbitCameraByDegrees(yaw dYawDegrees: Float, pitch dPitchDegrees: Float) {
+        activeStandardView = nil
+        viewport.orbitByDegrees(yaw: dYawDegrees, pitch: dPitchDegrees)
+        syncCameraStateFromViewport()
+    }
+
+    func levelCameraHorizon(animated: Bool = true) {
+        activeStandardView = nil
+        viewport.levelHorizon(animated: animated)
+        syncCameraStateFromViewport()
+    }
+
+    /// Places the camera at human eye height (`1.70 m` above the model floor or Z=0) and levels the horizon.
+    func setCameraEyeHeight(_ heightAboveFloor: Float = 1.70) {
+        activeStandardView = nil
+        let bMinZ = scene?.visibleBounds.min.z ?? skp?.boundsMin.z ?? 0
+        let bMaxZ = scene?.visibleBounds.max.z ?? skp?.boundsMax.z ?? 3
+        let floorZ = (bMinZ <= 0.2 && bMaxZ >= 1.5) ? 0.0 : bMinZ
+        var pos = viewport.cameraModelPosition
+        pos.z = floorZ + heightAboveFloor
+        viewport.setCameraPose(position: pos, pitchDegrees: 0)
+        syncCameraStateFromViewport()
+    }
+
+    /// Places the camera at the geometric center of the model and levels the horizon.
+    func centerCameraInModel() {
+        activeStandardView = nil
+        let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
+        viewport.setCameraPose(position: center, pitchDegrees: 0)
+        syncCameraStateFromViewport()
+    }
+
+    var cameraCoordinateRange: ClosedRange<Double> {
+        pointLightCoordinateRange
+    }
+
+    var cameraDistanceRange: ClosedRange<Double> {
+        let b = scene?.visibleBounds ?? (min: skp?.boundsMin ?? SIMD3(-5, -5, -5), max: skp?.boundsMax ?? SIMD3(5, 5, 5))
+        let diag = Double(max(simd_length(b.max - b.min) * 2.0, 10.0))
+        return 0.1...diag
     }
 
     func setShadingStyle(_ style: ShadingStyle) {

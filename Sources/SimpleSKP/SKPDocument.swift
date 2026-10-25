@@ -53,6 +53,7 @@ final class SKPDocument: NSDocument {
                 let scene = ViewportScene(model: skp)
                 DispatchQueue.main.async {
                     guard !cancelled.withLock({ $0 }) else { return Self.removeTextures(of: skp) }
+                    RemoteControlServer.shared.attachFeedbackIfNeeded(to: model)
                     model.present(scene, seconds: Date().timeIntervalSince(start))
                 }
             } catch {

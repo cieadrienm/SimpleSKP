@@ -47,9 +47,10 @@ swift Scripts/make-icon.swift                 # redessine Resources/AppIcon.icns
 - `timeout` n'existe pas sur macOS : surveiller un lancement avec une boucle `kill -0`.
 
 ## Architecture en une minute
-- `Sources/SimpleSKPCore/` — Foundation seulement : `SKPModel.swift` (le contrat figé), `SKPFileInfo` (version, vignette), `SketchUpAPI` (framework chargé par `dlopen`), `SKPReader` (fichier → `SKPModel` neutre, mètres, Z vertical), `Localization`, `SimpleUpdater`.
-- `Sources/SimpleSKPViewport/` — SceneKit : `ViewportScene` (modèle → `SCNScene`, Z→Y par la racine), `CameraRig` (la caméra unique de D6 : position, lacet, tangage, inertie, touches, 60 Hz seulement en mouvement), `ViewportView` (événements souris, clavier, trackpad, vol libre ; vues standard).
-- `Sources/SimpleSKP/` — AppKit + SwiftUI : `App` (entrée et options), `AppDelegate`, `MainMenu`, `DocumentController`, `SKPDocument`, `ModelWindowController`, `DocumentModel`, `ContentView`, feuilles, `Snapshot`, `SelfTest`.
+- `Sources/SimpleSKPCore/` — Foundation seulement : `SKPModel.swift` (le contrat figé), `SKPFileInfo` (version, vignette), `SketchUpAPI` (framework chargé par `dlopen`), `SKPReader` (fichier → `SKPModel` neutre, mètres, Z vertical), `OSCAndHTTP` (encodeur/décodeur OSC 1.0, serveur UDP, arbre OSCQuery), `Localization`, `SimpleUpdater`.
+- `Sources/SimpleSKPViewport/` — SceneKit : `ViewportScene` (modèle → `SCNScene`, Z→Y par la racine), `CameraRig` (la caméra unique de D6 : position, lacet, tangage, inertie, touches, 60 Hz seulement en mouvement), `ViewportView` (événements souris, clavier, trackpad, vol libre ; vues standard ; optique FOV / focale 24×36 / exposition HDR).
+- `Sources/SimpleSKP/` — AppKit + SwiftUI : `App` (entrée et options), `AppDelegate`, `MainMenu`, `DocumentController`, `SKPDocument`, `ModelWindowController`, `DocumentModel`, `RemoteControlServer` (OSC `:9150`, retour `:9151`, HTTP `/v1` + OSCQuery `:17950`, Bonjour `_oscjson._tcp.`), `ContentView`, feuilles, `Snapshot`, `SelfTest`.
+- `Sources/SimpleSKPMCPCore/` & `Sources/simpleskp-mcp/` — Serveur MCP stdio (`simpleskp-mcp`) relayant vers l'API HTTP `/v1`.
 - `Resources/` — `Info.plist` (gabarit `@VERSION@`), `SimpleSKP.entitlements`, `AppIcon.icns`, `fr.lproj`, `en.lproj`.
 - `Scripts/` — `bundle.sh`, `package-release.sh`, `make-icon.swift`.
 

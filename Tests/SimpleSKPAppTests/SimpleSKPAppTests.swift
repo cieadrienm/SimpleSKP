@@ -1,5 +1,6 @@
 import AppKit
 import SimpleSKPCore
+import SimpleSKPMCPCore
 import SimpleSKPViewport
 import XCTest
 @testable import SimpleSKP
@@ -264,5 +265,147 @@ final class DocumentOpenTests: XCTestCase {
         XCTAssertFalse(skp.model.isReady, "a closed document never presents its scene")
         XCTAssertNil(skp.model.skp, "the loaded model was dropped, not presented")
         XCTAssertFalse(NSDocumentController.shared.documents.contains(skp))
+    }
+}
+
+@MainActor
+final class OSCAndCameraRemoteTests: XCTestCase {
+    func testOSCCodecRoundTripAndBundle() {
+        let msg1 = OSCCodec.Message(
+            address: "/simpleskp/camera/position",
+            arguments: [.float(1.5), .float(-4.25), .float(1.70)]
+        )
+        let encoded1 = OSCCodec.encode(msg1)
+        let decoded1 = OSCCodec.decode(encoded1)
+        XCTAssertEqual(decoded1, [msg1])
+
+        let msg2 = OSCCodec.Message(
+            address: "/simpleskp/style",
+            arguments: [.string("clay"), .int(1), .bool(true), .impulse]
+        )
+        let encoded2 = OSCCodec.encode(msg2)
+        var bundle = Data("#bundle\0".utf8)
+        bundle.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 1]) // timetag
+        var len1 = UInt32(encoded1.count).bigEndian
+        withUnsafeBytes(of: &len1) { bundle.append(contentsOf: $0) }
+        bundle.append(encoded1)
+        var len2 = UInt32(encoded2.count).bigEndian
+        withUnsafeBytes(of: &len2) { bundle.append(contentsOf: $0) }
+        bundle.append(encoded2)
+
+        let decodedBundle = OSCCodec.decode(bundle)
+        XCTAssertEqual(decodedBundle, [msg1, msg2])
+    }
+
+    func testOSCQueryTreeHostInfoAndRoot() throws {
+        let hostObj = OSCQueryTree.hostInfoJSON(name: "SimpleSKP", oscPort: 9150)
+        XCTAssertEqual(hostObj["NAME"] as? String, "SimpleSKP")
+        XCTAssertEqual(hostObj["OSC_PORT"] as? Int, 9150)
+        XCTAssertEqual(hostObj["OSC_TRANSPORT"] as? String, "UDP")
+
+        let specs: [OSCQueryParameterSpec] = [
+            OSCQueryParameterSpec(path: "/simpleskp/camera/fov", typeTag: "f", description: "FOV", min: 10, max: 120, values: [35.0]),
+            OSCQueryParameterSpec(path: "/simpleskp/camera/position", typeTag: "fff", description: "Position", min: -50, max: 50, values: [1.0, 2.0, 1.7]),
+        ]
+        let rootObj = OSCQueryTree.rootJSON(parameters: specs, description: "SimpleSKP")
+        let contents = try XCTUnwrap(rootObj["CONTENTS"] as? [String: Any])
+        let simpleskp = try XCTUnwrap(contents["simpleskp"] as? [String: Any])
+        let cam = try XCTUnwrap((simpleskp["CONTENTS"] as? [String: Any])?["camera"] as? [String: Any])
+        let fovNode = try XCTUnwrap((cam["CONTENTS"] as? [String: Any])?["fov"] as? [String: Any])
+        XCTAssertEqual(fovNode["FULL_PATH"] as? String, "/simpleskp/camera/fov")
+        XCTAssertEqual(fovNode["TYPE"] as? String, "f")
+
+        let subNode = try XCTUnwrap(OSCQueryTree.nodeJSON(at: "/simpleskp/camera/position", in: rootObj))
+        XCTAssertEqual(subNode["FULL_PATH"] as? String, "/simpleskp/camera/position")
+        XCTAssertEqual(subNode["TYPE"] as? String, "fff")
+    }
+
+    func testFineCameraControlsOnDocumentModel() {
+        let model = DocumentModel()
+        model.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0.1)
+
+        model.setCameraFOV(52)
+        XCTAssertEqual(model.cameraFOV, 52, accuracy: 0.05)
+
+        model.setCameraFocalLength(50)
+        XCTAssertEqual(model.cameraFocalLengthMM, 50, accuracy: 0.5)
+
+        model.setCameraExposure(1.25)
+        XCTAssertEqual(model.cameraExposure, 1.25, accuracy: 0.01)
+
+        model.setCameraPosition(SIMD3<Float>(3, -6, 2.4))
+        XCTAssertEqual(model.cameraPosition.x, 3, accuracy: 0.01)
+        XCTAssertEqual(model.cameraPosition.y, -6, accuracy: 0.01)
+        XCTAssertEqual(model.cameraPosition.z, 2.4, accuracy: 0.01)
+
+        model.setCameraOrientation(yawDegrees: 45, pitchDegrees: -15)
+        XCTAssertEqual(model.cameraYawDegrees, 45, accuracy: 0.1)
+        XCTAssertEqual(model.cameraPitchDegrees, -15, accuracy: 0.1)
+
+        model.levelCameraHorizon(animated: false)
+        XCTAssertEqual(model.cameraPitchDegrees, 0, accuracy: 0.05)
+
+        model.setCameraEyeHeight(1.70)
+        XCTAssertEqual(model.cameraPosition.z, 1.70, accuracy: 0.01)
+
+        model.setCameraLookAt(position: SIMD3<Float>(0, -5, 1.7), target: SIMD3<Float>(0, 0, 1.7), animated: false)
+        XCTAssertEqual(model.cameraPosition.y, -5, accuracy: 0.01)
+        XCTAssertEqual(model.cameraTarget.y, 0, accuracy: 0.05)
+    }
+
+    func testRemoteControlServerOSCHandlingAndNamespace() {
+        let model = DocumentModel()
+        model.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0.1)
+        let server = RemoteControlServer.shared
+        server.overrideModel = model
+        defer { server.overrideModel = nil }
+
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/camera/fov", arguments: [.float(64)]))
+        XCTAssertEqual(model.cameraFOV, 64, accuracy: 0.05)
+
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/camera/position", arguments: [.float(2), .float(-8), .float(1.7)]))
+        XCTAssertEqual(model.cameraPosition.x, 2, accuracy: 0.01)
+        XCTAssertEqual(model.cameraPosition.y, -8, accuracy: 0.01)
+        XCTAssertEqual(model.cameraPosition.z, 1.7, accuracy: 0.01)
+
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/camera/orientation", arguments: [.float(30), .float(-10)]))
+        XCTAssertEqual(model.cameraYawDegrees, 30, accuracy: 0.1)
+        XCTAssertEqual(model.cameraPitchDegrees, -10, accuracy: 0.1)
+
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/style", arguments: [.string("clay")]))
+        XCTAssertEqual(model.shadingStyle, .clay)
+
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/light/intensity", arguments: [.float(2.4)]))
+        XCTAssertEqual(model.selectedPointLight?.intensity ?? 0, 2.4, accuracy: 0.01)
+        XCTAssertEqual(model.lightingMode, .point)
+
+        let specs = server.oscQueryParameters()
+        XCTAssertTrue(specs.contains(where: { $0.path == "/simpleskp/camera/position" && $0.typeTag == "fff" }))
+        XCTAssertTrue(specs.contains(where: { $0.path == "/simpleskp/camera/orientation" && $0.typeTag == "ff" }))
+        XCTAssertTrue(specs.contains(where: { $0.path == "/simpleskp/camera/fov" && $0.typeTag == "f" }))
+    }
+
+    func testMCPServerToolsListAndRouting() throws {
+        var capturedMethod = ""
+        var capturedPath = ""
+        let mcp = SimpleSKPMCPServer(transport: { method, path, _ in
+            capturedMethod = method
+            capturedPath = path
+            let payload = #"{"ok":true,"camera":{"fovDegrees":45.0}}"#
+            return APIResponse(status: 200, data: Data(payload.utf8), contentType: "application/json")
+        })
+
+        let initResp: String = try XCTUnwrap(mcp.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#))
+        XCTAssertTrue(initResp.contains(#""name":"simpleskp""#), initResp)
+
+        let listResp: String = try XCTUnwrap(mcp.handle(line: #"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#))
+        for tool in ["simpleskp_state", "simpleskp_help", "simpleskp_open", "simpleskp_camera", "simpleskp_scene", "simpleskp_layers", "simpleskp_rendering", "simpleskp_snapshot"] {
+            XCTAssertTrue(listResp.contains(tool), "missing tool \(tool)")
+        }
+
+        let camResp: String = try XCTUnwrap(mcp.handle(line: #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"simpleskp_camera","arguments":{"fov":45,"eyeHeight":1.7}}}"#))
+        XCTAssertEqual(capturedMethod, "POST")
+        XCTAssertEqual(capturedPath, "/v1/camera")
+        XCTAssertTrue(camResp.contains("fovDegrees"), camResp)
     }
 }

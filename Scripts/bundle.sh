@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # The version shown by the Finder, About and the status bar: bump it here, and only here (CHANGELOG.md says
 # what changed; a release is tagged vX.Y.Z). The build number counts commits.
-VERSION="1.1.0"
+VERSION="1.2.0"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 CONFIG="${1:-release}"
 
@@ -24,10 +24,12 @@ if [ ! -f Resources/AppIcon.icns ]; then
 fi
 
 swift build -c "$CONFIG" --product SimpleSKP
+swift build -c "$CONFIG" --product simpleskp-mcp
 BIN="$(swift build -c "$CONFIG" --show-bin-path)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" build
 cp "$BIN/SimpleSKP" "$APP/Contents/MacOS/SimpleSKP"
+cp "$BIN/simpleskp-mcp" "$APP/Contents/MacOS/simpleskp-mcp"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 # Stamped in the bundle's copy only: Resources/Info.plist keeps the placeholders
 sed -i '' -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" "$APP/Contents/Info.plist"
@@ -85,9 +87,9 @@ case "$SIGN_IDENTITY" in
     "Developer ID Application:"*) SIGN_FLAGS=(--timestamp --options runtime --entitlements Resources/SimpleSKP.entitlements) ;;
     *) SIGN_FLAGS=(--timestamp=none) ;;
 esac
-# Inside out: the framework's dylibs, the framework, then the app.
+# Inside out: the framework's dylibs, the framework, the MCP binary, then the app.
 sign_all() {
-    for LIB in "$FW"/Versions/A/Libraries/*.dylib "$FW" "$APP"; do
+    for LIB in "$FW"/Versions/A/Libraries/*.dylib "$FW" "$APP/Contents/MacOS/simpleskp-mcp" "$APP"; do
         codesign --force "$@" "$LIB" || return 1
     done
 }

@@ -1,5 +1,6 @@
 import Foundation
 import simd
+import SimpleSKPCore
 import SimpleSKPViewport
 
 /// User settings with a default in code: without `register()` (tests) they still read the default.
@@ -18,6 +19,9 @@ enum Preferences {
         static let customBackdropG = "customBackdropG"
         static let customBackdropB = "customBackdropB"
         static let twoFingerScrollZooms = "twoFingerScrollZooms"
+        static let oscFeedbackEnabled = "oscFeedbackEnabled"
+        static let oscOutHost = "oscOutHost"
+        static let oscOutPort = "oscOutPort"
     }
 
     static let defaults: [String: Any] = [
@@ -33,6 +37,9 @@ enum Preferences {
         Key.customBackdropG: Rendering.defaultCustomBackdropColor.y,
         Key.customBackdropB: Rendering.defaultCustomBackdropColor.z,
         Key.twoFingerScrollZooms: false,
+        Key.oscFeedbackEnabled: true,
+        Key.oscOutHost: "127.0.0.1",
+        Key.oscOutPort: Int(kSimpleSKPDefaultOSCOutPort),
     ]
 
     @MainActor static func register() {
@@ -124,5 +131,27 @@ enum Preferences {
             UserDefaults.standard.set(newValue, forKey: Key.twoFingerScrollZooms)
             ViewportView.twoFingerScrollZooms = newValue
         }
+    }
+
+    static var oscFeedbackEnabled: Bool {
+        get { bool(Key.oscFeedbackEnabled) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.oscFeedbackEnabled) }
+    }
+
+    static var oscOutHost: String {
+        get { UserDefaults.standard.string(forKey: Key.oscOutHost) ?? "127.0.0.1" }
+        set { UserDefaults.standard.set(newValue, forKey: Key.oscOutHost) }
+    }
+
+    static var oscOutPort: UInt16 {
+        get {
+            if let env = ProcessInfo.processInfo.environment["SIMPLESKP_OSC_OUT_PORT"],
+               let p = UInt16(env) {
+                return p
+            }
+            let val = UserDefaults.standard.integer(forKey: Key.oscOutPort)
+            return val > 0 && val <= 65535 ? UInt16(val) : kSimpleSKPDefaultOSCOutPort
+        }
+        set { UserDefaults.standard.set(Int(newValue), forKey: Key.oscOutPort) }
     }
 }

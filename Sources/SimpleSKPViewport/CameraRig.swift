@@ -14,19 +14,31 @@ let inertiaDamping: Float = 10
 /// to the orbit target straight ahead. No roll: the horizon stays level. Every change is written to the SceneKit node
 /// (parented under the model root); a 60 Hz timer runs only while something moves (glide, inertia, held keys).
 @MainActor
-final class CameraRig {
-    struct Pose {
-        var position = SIMD3<Float>(0, 0, 0)
-        var yaw: Float = 0
-        var pitch: Float = 0
-        var distance: Float = 1
+public final class CameraRig {
+    public struct Pose: Equatable, Sendable {
+        public var position = SIMD3<Float>(0, 0, 0)
+        public var yaw: Float = 0
+        public var pitch: Float = 0
+        public var distance: Float = 1
 
-        var forward: SIMD3<Float> { SIMD3(cos(pitch) * cos(yaw), cos(pitch) * sin(yaw), sin(pitch)) }
-        var right: SIMD3<Float> { SIMD3(sin(yaw), -cos(yaw), 0) }
-        var up: SIMD3<Float> { simd_cross(right, forward) }
-        var target: SIMD3<Float> { position + forward * distance }
+        public init(
+            position: SIMD3<Float> = SIMD3<Float>(0, 0, 0),
+            yaw: Float = 0,
+            pitch: Float = 0,
+            distance: Float = 1
+        ) {
+            self.position = position
+            self.yaw = yaw
+            self.pitch = pitch
+            self.distance = distance
+        }
+
+        public var forward: SIMD3<Float> { SIMD3(cos(pitch) * cos(yaw), cos(pitch) * sin(yaw), sin(pitch)) }
+        public var right: SIMD3<Float> { SIMD3(sin(yaw), -cos(yaw), 0) }
+        public var up: SIMD3<Float> { simd_cross(right, forward) }
+        public var target: SIMD3<Float> { position + forward * distance }
         /// Camera axes in model space (SceneKit cameras look down their −Z).
-        var basis: simd_float3x3 { simd_float3x3(right, up, -forward) }
+        public var basis: simd_float3x3 { simd_float3x3(right, up, -forward) }
     }
 
     /// Movement keys by physical position (`keyCode`): ZQSD on AZERTY is WASD on QWERTY.

@@ -41,6 +41,13 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SimpleSKP écoute les commandes OSC sur le port UDP 9150, annonce ses paramètres en Bonjour (_oscjson._tcp) pour OSCScore et expose une API HTTP locale sur le port 17950 pour le serveur MCP.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_oscjson._tcp</string>
+		<string>_osc._udp</string>
+	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
