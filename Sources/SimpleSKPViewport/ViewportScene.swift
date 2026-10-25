@@ -559,44 +559,62 @@ public final class ViewportScene {
         sun.light?.intensity = isSun ? 1050 : 0
         sun.light?.castsShadow = isSun && shadowsEnabled
         skyFill.light?.intensity = isSun ? 220 : 0
-        scene.lightingEnvironment.intensity = isSun ? 1.05 : 0.32
-        fill.light?.intensity = isSun ? 140 : 95
 
-        pointLightsRoot.childNodes.forEach { $0.removeFromParentNode() }
         guard !isSun else {
+            scene.lightingEnvironment.intensity = 1.05
+            fill.light?.intensity = 140
             pointLightsRoot.isHidden = true
+            pointLightsRoot.childNodes.forEach { $0.removeFromParentNode() }
             return
         }
         pointLightsRoot.isHidden = false
 
+        // Keep ambient low in point-light mode so the point light intensity slider controls nearly all illumination.
+        scene.lightingEnvironment.intensity = 0.07
+        fill.light?.intensity = 22
+
         let bounds = visibleBounds
+        let size = bounds.max - bounds.min
         let diagonal = max(simd_distance(bounds.min, bounds.max), 1.0)
-        // Characteristic radius of the geometry: SceneKit PBR omni lights use lumens (divided by 4π d² in metres).
-        // Scaling by 4π R² ensures a 1.0 (100%) point light at the center produces ~1100 lux on surrounding walls
-        // whether the model is 2 m wide or 60 m wide.
-        let refRadius = max(diagonal * 0.28, 0.45)
-        let baseLumens = CGFloat(1350.0 * 4.0 * Float.pi * refRadius * refRadius)
+        let minSpan = max(min(size.x, min(size.y, size.z)), 0.5)
+        let refRadius = max(min(minSpan * 0.48, diagonal * 0.22), 0.5)
+        // SceneKit's omni light uses 1000 as unit reference and attenuates over startDist..endDist (independent of world scale).
+        let baseIntensity: CGFloat = 2400.0
+        let startDist = CGFloat(refRadius * 0.08)
+        let endDist = CGFloat(diagonal * 0.65)
         let gizmoRadius = max(diagonal * 0.018, 0.06)
 
-        for item in pointLights {
-            let holder = SCNNode()
+        if pointLightsRoot.childNodes.count != pointLights.count {
+            pointLightsRoot.childNodes.forEach { $0.removeFromParentNode() }
+            for item in pointLights {
+                let holder = SCNNode()
+                let omni = SCNLight()
+                omni.type = .omni
+                omni.temperature = 5400
+                omni.attenuationFalloffExponent = 1.85
+                omni.castsShadow = false
+                holder.light = omni
+
+                let gizmo = Self.makePointLightGizmo(radius: gizmoRadius, isFromScene: item.isFromScene)
+                gizmo.name = "pointLightGizmo"
+                holder.addChildNode(gizmo)
+                pointLightsRoot.addChildNode(holder)
+            }
+        }
+
+        for (index, item) in pointLights.enumerated() where index < pointLightsRoot.childNodes.count {
+            let holder = pointLightsRoot.childNodes[index]
             holder.name = item.name
             holder.simdPosition = item.position
-
-            let omni = SCNLight()
-            omni.type = .omni
-            omni.intensity = baseLumens * CGFloat(max(0, item.intensity))
-            omni.temperature = 5400
-            omni.attenuationStartDistance = 0
-            omni.attenuationEndDistance = CGFloat(diagonal * 3.0)
-            omni.attenuationFalloffExponent = 1.6
-            omni.castsShadow = false
-            holder.light = omni
-
-            if showsPointLightGizmo {
-                holder.addChildNode(Self.makePointLightGizmo(radius: gizmoRadius, isFromScene: item.isFromScene))
+            if let omni = holder.light {
+                let gain = pow(Double(max(0, item.intensity)), 1.35)
+                omni.intensity = baseIntensity * CGFloat(gain)
+                omni.attenuationStartDistance = startDist
+                omni.attenuationEndDistance = endDist
             }
-            pointLightsRoot.addChildNode(holder)
+            if let gizmo = holder.childNode(withName: "pointLightGizmo", recursively: false) {
+                gizmo.isHidden = !showsPointLightGizmo
+            }
         }
     }
 

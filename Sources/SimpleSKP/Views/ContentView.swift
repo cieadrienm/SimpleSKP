@@ -667,7 +667,7 @@ struct LightingPopover: View {
                         get: { Double(light.intensity) },
                         set: { model.updateSelectedPointLight(intensity: Float($0)) }
                     ),
-                    in: 0.1...3.0
+                    in: 0.0...3.0
                 )
                 .tint(Theme.accent.swiftUI)
 

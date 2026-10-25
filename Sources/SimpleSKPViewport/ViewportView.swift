@@ -86,6 +86,14 @@ public final class ViewportView: SCNView {
         rig.pose.position
     }
 
+    /// Forces an immediate on-demand SceneKit redraw even when only light or camera post-processing properties changed.
+    public func requestRedraw() {
+        let pos = cameraNode.simdPosition
+        cameraNode.simdPosition = pos
+        SCNTransaction.flush()
+        setNeedsDisplay(bounds)
+    }
+
     /// Main thread: shows the scene, applies the file's camera if any, otherwise zooms to extents.
     public func present(_ scene: ViewportScene) {
         viewportScene = scene

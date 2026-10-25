@@ -230,14 +230,14 @@ final class DocumentModel {
         if style == .wireframe, !showsEdges {
             showsEdges = true
         }
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func setBackdropStyle(_ style: BackdropStyle) {
         backdropStyle = style
         Preferences.backdropStyle = style
         scene?.backdropStyle = style
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func setCustomBackdropColor(_ color: SIMD3<Float>) {
@@ -250,21 +250,21 @@ final class DocumentModel {
             Preferences.backdropStyle = .customColor
             scene?.backdropStyle = .customColor
         }
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func toggleGrid() {
         showsGrid.toggle()
         Preferences.showsGrid = showsGrid
         scene?.showsGrid = showsGrid
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func toggleShadows() {
         shadowsEnabled.toggle()
         Preferences.shadowsEnabled = shadowsEnabled
         scene?.shadowsEnabled = shadowsEnabled
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func toggleAmbientOcclusion() {
@@ -276,7 +276,7 @@ final class DocumentModel {
             viewport.ambientOcclusionIntensity = CGFloat(ambientOcclusionIntensity)
         }
         viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func setAmbientOcclusionIntensity(_ value: Float) {
@@ -290,7 +290,7 @@ final class DocumentModel {
             Preferences.ambientOcclusionEnabled = shouldEnable
             viewport.ambientOcclusionEnabled = shouldEnable
         }
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func setLightingMode(_ mode: LightingMode) {
@@ -306,7 +306,7 @@ final class DocumentModel {
         }
         scene?.pointLights = pointLights
         scene?.lightingMode = mode
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func addPointLight() {
@@ -325,7 +325,7 @@ final class DocumentModel {
             scene?.lightingMode = .point
         }
         scene?.pointLights = pointLights
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func removeSelectedPointLight() {
@@ -333,7 +333,7 @@ final class DocumentModel {
         pointLights.remove(at: selectedPointLightIndex)
         selectedPointLightIndex = max(0, min(selectedPointLightIndex, pointLights.count - 1))
         scene?.pointLights = pointLights
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func centerSelectedPointLight() {
@@ -341,28 +341,28 @@ final class DocumentModel {
         let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
         pointLights[selectedPointLightIndex].position = center
         scene?.pointLights = pointLights
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func moveSelectedPointLightToCamera() {
         guard pointLights.indices.contains(selectedPointLightIndex), isReady else { return }
         pointLights[selectedPointLightIndex].position = viewport.cameraModelPosition
         scene?.pointLights = pointLights
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func updateSelectedPointLight(position: SIMD3<Float>? = nil, intensity: Float? = nil) {
         guard pointLights.indices.contains(selectedPointLightIndex) else { return }
         if let position { pointLights[selectedPointLightIndex].position = position }
-        if let intensity { pointLights[selectedPointLightIndex].intensity = max(0.05, min(3.0, intensity)) }
+        if let intensity { pointLights[selectedPointLightIndex].intensity = max(0.0, min(3.0, intensity)) }
         scene?.pointLights = pointLights
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func togglePointLightGizmo() {
         showsPointLightGizmo.toggle()
         scene?.showsPointLightGizmo = showsPointLightGizmo
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     var selectedPointLight: ViewportPointLight? {
@@ -384,14 +384,14 @@ final class DocumentModel {
         sunElevationDegrees = elevation
         scene?.sunAzimuthDegrees = azimuth
         scene?.sunElevationDegrees = elevation
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func resetSun() {
         sunAzimuthDegrees = -135
         sunElevationDegrees = 45
         scene?.resetSun()
-        viewport.setNeedsDisplay(viewport.bounds)
+        viewport.requestRedraw()
     }
 
     func toggleFreeFlight() {

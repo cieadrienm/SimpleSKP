@@ -34,6 +34,9 @@ enum Snapshot {
             let env = ProcessInfo.processInfo.environment
             if env["SIMPLESKP_SNAPSHOT_LIGHTING"] == "point" {
                 model.setLightingMode(.point)
+                if let intensity = env["SIMPLESKP_SNAPSHOT_LIGHT_INTENSITY"].flatMap(Float.init) {
+                    model.updateSelectedPointLight(intensity: intensity)
+                }
             }
             if let bg = env["SIMPLESKP_SNAPSHOT_BG"] {
                 let parts = bg.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
