@@ -53,16 +53,35 @@ versions SketchUp 8 à 2023).
 - **D5 — Unités : mètres, Z vers le haut dans le modèle neutre.** SketchUp compte en pouces (×0,0254) avec Z
   vertical ; SceneKit a Y vertical : une seule rotation de −90° autour de X sur le nœud racine, rien d'autre ne
   change de repère. Les dimensions de la barre d'état sont en mètres (une décimale).
-- **D6 — Manipulation à la SketchUp, sur le contrôleur de caméra de SceneKit** (`.orbitTurntable`, horizon
-  gardé) : glisser = orbite autour du point visé au clic (test de collision, sinon le centre du modèle) ;
-  ⇧-glisser, clic droit ou bouton du milieu = panoramique ; molette ou pincement = zoom vers le curseur ;
-  double-clic = recentre sur le point ; ⇧Z = zoom étendu (raccourci SketchUp). Vues standard ⌘1 iso, ⌘2 dessus,
-  ⌘3 face, ⌘4 droite, ⌘5 arrière, ⌘6 gauche, ⌘7 dessous. ⌥⌘P perspective / parallèle. ⌘E arêtes. ⌘[ et ⌘]
-  scène précédente / suivante. ⌥⌘S barre latérale. Inertie coupée : la vue s'arrête où le doigt s'arrête.
-- **D7 — Rendu « style SketchUp » sur fond sombre** : faces blanches par défaut (matériau avant ; arrière vu par
-  double face), arêtes dessinées sauf les arêtes adoucies (`soft`), éclairage phare attaché à la caméra + ambiant,
-  pas d'ombres, antialiasing ×4, rendu à la demande (pas de boucle à 60 Hz quand rien ne bouge : batterie).
-  Textures lues par `SUTextureWriteToFile` dans un dossier temporaire du chargement, supprimé à la fermeture.
+- **D6 — Déplacement : quatre façons qui coexistent, aucune « à la SketchUp »** (Adrien, 2026-10-25 : « je n'aime pas du tout le
+  moyen de se déplacer dans SketchUp » ; il a retenu les quatre propositions). Une seule caméra interne (position, lacet, tangage,
+  distance à la cible ; horizon toujours droit) animée par un pas de temps à 60 Hz seulement quand quelque chose bouge (inertie,
+  touches tenues, glissement vers une scène), sinon rendu à la demande.
+  - *Orbite fluide (souris, défaut)* : glisser gauche = orbite autour du point visé au clic (test de collision, sinon la cible),
+    inertie douce (arrêt en ~0,4 s) ; ⇧-glisser ou bouton du milieu = panoramique ; molette = zoom vers le curseur (dolly en
+    perspective, échelle + translation en parallèle) ; double-clic = recentrer et cadrer le point.
+  - *Éditeur de jeu (Unity, Unreal, eMotion)* : clic droit maintenu = regarder autour (lacet/tangage depuis la position) ; tant que
+    le bouton est tenu ou que la vue a le focus clavier : ZQSD/WASD par touche physique (`keyCode`, donc ZQSD sur AZERTY) et
+    flèches = avancer, reculer, pas latéral ; espace/E = monter, C = descendre ; ⇧ = ×4 ; molette avec clic droit tenu = change la
+    vitesse. Vitesse de base proportionnelle à la diagonale du modèle (≈ diagonale / 8 par seconde, bornée à 0,5–50 m/s).
+  - *Gestes trackpad (Apple)* : défilement à deux doigts (événements à phases, deltas précis) = orbite ; pincement = zoom vers le
+    curseur ; ⌥ + deux doigts = panoramique ; rotation à deux doigts = lacet autour de la verticale (pas de roulis). Un réglage
+    « Défilement à deux doigts : orbite / zoom » existe pour les souris Magic Mouse (défaut : orbite).
+  - *Vol libre* (⌥⌘F, Échap pour sortir, item coché dans Présentation) : curseur caché et capturé, la souris oriente sans clic,
+    le clavier déplace comme ci-dessus.
+  - Communs : ⇧Z = zoom étendu sur les calques visibles ; ⌘1…⌘7 = vues standard ; ⌥⌘P = perspective / parallèle ; les scènes
+    glissent en 0,35 s ; une touche ou un clic interrompt toute animation.
+- **D7 — Rendu « réaliste doux »** (Adrien, 2026-10-25 : « metal, shading, on doit pouvoir faire bien mieux ») : SceneKit rend par
+  Metal ; on en tire le maximum avant d'envisager un moteur maison. Matériaux physiques (`physicallyBased`, rugosité 0,85, métal 0,
+  couleurs et textures du fichier, double face, verre par `.dualLayer`) ; soleil directionnel (azimut 135°, élévation 45° dans le
+  repère du modèle, intensité 1 000 lux-équivalents) avec ombres portées douces en cascades (3 cascades, carte 2 048, `shadowRadius`
+  3, projection automatique sur les calques visibles) ; environnement lumineux = ciel dégradé procédural (équirectangulaire généré en
+  code : zénith bleu doux, horizon blanc chaud, sol gris) aussi utilisé en fond de la vue ; caméra HDR sans adaptation d'exposition,
+  occlusion ambiante écran (intensité 1, rayon 0,4 m), anticrénelage ×4, pas de bloom ni de flou. Arêtes gardées mais discrètes
+  (gris à 35 % de la face, 1 px, ⌘E), biais de profondeur comme avant. Deux interrupteurs dans Présentation : Ombres (⌥⌘O) et
+  Occlusion ambiante (⌥⌘A), cochés par défaut, mémorisés. Fluidité : un appel de dessin par (ensemble de calques, matériau) grâce à
+  la fusion des instances (cible ≥ 30 i/s sur la salle de 97 Mo en iso, mesuré par `SCNRenderer`) ; si une scène dépasse 33 ms,
+  les ombres passent à 1 cascade / 1 024 automatiquement et le dit dans la barre d'état.
 - **D8 — Pas d'OSC, d'API HTTP ni de MCP** : rien à piloter dans un visualiseur (même raisonnement que SimpleText).
   Pas d'export, pas d'édition, pas de sections, pas d'ombres, pas de styles SketchUp.
 - **D9 — Interface en français avec `L("fr", "en")`** et `Localization` de la famille, `fr.lproj` et `en.lproj`
