@@ -22,18 +22,21 @@ swift test                                    # SimpleSKPCoreTests + SimpleSKPVi
 .build/debug/SimpleSKP --snapshot /tmp/simpleskp.png [fichier.skp]
 SIMPLESKP_SNAPSHOT_WINDOW=about .build/debug/SimpleSKP --snapshot /tmp/skp-about.png   # about|shortcuts|help|settings
 SIMPLESKP_SNAPSHOT_MENU=Présentation .build/debug/SimpleSKP --snapshot /dev/null [fichier.skp]   # liste le menu validé
-Scripts/bundle.sh                             # build/SimpleSKP.app signée, release, installée dans /Applications
+Scripts/bundle.sh                             # build/SimpleSKP.app signée avec le SDK SketchUp, release, installée dans /Applications
+                                              # SDK : $SKETCHUP_SDK, sinon Vendor/SketchUpAPI.framework, sinon la copie Unity
+SIMPLESKP_BUNDLED_SDK_ONLY=1 build/SimpleSKP.app/Contents/MacOS/SimpleSKP --self-test f.skp   # preuve sans SketchUp
 INSTALL=0 Scripts/bundle.sh                   # sans installer
 swift Scripts/make-icon.swift                 # redessine Resources/AppIcon.icns et AppIcon.png
 ```
 
 ## Règles qui ont coûté cher
+- **SimpleSKP doit marcher sans SketchUp** (D1) : le SDK est livré dans l'app. **Ne jamais commiter `Vendor/`** (SDK Trimble, licence SDK, pas GPL).
 - **Les dylibs sœurs du framework (`@rpath`) se préchargent par chemin absolu** depuis `SketchUp.app/Contents/Frameworks` : leur `@rpath` suppose l'exécutable de SketchUp. La copie de Unity est autonome (son dossier `Libraries`).
 - **`SUPoint3D` fait 24 octets** (3 `Double`) : jamais de tampon `SIMD3<Double>` (foulée 32).
 - **`SUTransformation.values[15]` contient 1/échelle**, à normaliser.
 - **Les `SU*Ref` sont des `struct { void* }`** : dans les `@convention(c)`, ce sont des pointeurs bruts.
 - **`SUFOV` peut être une largeur ou une hauteur** : le contrat veut un FOV vertical, le Cœur convertit.
-- **La signature Developer ID exige `com.apple.security.cs.disable-library-validation`** : sans lui, le runtime durci refuse de charger un framework signé par Trimble (D10).
+- **Le framework embarqué est re-signé avec l'identité de l'app**, dylibs d'abord, avant l'app (`bundle.sh`) ; l'entitlement `disable-library-validation` reste, inoffensif (D10).
 - **`cacheDisplay` ne capture pas SceneKit** : `--snapshot` passe par `SCNView.snapshot()` (D11).
 - **AppKit insère lui-même « Ouvrir l'élément récent »** (et « Plein écran ») dans l'app empaquetée : ne pas les construire à la main, vérifier le menu sur le bundle.
 - **Un seul modèle lu à la fois** : l'API du SDK n'est pas sûre entre threads (verrou global).
@@ -51,6 +54,6 @@ swift Scripts/make-icon.swift                 # redessine Resources/AppIcon.icns
 - Un visualiseur : rien n'est modifié ni enregistré, ni dans le fichier ni ailleurs.
 - Le modèle neutre est en mètres, Z vertical ; une seule rotation Z→Y, sur la racine de la scène.
 - Le Cœur omet les entités masquées ; la Vue n'a rien à cacher sauf les calques.
-- Aucun code ni en-tête de Trimble n'est copié ou redistribué : les prototypes sont transcrits, le framework est chargé là où il est installé.
+- Aucun code ni en-tête de Trimble n'est copié dans les sources : les prototypes sont transcrits ; seul le framework binaire du SDK est livré dans l'app (sans en-têtes).
 - Rendu à la demande : pas de boucle à 60 Hz quand rien ne bouge.
 - Tout nouveau comportement a un test ; un défaut corrigé a d'abord un test qui échoue.

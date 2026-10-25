@@ -1,6 +1,6 @@
 # SimpleSKP
 
-Visualiseur **SketchUp** natif, ultra-léger (~3 Mo, zéro dépendance) : double-cliquez un `.skp` et voyez-le en 3D en moins d'une seconde, dans la lignée de **SimpleAudio**, **SimplePJ** et **SimpleText** (**cie Adrien M**). Le fichier est lu par le framework de SketchUp lui-même (`SketchUpAPI.framework`, chargé à la demande) et affiché avec SceneKit : un visualiseur, pas un éditeur, rien n'est modifié ni enregistré.
+Visualiseur **SketchUp** natif, léger (13 Mo dont 11 pour le SDK SketchUp, zéro dépendance) : double-cliquez un `.skp` et voyez-le en 3D en moins d'une seconde, dans la lignée de **SimpleAudio**, **SimplePJ** et **SimpleText** (**cie Adrien M**). Le fichier est lu par le framework du SDK SketchUp (`SketchUpAPI.framework`, livré dans l'app et chargé à la demande) et affiché avec SceneKit : **SketchUp n'a pas besoin d'être installé** : un visualiseur, pas un éditeur, rien n'est modifié ni enregistré.
 
 ## Fonctionnalités
 
@@ -43,7 +43,8 @@ Visualiseur **SketchUp** natif, ultra-léger (~3 Mo, zéro dépendance) : double
 ## Prérequis
 
 - **macOS 15** ou plus.
-- **SketchUp installé** : SimpleSKP cherche `SketchUpAPI.framework` dans `SimpleSKP.app/Contents/Frameworks`, puis dans `/Applications/SketchUp*.app` et `~/Applications/SketchUp*.app` (le plus récent d'abord), puis dans la copie autonome livrée avec Unity (`/Applications/Unity/Hub/Editor/*/Unity.app/Contents/Frameworks`). Sans framework, l'app montre la vignette du fichier et explique où trouver SketchUp. Aucun code Trimble n'est redistribué.
+- C'est tout : le SDK SketchUp est dans `SimpleSKP.app/Contents/Frameworks`. **SketchUp est facultatif** ; installé, il sert à « Ouvrir dans SketchUp » (⇧⌘O), sinon la commande est masquée.
+- Pour compiler : `Scripts/bundle.sh` embarque le framework pris dans `$SKETCHUP_SDK`, sinon `Vendor/SketchUpAPI.framework` (SDK C officiel téléchargé chez Trimble, jamais commité), sinon la copie du même SDK livrée avec Unity (`/Applications/Unity/Hub/Editor/*/Unity.app/Contents/Frameworks`, la plus récente). Il échoue sans SDK.
 
 ## Compilation & Installation
 
@@ -78,7 +79,7 @@ SimpleSKP --lang fr|en                         # langue de l'interface
 | `B-SEINE MUSICALE…V40.skp` (97 Mo, 14 758 composants, 641 572 arêtes, 151 calques) → 3D | < 7 s (lecture API 2,9 s) | lecture 3,7 s + scène 0,6 s (2,95 s avant les calques masqués construits à la demande) ; lancement → capture 6,0 s |
 | Orbite sur la salle | 60 i/s sur Apple Silicon | non mesuré |
 | Mémoire | ≤ 3 × la taille du fichier | pic pendant la lecture par le framework SketchUp : 0,95 Go (salle), 1,1 Go (Arles, textures décodées par SketchUp) ; empreinte une fois la scène affichée ≈ 0,7 Go pour la salle |
-| Binaire | ≈ 3 Mo | 1,4 Mo en release, 2,7 Mo empaqueté avec l'icône |
+| Binaire | ≈ 3 Mo | 1,4 Mo en release, 2,7 Mo empaqueté avec l'icône ; 13 Mo avec le SDK SketchUp (11 Mo, aminci à arm64, sans en-têtes) |
 
 Mesuré le 25 octobre 2026 sur Apple Silicon, build release, cache disque chaud (`.build/release/SimpleSKP --snapshot` et `--self-test`, deux passes identiques).
 
@@ -87,3 +88,4 @@ Mesuré le 25 octobre 2026 sur Apple Silicon, build release, cache disque chaud 
 **Adrien Mondot · cie Adrien M** (Compagnie Adrien M) — Bundle ID : `net.cieadrienm.simpleskp`.
 SketchUp est une marque de Trimble Inc. ; SimpleSKP n'en est ni affilié ni approuvé.
 Distribué sous licence publique générale GNU (GPL v3+). Voir [`LICENSE`](LICENSE).
+Le framework `SketchUpAPI.framework` livré dans l'app appartient à Trimble Inc. : il est redistribué sous la licence du SDK SketchUp, pas sous la GPL.

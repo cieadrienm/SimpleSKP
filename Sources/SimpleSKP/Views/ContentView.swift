@@ -44,7 +44,7 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
             if let error = model.error {
-                FailureBanner(message: error.localizedDescription, openInSketchUp: model.openInSketchUp)
+                FailureBanner(message: error.localizedDescription, openInSketchUp: model.sketchUpApp.map { _ in model.openInSketchUp })
             }
         }
         .clipped()
@@ -61,7 +61,7 @@ struct ViewportRepresentable: NSViewRepresentable {
 
 private struct FailureBanner: View {
     let message: String
-    let openInSketchUp: () -> Void
+    let openInSketchUp: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -72,7 +72,9 @@ private struct FailureBanner: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.text.swiftUI)
                 .fixedSize(horizontal: false, vertical: true)
-            TextButton(title: L("Ouvrir dans SketchUp", "Open in SketchUp"), symbol: "arrow.up.forward.app", compact: true, action: openInSketchUp)
+            if let openInSketchUp {
+                TextButton(title: L("Ouvrir dans SketchUp", "Open in SketchUp"), symbol: "arrow.up.forward.app", compact: true, action: openInSketchUp)
+            }
         }
         .padding(14)
         .frame(maxWidth: 560)

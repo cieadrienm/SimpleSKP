@@ -1,7 +1,9 @@
 import Foundation
 
-/// Locates and dynamically loads SketchUp's own `SketchUpAPI.framework` (C API). Search order:
-/// 1. `SimpleSKP.app/Contents/Frameworks/SketchUpAPI.framework` (official SDK dropped in by the user),
+/// Locates and dynamically loads the SketchUp SDK's `SketchUpAPI.framework` (C API). Search order:
+/// 0. `$SIMPLESKP_SKETCHUP_SDK` (a path to a `.framework`: tests, development),
+/// 1. `SimpleSKP.app/Contents/Frameworks/SketchUpAPI.framework` (shipped in the app by `Scripts/bundle.sh`, D1),
+/// then, unless `$SIMPLESKP_BUNDLED_SDK_ONLY` is set (proof that the app needs no SketchUp):
 /// 2. `/Applications/SketchUp*.app/Contents/Frameworks/SketchUpAPI.framework` and `~/Applications/…`, newest first
 ///    (the framework's `@rpath` siblings `libCommon*.dylib` live next to it and must be preloaded by absolute path),
 /// 3. `/Applications/Unity/Hub/Editor/*/Unity.app/Contents/Frameworks/SketchUpAPI.framework` (self-contained: `Versions/A/Libraries`).
@@ -10,7 +12,11 @@ public enum SketchUpAPI {
         public let frameworkURL: URL
         /// Version of the host application the framework came with (e.g. "23.0.396"), when known.
         public let appVersion: String?
-        public init(frameworkURL: URL, appVersion: String?) { self.frameworkURL = frameworkURL; self.appVersion = appVersion }
+        /// The framework shipped inside SimpleSKP.app.
+        public let isBundled: Bool
+        public init(frameworkURL: URL, appVersion: String?, isBundled: Bool = false) {
+            self.frameworkURL = frameworkURL; self.appVersion = appVersion; self.isBundled = isBundled
+        }
     }
 
     /// Candidate directories searched, for diagnostics (`SKPError.sketchUpNotFound(searched:)`).
@@ -25,6 +31,13 @@ public enum SketchUpAPI {
     static let frameworkPath = "Contents/Frameworks/SketchUpAPI.framework"
 
     static func candidates() -> [Location] {
+        // getenv, not ProcessInfo: the tests change the variables with setenv.
+        func env(_ name: String) -> String? { getenv(name).map { String(cString: $0) } }
+        var found: [Location] = []
+        if let sdk = env("SIMPLESKP_SKETCHUP_SDK") { found.append(Location(frameworkURL: URL(fileURLWithPath: sdk), appVersion: nil)) }
+        found.append(Location(frameworkURL: Bundle.main.bundleURL.appendingPathComponent(frameworkPath), appVersion: nil, isBundled: true))
+        if env("SIMPLESKP_BUNDLED_SDK_ONLY") != nil { return found }
+
         let fm = FileManager.default
         func children(_ dir: URL) -> [URL] {
             (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
@@ -44,14 +57,14 @@ public enum SketchUpAPI {
         let unity = children(URL(fileURLWithPath: "/Applications/Unity/Hub/Editor"))
             .sorted { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending }
             .map { Location(frameworkURL: $0.appendingPathComponent("Unity.app").appendingPathComponent(frameworkPath), appVersion: nil) }
-        return [Location(frameworkURL: Bundle.main.bundleURL.appendingPathComponent(frameworkPath), appVersion: nil)] + hosts + unity
+        return found + hosts + unity
     }
 
     private static let loadLock = NSLock()
     nonisolated(unsafe) private static var loaded: Functions?
 
-    /// The C API, resolved and initialised once per process. Only success is cached: a SketchUp installed (or a
-    /// framework dropped in) after a failed attempt is found on the next call.
+    /// The C API, resolved and initialised once per process. Only success is cached: a framework that appears after
+    /// a failed attempt is found on the next call.
     static func functions() throws -> Functions {
         loadLock.lock()
         defer { loadLock.unlock() }

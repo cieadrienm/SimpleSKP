@@ -153,8 +153,8 @@ public enum SKPError: Error, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .sketchUpNotFound:
-            return L("SketchUp introuvable : installez SketchUp (ou déposez SketchUpAPI.framework dans SimpleSKP.app/Contents/Frameworks) pour voir le modèle en 3D.",
-                     "SketchUp not found: install SketchUp (or drop SketchUpAPI.framework into SimpleSKP.app/Contents/Frameworks) to see the model in 3D.")
+            return L("Framework SketchUp introuvable : SimpleSKP.app semble incomplet (Contents/Frameworks/SketchUpAPI.framework). Réinstallez l'app.",
+                     "SketchUp framework not found: SimpleSKP.app looks incomplete (Contents/Frameworks/SketchUpAPI.framework). Reinstall the app.")
         case .api(let function, let code):
             return L("Erreur de l'API SketchUp (\(function) → \(code)).", "SketchUp API error (\(function) → \(code)).")
         case .unreadable(let url):

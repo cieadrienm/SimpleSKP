@@ -91,8 +91,11 @@ final class SKPDocument: NSDocument {
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        case #selector(openInSketchUp(_:)), #selector(revealInFinder(_:)):
-            return true   // also when the load failed: that is when SketchUp is wanted
+        case #selector(openInSketchUp(_:)):
+            item.isHidden = model.sketchUpApp == nil   // SketchUp is optional (D1)
+            return !item.isHidden
+        case #selector(revealInFinder(_:)):
+            return true
         case #selector(toggleSidebarPanel(_:)):
             item.state = model.showSidebar ? .on : .off
             return model.skp != nil

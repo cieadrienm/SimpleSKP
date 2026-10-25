@@ -4,6 +4,16 @@ import SwiftUI
 
 // MARK: - About
 
+extension SketchUpAPI.Location {
+    /// Where the framework comes from, for About and the self-test; nil for a `SIMPLESKP_SKETCHUP_SDK` override.
+    var origin: String? {
+        if isBundled { return L("livré dans l'app", "shipped in the app") }
+        if let appVersion { return L("installé avec SketchUp \(appVersion)", "installed with SketchUp \(appVersion)") }
+        if frameworkURL.path.contains("/Unity.app/") { return L("livré avec Unity", "shipped with Unity") }
+        return nil
+    }
+}
+
 struct AboutView: View {
     let close: () -> Void
     private let location = SketchUpAPI.locate()
@@ -40,13 +50,13 @@ struct AboutView: View {
                         .foregroundStyle(Theme.text.swiftUI)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                    if let version = location.appVersion {
-                        Text(L("Version de l'hôte : \(version)", "Host version: \(version)"))
+                    if let origin = location.origin {
+                        Text(origin)
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textDim.swiftUI)
                     }
                 } else {
-                    Text(L("SketchUp introuvable", "SketchUp not found"))
+                    Text(L("Framework SketchUp introuvable : réinstallez l'app", "SketchUp framework not found: reinstall the app"))
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(Theme.danger.swiftUI)
                 }
@@ -57,8 +67,8 @@ struct AboutView: View {
                     Text("cie Adrien M — Compagnie Adrien M")
                         .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(Theme.text.swiftUI)
-                    Text(L("Licence publique générale GNU (GPL v3). Lit les fichiers avec le framework de SketchUp installé ; aucun code Trimble n'est distribué.",
-                           "GNU General Public License (GPL v3). Reads files with the installed SketchUp framework; no Trimble code is distributed."))
+                    Text(L("Licence publique générale GNU (GPL v3). Lit les fichiers avec le framework du SDK SketchUp de Trimble, livré dans l'app sous la licence du SDK SketchUp (pas GPL).",
+                           "GNU General Public License (GPL v3). Reads files with Trimble's SketchUp SDK framework, shipped in the app under the SketchUp SDK licence (not GPL)."))
                         .font(.system(size: 10.5))
                         .foregroundStyle(Theme.textFaint.swiftUI)
                         .fixedSize(horizontal: false, vertical: true)
@@ -157,9 +167,9 @@ struct HelpView: View {
             (L("Scènes et calques", "Scenes and layers"),
              L("La barre latérale (⌥⌘S) liste les scènes du fichier : un clic y amène la caméra et applique les calques masqués de la scène ; ⌘[ et ⌘] passent à la précédente ou à la suivante. Les cases des calques montrent ou cachent leur contenu aussitôt.",
                "The sidebar (⌥⌘S) lists the file's scenes: a click moves the camera there and applies the scene's hidden layers; ⌘[ and ⌘] step to the previous or next one. The layer checkboxes show or hide their content at once.")),
-            (L("Où SketchUp est cherché", "Where SketchUp is looked for"),
-             L("Le fichier est lu par le framework de SketchUp lui-même, cherché dans SimpleSKP.app/Contents/Frameworks, puis dans /Applications/SketchUp*.app et ~/Applications (le plus récent d'abord), puis dans Unity. Sans SketchUp, seule la vignette du fichier s'affiche ; « Ouvrir dans SketchUp » (⇧⌘O) reste possible. Le chemin trouvé est dans À propos.",
-               "The file is read by SketchUp's own framework, looked for in SimpleSKP.app/Contents/Frameworks, then in /Applications/SketchUp*.app and ~/Applications (newest first), then in Unity. Without SketchUp only the file's thumbnail shows; « Open in SketchUp » (⇧⌘O) still works. The path found is in About.")),
+            (L("Le SDK SketchUp est dans l'app", "The SketchUp SDK is inside the app"),
+             L("Le fichier est lu par le framework du SDK SketchUp, livré dans SimpleSKP.app : SketchUp n'a pas besoin d'être installé. Quand il l'est, « Ouvrir dans SketchUp » (⇧⌘O) y ouvre le fichier. Le chemin du framework est dans À propos.",
+               "The file is read by the SketchUp SDK framework shipped inside SimpleSKP.app: SketchUp does not need to be installed. When it is, « Open in SketchUp » (⇧⌘O) opens the file there. The framework's path is in About.")),
             (L("Limites", "Limits"),
              L("Visualiseur seulement : pas d'édition, d'export, d'ombres, de styles ni de plans de section.",
                "Viewer only: no editing, export, shadows, styles or section planes.")),

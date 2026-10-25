@@ -1,5 +1,6 @@
 #!/bin/bash
 # Builds build/SimpleSKP.app (host architecture); a release build is also installed into /Applications (INSTALL=0 to skip).
+# The SketchUp SDK framework ships inside the app (D1): $SKETCHUP_SDK, else Vendor/SketchUpAPI.framework, else Unity's copy.
 # Usage: Scripts/bundle.sh [debug|release]   (default: release)
 # SIGN_IDENTITY="Developer ID Application: …" Scripts/bundle.sh   signs with that identity ("-" for ad hoc)
 # NOTARIZE=1 Scripts/bundle.sh   also has Apple notarize the app and staples the ticket (Developer ID, notarytool profile "notary")
@@ -34,6 +35,27 @@ for LPROJ in Resources/*.lproj; do
     [ -d "$LPROJ" ] && cp -R "$LPROJ" "$APP/Contents/Resources/"
 done
 
+# The SketchUp SDK framework, so that the app reads files with no SketchUp installed (D1). Not committed (Vendor/ is ignored).
+SDK="${SKETCHUP_SDK:-}"
+[ -n "$SDK" ] || [ ! -d Vendor/SketchUpAPI.framework ] || SDK=Vendor/SketchUpAPI.framework
+[ -n "$SDK" ] || SDK="$(ls -d /Applications/Unity/Hub/Editor/*/Unity.app/Contents/Frameworks/SketchUpAPI.framework 2>/dev/null | sort -V | tail -1 || true)"
+if [ -z "$SDK" ] || [ ! -f "$SDK/Versions/A/SketchUpAPI" ]; then
+    echo "error: SketchUpAPI.framework not found (set SKETCHUP_SDK or put the SDK in Vendor/): the app does not work without it" >&2
+    exit 1
+fi
+FW="$APP/Contents/Frameworks/SketchUpAPI.framework"
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$SDK" "$FW"
+rm -rf "$FW/Headers" "$FW/Versions/A/Headers"
+ARCH="$(uname -m)"
+for MACHO in "$FW/Versions/A/SketchUpAPI" "$FW"/Versions/A/Libraries/*.dylib; do
+    if [ "$(lipo -archs "$MACHO")" != "$ARCH" ]; then
+        lipo -thin "$ARCH" "$MACHO" -output "$MACHO.thin"
+        mv "$MACHO.thin" "$MACHO"
+    fi
+done
+echo "SketchUp SDK: $SDK" >&2
+
 # Signing. A real identity keeps the app's identity stable across rebuilds.
 if [ -z "${SIGN_IDENTITY:-}" ]; then
     IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
@@ -41,19 +63,26 @@ if [ -z "${SIGN_IDENTITY:-}" ]; then
     [ -n "$SIGN_IDENTITY" ] || SIGN_IDENTITY="$(echo "$IDENTITIES" | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
     [ -n "$SIGN_IDENTITY" ] || SIGN_IDENTITY="-"
 fi
-# Developer ID: hardened runtime + secure timestamp (notarization). The app dlopens a framework signed by
-# Trimble, so library validation must be off (D10); without the hardened runtime nothing needs it.
+# Developer ID: hardened runtime + secure timestamp (notarization). The embedded framework is re-signed with the
+# app's identity, so library validation passes; the entitlement that turns it off (D10) is kept anyway, harmless.
 case "$SIGN_IDENTITY" in
     "Developer ID Application:"*) SIGN_FLAGS=(--timestamp --options runtime --entitlements Resources/SimpleSKP.entitlements) ;;
     *) SIGN_FLAGS=(--timestamp=none) ;;
 esac
-if ! codesign --force "${SIGN_FLAGS[@]}" --sign "$SIGN_IDENTITY" "$APP" 2>build/codesign.log; then
+# Inside out: the framework's dylibs, the framework, then the app.
+sign_all() {
+    for LIB in "$FW"/Versions/A/Libraries/*.dylib "$FW" "$APP"; do
+        codesign --force "$@" "$LIB" || return 1
+    done
+}
+if ! sign_all "${SIGN_FLAGS[@]}" --sign "$SIGN_IDENTITY" 2>build/codesign.log; then
     echo "warning: signing with '$SIGN_IDENTITY' failed ($(tail -1 build/codesign.log)); signing ad hoc instead" >&2
     SIGN_IDENTITY="-"
-    codesign --force --sign - "$APP"
+    sign_all --sign -
 fi
 codesign --verify --deep --strict "$APP"
 echo "signed: $SIGN_IDENTITY" >&2
+echo "app size: $(du -sh "$APP" | awk '{print $1}')" >&2
 
 if [ "${NOTARIZE:-0}" = "1" ]; then
     case "$SIGN_IDENTITY" in

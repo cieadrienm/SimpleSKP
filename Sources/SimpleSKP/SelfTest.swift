@@ -3,7 +3,8 @@ import SceneKit
 import SimpleSKPCore
 import SimpleSKPViewport
 
-/// `SimpleSKP --self-test [file.skp]`: PASS/FAIL lines, exit 1 on any FAIL. SketchUp missing is INFO, not a failure.
+/// `SimpleSKP --self-test [file.skp]`: PASS/FAIL lines, exit 1 on any FAIL. A missing framework is INFO here (the
+/// unbundled `.build` binary may have none); reading the given file then fails.
 @MainActor
 enum SelfTest {
     static func runAndExit(file: String?) -> Never {
@@ -27,9 +28,9 @@ enum SelfTest {
 
         // 2. SketchUp's framework.
         if let location = SketchUpAPI.locate() {
-            print("PASS: SketchUp framework found at \(location.frameworkURL.path) (\(location.appVersion ?? "?"))")
+            print("PASS: SketchUp framework found at \(location.frameworkURL.path) (\(location.origin ?? "SIMPLESKP_SKETCHUP_SDK"))")
         } else {
-            print("INFO: SketchUp not found — files show their thumbnail only")
+            print("INFO: SketchUp framework not found — files show their thumbnail only")
         }
 
         // 3. Scene of the synthetic cube.

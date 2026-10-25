@@ -133,20 +133,18 @@ final class DocumentModel {
         pasteboard.setData(png, forType: .png)
     }
 
-    /// With the SketchUp the framework came from when it is an app, else the default app for `.skp`.
+    /// The installed SketchUp that opens this file (nil without one): the one the framework came from when it is a
+    /// SketchUp.app, else any SketchUp registered for `.skp` (the default app may be SimpleSKP itself).
+    var sketchUpApp: URL? {
+        guard let url = info?.url else { return nil }
+        let host = SketchUpAPI.locate()?.frameworkURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        if let host, host.pathExtension == "app", host.lastPathComponent.hasPrefix("SketchUp") { return host }
+        return NSWorkspace.shared.urlsForApplications(toOpen: url).first { $0.lastPathComponent.hasPrefix("SketchUp") }
+    }
+
     func openInSketchUp() {
-        guard let url = info?.url else { return }
-        var app = SketchUpAPI.locate().map {
-            $0.frameworkURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        }
-        if app?.pathExtension != "app" || app?.lastPathComponent.hasPrefix("SketchUp") != true {
-            app = NSWorkspace.shared.urlForApplication(toOpen: url)
-        }
-        if let app {
-            NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
-        } else {
-            NSWorkspace.shared.open(url)
-        }
+        guard let url = info?.url, let app = sketchUpApp else { return }
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
     }
 
     func revealInFinder() {

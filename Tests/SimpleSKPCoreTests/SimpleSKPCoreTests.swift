@@ -73,6 +73,34 @@ final class SimpleSKPCoreTests: XCTestCase {
         XCTAssertTrue(location.appVersion?.hasPrefix("23") == true, "\(location)")
     }
 
+    /// Runs `body` with environment variables set (nil: unset), then restores them.
+    private func withEnvironment(_ values: [String: String?], _ body: () throws -> Void) rethrows {
+        let saved = values.keys.map { ($0, getenv($0).map { String(cString: $0) }) }
+        defer { for (name, value) in saved { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
+        for (name, value) in values { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+        try body()
+    }
+
+    func testLocateHonoursSDKVariable() throws {
+        let unity = "/Applications/Unity/Hub/Editor/6000.3.12f1/Unity.app/Contents/Frameworks/SketchUpAPI.framework"
+        guard FileManager.default.fileExists(atPath: unity) else { throw XCTSkip("no Unity copy of the SDK") }
+        try withEnvironment(["SIMPLESKP_SKETCHUP_SDK": unity, "SIMPLESKP_BUNDLED_SDK_ONLY": "1"]) {
+            let location = try XCTUnwrap(SketchUpAPI.locate())
+            XCTAssertEqual(location.frameworkURL.path, unity)
+            XCTAssertNil(location.appVersion)
+            XCTAssertFalse(location.isBundled)
+        }
+    }
+
+    /// The test runner has no bundled framework: with the installed copies ruled out, nothing is found.
+    func testBundledOnlyWithoutBundledFrameworkFindsNothing() {
+        withEnvironment(["SIMPLESKP_SKETCHUP_SDK": nil, "SIMPLESKP_BUNDLED_SDK_ONLY": "1"]) {
+            XCTAssertNil(SketchUpAPI.locate())
+            XCTAssertEqual(SketchUpAPI.searchedURLs.count, 1)
+            XCTAssertTrue(SketchUpAPI.searchedURLs[0].path.hasSuffix("Contents/Frameworks/SketchUpAPI.framework"))
+        }
+    }
+
     func testReadFixture() throws {
         guard SketchUpAPI.locate() != nil else { throw XCTSkip("SketchUp not installed") }
         let model = try SKPReader.load(Self.fixture)
