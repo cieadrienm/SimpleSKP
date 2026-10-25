@@ -16,6 +16,7 @@ public final class ViewportView: SCNView {
     private enum Drag { case orbit, pan }
     private var drag = Drag.orbit
     private var lastPoint = CGPoint.zero
+    private var zoomAnchor: SIMD3<Float>?
 
     public override init(frame: NSRect, options: [String: Any]? = nil) {
         super.init(frame: frame, options: options)
@@ -37,6 +38,7 @@ public final class ViewportView: SCNView {
         let camera = SCNCamera()
         camera.automaticallyAdjustsZRange = true
         camera.projectionDirection = .vertical
+        camera.fieldOfView = 35 // SketchUp's default
         cameraNode.camera = camera
         cameraNode.name = "camera"
     }
@@ -57,6 +59,7 @@ public final class ViewportView: SCNView {
         self.scene = scene.scene
         cameraNode.removeFromParentNode()
         scene.modelRoot.addChildNode(cameraNode)
+        cameraNode.childNodes.forEach { $0.removeFromParentNode() } // the previous scene's headlight
         scene.headlight.removeFromParentNode()
         cameraNode.addChildNode(scene.headlight)
         pointOfView = cameraNode
@@ -100,7 +103,8 @@ public final class ViewportView: SCNView {
             cameraNode.simdPosition = model.position
             cameraNode.simdLook(at: worldTarget, up: modelToWorld(vector: model.up), localFront: SCNNode.simdLocalFront)
             camera.usesOrthographicProjection = !model.isPerspective
-            if model.isPerspective { camera.fieldOfView = CGFloat(model.fovDegrees) } else { camera.orthographicScale = Double(model.orthoHeight / 2) }
+            camera.fieldOfView = CGFloat(model.fovDegrees) // kept for a later switch to perspective
+            if !model.isPerspective { camera.orthographicScale = Double(model.orthoHeight / 2) }
         }
         target = worldTarget
         isPerspective = model.isPerspective
@@ -109,9 +113,13 @@ public final class ViewportView: SCNView {
     public var isPerspective: Bool = true {
         didSet {
             guard isPerspective == camera.usesOrthographicProjection else { return }
-            if !isPerspective {
-                let distance = simd_distance(cameraNode.simdWorldPosition, target)
-                camera.orthographicScale = Double(distance) * tan(Double(camera.fieldOfView) * .pi / 360)
+            let tanHalf = tan(Double(camera.fieldOfView) * .pi / 360)
+            let front = cameraNode.simdWorldFront, depth = simd_dot(target - cameraNode.simdWorldPosition, front)
+            if isPerspective {
+                // Same framing: move along the view axis to the distance where the target plane fits the ortho height.
+                cameraNode.simdWorldPosition += front * (depth - Float(camera.orthographicScale / tanHalf))
+            } else {
+                camera.orthographicScale = Double(depth) * tanHalf
             }
             camera.usesOrthographicProjection = !isPerspective
             setNeedsDisplay(bounds)
@@ -123,8 +131,8 @@ public final class ViewportView: SCNView {
     public override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         lastPoint = point
-        if event.clickCount == 2 { recentre(at: point); return }
         drag = event.modifierFlags.contains(.shift) ? .pan : .orbit
+        if event.clickCount == 2 { recentre(at: point); return }
         if let hit = hit(point) { target = hit }
     }
     public override func rightMouseDown(with event: NSEvent) { beginPan(event) } // no super: it would pop a context menu
@@ -136,11 +144,13 @@ public final class ViewportView: SCNView {
     public override func scrollWheel(with event: NSEvent) {
         // One wheel notch ≈ 10 %; precise (trackpad) deltas are in points, ~10 per notch.
         let notches = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 10 : event.scrollingDeltaY
-        zoom(ratio: Float(pow(0.9, notches)), at: convert(event.locationInWindow, from: nil))
+        let newGesture = event.phase == .began || (event.phase.isEmpty && event.momentumPhase.isEmpty) // wheel: every notch
+        zoom(ratio: Float(pow(0.9, notches)), at: convert(event.locationInWindow, from: nil), newGesture: newGesture)
     }
 
     public override func magnify(with event: NSEvent) {
-        zoom(ratio: Float(1 / max(0.1, 1 + event.magnification)), at: convert(event.locationInWindow, from: nil))
+        zoom(ratio: Float(1 / max(0.1, 1 + event.magnification)), at: convert(event.locationInWindow, from: nil),
+             newGesture: event.phase == .began)
     }
 
     public override func keyDown(with event: NSEvent) {
@@ -155,6 +165,7 @@ public final class ViewportView: SCNView {
     private func beginPan(_ event: NSEvent) {
         lastPoint = convert(event.locationInWindow, from: nil)
         drag = .pan
+        if let hit = hit(lastPoint) { target = hit } // pan scale = depth under the cursor
     }
 
     private func dragged(_ event: NSEvent) {
@@ -180,20 +191,23 @@ public final class ViewportView: SCNView {
     }
 
     /// ratio < 1 zooms in (distance or ortho height multiplied by ratio), towards `point` in perspective.
-    func zoom(ratio: Float, at point: CGPoint) {
+    /// The step is a fraction of the depth under the cursor (hit tested once per gesture), so it never crosses a wall.
+    func zoom(ratio: Float, at point: CGPoint, newGesture: Bool = true) {
         if camera.usesOrthographicProjection {
             camera.orthographicScale *= Double(ratio)
         } else {
-            let distance = simd_distance(cameraNode.simdWorldPosition, target)
-            controller.dolly(by: distance * (1 - ratio), onScreenPoint: point, viewport: bounds.size)
+            if newGesture { zoomAnchor = hit(point) }
+            let depth = simd_distance(cameraNode.simdWorldPosition, zoomAnchor ?? target)
+            controller.dolly(by: depth * (1 - ratio), onScreenPoint: point, viewport: bounds.size)
         }
         setNeedsDisplay(bounds)
     }
 
-    /// Double-click: the clicked point becomes the target, the camera slides by the same offset.
+    /// Double-click: the clicked point becomes the target and the camera slides sideways until it sits on the view axis.
     func recentre(at point: CGPoint) {
         guard let hit = hit(point) else { return }
-        let offset = hit - target
+        let eye = cameraNode.simdWorldPosition, front = cameraNode.simdWorldFront
+        let offset = hit - (eye + front * simd_dot(hit - eye, front))
         let position = cameraNode.simdWorldPosition + offset
         animate(true, duration: 0.25) { cameraNode.simdWorldPosition = position }
         target = hit
@@ -207,8 +221,9 @@ public final class ViewportView: SCNView {
         return 2 * distance * Float(tan(camera.fieldOfView * .pi / 360))
     }
 
+    /// Nearest model point under `point` (results are sorted by distance).
     private func hit(_ point: CGPoint) -> SIMD3<Float>? {
-        hitTest(point, options: [.boundingBoxOnly: false, .firstFoundOnly: true]).first.map { SIMD3<Float>($0.worldCoordinates) }
+        hitTest(point, options: [.boundingBoxOnly: false]).first.map { SIMD3<Float>($0.worldCoordinates) }
     }
 
     private var isoDirection: SIMD3<Float> { simd_normalize(SIMD3(1, -1, 1)) }

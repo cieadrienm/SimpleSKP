@@ -198,12 +198,18 @@ final class SimpleSKPViewportTests: XCTestCase {
 
     func testPerspectiveToggleKeepsFraming() {
         let (view, _) = presentedView()
-        view.isPerspective = false
         let camera = view.cameraNode.camera!
+        XCTAssertEqual(camera.fieldOfView, 35, "SketchUp's default FOV without a file camera")
+        let eye = view.cameraNode.simdWorldPosition
+        let depth = Double(simd_dot(view.target - eye, view.cameraNode.simdWorldFront))
+        view.isPerspective = false
         XCTAssertTrue(camera.usesOrthographicProjection)
-        XCTAssertGreaterThan(camera.orthographicScale, 1)
+        XCTAssertEqual(camera.orthographicScale, depth * tan(35 * .pi / 360), accuracy: 1e-4)
+        camera.orthographicScale /= 2 // zoomed in while parallel
         view.isPerspective = true
         XCTAssertFalse(camera.usesOrthographicProjection)
+        let newDepth = Double(simd_dot(view.target - view.cameraNode.simdWorldPosition, view.cameraNode.simdWorldFront))
+        XCTAssertEqual(newDepth, depth / 2, accuracy: 1e-3, "the camera moved in to keep the parallel framing")
     }
 
     func testOrbitTurnsAroundWorldUpTowardsTheRight() {
@@ -244,37 +250,95 @@ final class SimpleSKPViewportTests: XCTestCase {
 
     func testZoomTowardsCursor() {
         let (view, scene) = presentedView()
-        let centre = scene.modelRoot.simdConvertPosition(scene.model.center, to: nil)
-        let before = simd_distance(view.cameraNode.simdWorldPosition, centre)
-        view.zoom(ratio: 0.9, at: CGPoint(x: 400, y: 300))
-        XCTAssertEqual(simd_distance(view.cameraNode.simdWorldPosition, centre) / before, 0.9, accuracy: 0.02)
+        view.apply(camera: scene.model.scenes[0].camera!, animated: false) // the root cube is under the view centre
+        // The step is 10 % of the depth under the cursor, so notches converge on the face and never cross it.
+        for _ in 0..<60 { view.zoom(ratio: 0.9, at: CGPoint(x: 400, y: 300)) }
+        let eye = scene.modelRoot.simdConvertPosition(view.cameraNode.simdWorldPosition, from: nil)
+        XCTAssertFalse(simd_reduce_min(eye) > 0 && simd_reduce_max(eye) < 1, "eye entered the cube: \(eye)")
+        XCTAssertLessThan(simd_distance(eye, SIMD3(0.5, 0.5, 0.5)), 1, "and still came close")
         // Towards the cursor: right of centre moves the eye right, above centre (AppKit y up) moves it up.
-        var eye = view.cameraNode.simdWorldPosition
+        view.apply(camera: scene.model.scenes[0].camera!, animated: false)
+        var before = view.cameraNode.simdWorldPosition
         let right = view.cameraNode.simdWorldRight, up = view.cameraNode.simdWorldUp
         view.zoom(ratio: 0.9, at: CGPoint(x: 700, y: 300))
-        XCTAssertGreaterThan(simd_dot(view.cameraNode.simdWorldPosition - eye, right), 0)
-        eye = view.cameraNode.simdWorldPosition
+        XCTAssertGreaterThan(simd_dot(view.cameraNode.simdWorldPosition - before, right), 0)
+        before = view.cameraNode.simdWorldPosition
         view.zoom(ratio: 0.9, at: CGPoint(x: 400, y: 550))
-        XCTAssertGreaterThan(simd_dot(view.cameraNode.simdWorldPosition - eye, up), 0)
+        XCTAssertGreaterThan(simd_dot(view.cameraNode.simdWorldPosition - before, up), 0)
         view.isPerspective = false
         let scale = view.cameraNode.camera!.orthographicScale
         view.zoom(ratio: 0.5, at: CGPoint(x: 400, y: 300))
         XCTAssertEqual(view.cameraNode.camera!.orthographicScale, scale * 0.5, accuracy: 1e-6)
     }
 
+    private func click(_ view: NSView, at point: CGPoint, count: Int) {
+        let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                       context: nil, eventNumber: 0, clickCount: count, pressure: 1)!
+        view.mouseDown(with: event)
+    }
+
     func testDoubleClickRecentresOnTheHitPoint() {
         let (view, scene) = presentedView()
         view.apply(camera: scene.model.scenes[0].camera!, animated: false) // looks at the root cube's centre
-        let offset = view.cameraNode.simdWorldPosition - view.target, eye = view.cameraNode.simdWorldPosition
-        view.recentre(at: CGPoint(x: 400, y: 300))
+        let eye = view.cameraNode.simdWorldPosition, front = view.cameraNode.simdWorldFront
+        // Real event path: the first click of a double-click already moved the target to the hit point.
+        let point = CGPoint(x: 440, y: 330)
+        click(view, at: point, count: 1)
+        click(view, at: point, count: 2)
+        let hit = view.target
+        let local = view.cameraNode.simdConvertPosition(hit, from: nil)
+        XCTAssertEqual(local.x, 0, accuracy: 1e-3, "the hit point is now at the view centre")
+        XCTAssertEqual(local.y, 0, accuracy: 1e-3)
+        XCTAssertEqual(simd_dot(view.cameraNode.simdWorldFront, front), 1, accuracy: 1e-5, "same direction, slid sideways")
+        XCTAssertGreaterThan(simd_distance(view.cameraNode.simdWorldPosition, eye), 0.1)
         let cubeCentre = scene.modelRoot.simdConvertPosition(SIMD3(0.5, 0.5, 0.5), to: nil)
-        XCTAssertLessThan(simd_distance(view.target, eye), simd_distance(cubeCentre, eye), "nearest face, not the far one")
-        let hit = scene.modelRoot.simdConvertPosition(view.target, from: nil)
-        XCTAssertTrue(simd_reduce_max(abs(hit - SIMD3(0.5, 0.5, 0.5))) > 0.49 && simd_reduce_max(abs(hit - SIMD3(0.5, 0.5, 0.5))) < 0.51,
-                      "target on the cube's surface: \(hit)")
-        XCTAssertEqual(simd_distance(view.cameraNode.simdWorldPosition - view.target, offset), 0, accuracy: 1e-4)
-        view.recentre(at: CGPoint(x: 5, y: 595)) // empty sky: nothing changes
-        XCTAssertEqual(simd_distance(scene.modelRoot.simdConvertPosition(view.target, from: nil), hit), 0, accuracy: 1e-5)
+        XCTAssertLessThan(simd_distance(hit, eye), simd_distance(cubeCentre, eye), "nearest face, not the far one")
+        let model = scene.modelRoot.simdConvertPosition(hit, from: nil)
+        XCTAssertEqual(simd_reduce_max(abs(model - SIMD3(0.5, 0.5, 0.5))), 0.5, accuracy: 0.01, "on the cube's surface: \(model)")
+        click(view, at: CGPoint(x: 5, y: 595), count: 2) // empty sky: nothing changes
+        XCTAssertEqual(simd_distance(view.target, hit), 0, accuracy: 1e-5)
+    }
+
+    func testEdgesDrawnAfterFacesWithDepthBias() {
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        let root = scene.modelRoot.childNodes[0]
+        let edges = root.childNodes[1], cloneEdges = root.childNodes[2].childNodes[1]
+        XCTAssertEqual(edges.renderingOrder, 1)
+        XCTAssertEqual(cloneEdges.renderingOrder, 1, "survives clone()")
+        XCTAssertEqual(root.childNodes[0].renderingOrder, 0)
+        let material = edges.geometry!.firstMaterial!
+        XCTAssertTrue(material === cloneEdges.geometry!.firstMaterial, "one shared edge material")
+        XCTAssertNotNil(material.shaderModifiers?[.geometry])
+    }
+
+    func testTextures() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("simpleskp-test-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let image = NSImage(size: NSSize(width: 4, height: 4), flipped: false) { rect in NSColor.orange.setFill(); rect.fill(); return true }
+        try NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .png, properties: [:])!.write(to: url)
+
+        var model = SyntheticModel.cube()
+        model.materials.append(SKPModel.Material(name: "Bois", color: SIMD4(0.5, 0.4, 0.3, 1), textureURL: url, textureScale: SIMD2(2, 0.5)))
+        let uvs = model.root.meshes[0].positions.map { SIMD2($0.x, $0.y) }
+        model.root.meshes[0].material = 1
+        model.root.meshes[0].uvs = uvs                // own textured material: UVs in repeats
+        model.definitions[0].meshes[0].uvs = uvs      // nil material: UVs in metres, inherited by instance A
+        model.root.children[0].material = 1
+        let root = ViewportScene(model: model).modelRoot.childNodes[0]
+
+        func uv(_ m: SCNMaterial, _ p: SIMD2<Float>) -> SIMD2<Float> {
+            let v = SCNVector3Make(CGFloat(p.x), CGFloat(p.y), 0), t = m.diffuse.contentsTransform
+            return SIMD2(Float(v.x * t.m11 + v.y * t.m21 + t.m41), Float(v.x * t.m12 + v.y * t.m22 + t.m42))
+        }
+        let own = root.childNodes[0].geometry!.firstMaterial!
+        XCTAssertTrue(own.diffuse.contents is NSImage)
+        XCTAssertEqual(own.diffuse.wrapS, .repeat)
+        XCTAssertEqual(uv(own, SIMD2(0.25, 0.25)), SIMD2(0.25, 0.75), "v flipped")
+        let inherited = root.childNodes[2].childNodes[0].geometry!.firstMaterial!
+        XCTAssertTrue(inherited.diffuse.contents is NSImage)
+        XCTAssertTrue(inherited !== own, "metre UVs need their own transform")
+        XCTAssertEqual(uv(inherited, SIMD2(1, 0.25)), SIMD2(0.5, 0.5), "1/textureScale, then the flip")
+        XCTAssertTrue(root.childNodes[3].childNodes[0].geometry!.firstMaterial!.diffuse.contents is NSColor, "unpainted B stays white")
     }
 
     func testSnapshotIsNotUniform() throws {
@@ -298,5 +362,22 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertGreaterThan(counts.count, 5)
         let background = counts.values.max()! // the dark background is the most common colour
         XCTAssertTrue((0.3...0.97).contains(Double(background) / Double(total)), "\(background) / \(total)")
+    }
+
+    /// Manual probe of the edge depth bias on a real venue: `SIMPLESKP_PROBE=file.skp SIMPLESKP_PROBE_OUT=dir swift test
+    /// --filter testProbeSceneSnapshots` writes one PNG per file scene camera; skipped otherwise (needs SketchUp).
+    func testProbeSceneSnapshots() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let file = env["SIMPLESKP_PROBE"], let out = env["SIMPLESKP_PROBE_OUT"] else { throw XCTSkip("probe only") }
+        let model = try SKPReader.load(URL(fileURLWithPath: file))
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 1400, height: 900))
+        let scene = ViewportScene(model: model)
+        view.present(scene)
+        for (i, s) in model.scenes.enumerated() {
+            guard let camera = s.camera else { continue }
+            view.apply(camera: camera, animated: false)
+            let png = NSBitmapImageRep(data: view.snapshot().tiffRepresentation!)!.representation(using: .png, properties: [:])!
+            try png.write(to: URL(fileURLWithPath: out).appendingPathComponent("scene\(i)-\(s.name).png"))
+        }
     }
 }
