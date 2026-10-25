@@ -438,6 +438,9 @@ public final class ViewportScene {
         for (chunk, data) in zip(chunks, merged) {
             let child = SCNNode(geometry: geometry(chunk, data!))
             if let material = chunk.material {
+                let transparent = Self.isTransparentMaterial(material)
+                child.castsShadow = !transparent
+                child.renderingOrder = transparent ? 2 : 0
                 faceNodes.append((child, material))
                 if shadingStyle != .textured {
                     applyShadingStyle(to: child, original: material)
@@ -445,12 +448,16 @@ public final class ViewportScene {
             } else {
                 child.categoryBitMask = Self.edgeCategory
                 child.castsShadow = false
-                child.renderingOrder = 1 // after the faces, so the depth test sees them
+                child.renderingOrder = 1 // after opaque faces (0), before transparent glass (2)
                 child.isHidden = !(showsEdges || shadingStyle == .wireframe)
                 edgeNodes.append(child)
             }
             chunk.set.node!.addChildNode(child)
         }
+    }
+
+    private static func isTransparentMaterial(_ material: SCNMaterial) -> Bool {
+        material.transparency < 1 || !material.writesToDepthBuffer
     }
 
     private func applyShadingStyle() {
@@ -465,17 +472,24 @@ public final class ViewportScene {
     }
 
     private func applyShadingStyle(to node: SCNNode, original: SCNMaterial) {
+        let transparent = Self.isTransparentMaterial(original)
         switch shadingStyle {
         case .textured:
             node.isHidden = false
             node.geometry?.materials = [original]
+            node.castsShadow = !transparent
+            node.renderingOrder = transparent ? 2 : 0
         case .clay:
             node.isHidden = false
             // Keep transparent glass transparent even in clay mode
-            node.geometry?.materials = [original.transparency < 1 ? original : clayMaterial]
+            node.geometry?.materials = [transparent ? original : clayMaterial]
+            node.castsShadow = !transparent
+            node.renderingOrder = transparent ? 2 : 0
         case .xray:
             node.isHidden = false
             node.geometry?.materials = [xrayMaterial(for: original)]
+            node.castsShadow = false
+            node.renderingOrder = 2
         case .wireframe:
             node.isHidden = true
             node.geometry?.materials = [original]
@@ -489,6 +503,7 @@ public final class ViewportScene {
         m.transparency = min(original.transparency, 0.36)
         m.transparencyMode = .dualLayer
         m.writesToDepthBuffer = false
+        m.shaderModifiers = [.surface: "_surface.diffuse.a = min(_surface.diffuse.a, 0.36);"]
         xrayMaterials[id] = m
         return m
     }
@@ -882,6 +897,10 @@ public final class ViewportScene {
         material.isDoubleSided = true
         guard let index else { material.diffuse.contents = NSColor(white: 0.96, alpha: 1); return material }
         let source = model.materials[index]
+        let isTranslucent = source.opacity < 1 || source.isTransparent
+        // SceneKit's `.physicallyBased` Metal shader ignores `SCNMaterial.transparency` when `diffuse.contents` has alpha == 1.0.
+        // We must therefore pass `effectiveAlpha` in the diffuse NSColor (or multiply `_surface.diffuse.a` in a shader modifier for textures).
+        let effectiveAlpha = CGFloat(source.opacity < 1 ? max(source.opacity, 0.08) : 1.0)
         if uvs != .none, let image = image(index) {
             material.diffuse.contents = image
             material.diffuse.wrapS = .repeat
@@ -891,14 +910,17 @@ public final class ViewportScene {
             let scale = uvs == .metres ? SCNMatrix4MakeScale(CGFloat(1 / source.textureScale.x), CGFloat(1 / source.textureScale.y), 1)
                                        : SCNMatrix4Identity
             material.diffuse.contentsTransform = SCNMatrix4Mult(scale, flip)
+            if source.opacity < 1 {
+                material.shaderModifiers = [.surface: "_surface.diffuse.a *= \(Float(effectiveAlpha));"]
+            }
         } else {
             let c = source.color
-            material.diffuse.contents = NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1)
+            material.diffuse.contents = NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: effectiveAlpha)
         }
-        if source.opacity < 1 {
+        if isTranslucent {
             material.transparency = CGFloat(source.opacity)
             material.transparencyMode = .dualLayer
-            material.writesToDepthBuffer = false // edges behind glass stay visible
+            material.writesToDepthBuffer = false // edges and opaque geometry behind glass stay visible
         }
         return material
     }

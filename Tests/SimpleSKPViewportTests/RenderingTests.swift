@@ -270,4 +270,40 @@ final class RenderingTests: XCTestCase {
         XCTAssertGreaterThan(wireframePDF.count, 500)
         XCTAssertEqual(String(decoding: wireframePDF.prefix(5), as: UTF8.self), "%PDF-")
     }
+
+    func testMaterialTransparencyRendersSeeThroughInPBRAndXRay() throws {
+        var model = SyntheticModel.cube()
+        // Root cube at (0,0,0)..(1,1,1) is material 0 (opaque Red).
+        // Add a second cube directly on the line of sight from camera (5, -6, 4) to (0.5, 0.5, 0.5)
+        // at (1.5, -2.0, 1.0) with material 1 (Translucent Blue, opacity 0.25).
+        model.materials.append(SKPModel.Material(name: "TransBlue", color: SIMD4(0, 0.5, 1, 0.25), opacity: 0.25))
+        var (glassMesh, _) = SyntheticModel.cubeMesh(material: 1, layer: 0)
+        glassMesh.positions = glassMesh.positions.map { $0 + SIMD3(1.5, -2.0, 1.0) }
+        model.root.meshes.append(glassMesh)
+
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        let scene = ViewportScene(model: model)
+        view.present(scene)
+        view.apply(camera: model.scenes[0].camera!, animated: false)
+
+        let rep = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        let pixel = try XCTUnwrap(rep.colorAt(x: 100, y: 100)?.usingColorSpace(.sRGB))
+        // Because the blue cube is 25% opaque, the red cube behind it must shine through strongly (red > 0.35).
+        // Previously, when SceneKit ignored `material.transparency` because diffuse alpha was 1.0, red was 0.000!
+        XCTAssertGreaterThan(pixel.redComponent, 0.35, "Opaque red object behind 25%-opacity blue glass must be visible through the glass")
+
+        // Verify transparent face nodes have renderingOrder == 2 and castsShadow == false
+        let glassNodes = scene.layerSets[[0]]?.node?.childNodes.filter { ($0.geometry?.firstMaterial?.transparency ?? 1) < 1 } ?? []
+        XCTAssertFalse(glassNodes.isEmpty)
+        for node in glassNodes {
+            XCTAssertEqual(node.renderingOrder, 2)
+            XCTAssertFalse(node.castsShadow)
+        }
+
+        // Verify X-Ray mode also renders see-through
+        scene.shadingStyle = .xray
+        let xrayRep = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        let xrayPixel = try XCTUnwrap(xrayRep.colorAt(x: 100, y: 100)?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(xrayPixel.redComponent, 0.25, "X-Ray mode must also allow background/behind geometry to show through")
+    }
 }

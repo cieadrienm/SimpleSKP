@@ -188,7 +188,8 @@ public final class CameraRig {
     private func startTicking() {
         guard timer == nil, isMoving else { return }
         lastTick = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+        let fps = Double(max(60, NSScreen.screens.map(\.maximumFramesPerSecond).max() ?? 60))
+        let timer = Timer(timeInterval: 1.0 / fps, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             MainActor.assumeIsolated { self.tick() }
         }

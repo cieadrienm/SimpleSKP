@@ -35,6 +35,7 @@ final class DocumentModel {
     var selectedScene: Int?
     var layerVisible: [Bool] = []
     var layerFilter: String = ""
+    var expandedLayerGroups: Set<String> = []
     var showsEdges = Preferences.showsEdges
     var showsGrid = Preferences.showsGrid
     var isPerspective = Preferences.isPerspective
@@ -135,6 +136,8 @@ final class DocumentModel {
     func setModel(_ model: SKPModel) {
         skp = model
         layerVisible = model.layers.map(\.isVisible)
+        let multiGroups = model.layerGroups.filter { !$0.isSingleLayer }
+        expandedLayerGroups = model.layers.count <= 32 ? Set(multiGroups.map(\.id)) : []
         showSidebar = Preferences.showSidebar && (!model.scenes.isEmpty || model.layers.count > 1)
     }
 
@@ -236,6 +239,69 @@ final class DocumentModel {
             scene?.setLayers(layerVisible)
             updateVisibleSize()
         }
+    }
+
+    func visibleCount(in group: SKPModel.LayerGroup) -> Int {
+        group.layerIndices.reduce(0) { count, idx in
+            count + ((layerVisible.indices.contains(idx) && layerVisible[idx]) ? 1 : 0)
+        }
+    }
+
+    func isLayerGroupVisible(_ group: SKPModel.LayerGroup) -> Bool {
+        visibleCount(in: group) > 0
+    }
+
+    func isLayerGroupPartiallyVisible(_ group: SKPModel.LayerGroup) -> Bool {
+        let count = visibleCount(in: group)
+        return count > 0 && count < group.layerIndices.count
+    }
+
+    func setLayerGroup(_ group: SKPModel.LayerGroup, visible: Bool) {
+        var changed = false
+        for idx in group.layerIndices where layerVisible.indices.contains(idx) {
+            if layerVisible[idx] != visible {
+                layerVisible[idx] = visible
+                changed = true
+            }
+        }
+        guard changed else { return }
+        scene?.setLayers(layerVisible)
+        updateVisibleSize()
+    }
+
+    func toggleLayerGroup(_ group: SKPModel.LayerGroup) {
+        setLayerGroup(group, visible: !isLayerGroupVisible(group))
+    }
+
+    /// Isolates all layers of a `LayerGroup` (`Solo`), or restores all layers if that group was already the only visible one.
+    func soloLayerGroup(_ group: SKPModel.LayerGroup) {
+        let memberSet = Set(group.layerIndices)
+        guard !memberSet.isEmpty else { return }
+        let isAlreadySolo = layerVisible.indices.allSatisfy { memberSet.contains($0) == layerVisible[$0] }
+        if isAlreadySolo {
+            setAllLayers(visible: true)
+        } else {
+            layerVisible = layerVisible.indices.map { memberSet.contains($0) }
+            scene?.setLayers(layerVisible)
+            updateVisibleSize()
+        }
+    }
+
+    func isLayerGroupExpanded(_ id: String) -> Bool {
+        expandedLayerGroups.contains(id)
+    }
+
+    func toggleLayerGroupExpanded(_ id: String) {
+        if expandedLayerGroups.contains(id) {
+            expandedLayerGroups.remove(id)
+        } else {
+            expandedLayerGroups.insert(id)
+        }
+    }
+
+    func setAllLayerGroupsExpanded(_ expanded: Bool) {
+        let multiIDs = (skp?.layerGroups ?? []).filter { !$0.isSingleLayer }.map(\.id)
+        expandedLayerGroups = expanded ? Set(multiIDs) : []
     }
 
     var visibleLayerCount: Int {
@@ -584,7 +650,7 @@ final class DocumentModel {
     }
 
     func toggleSidebar() {
-        withAnimation(.easeInOut(duration: 0.22)) {
+        withAnimation(.spring(duration: 0.22, bounce: 0.0)) {
             showSidebar.toggle()
         }
         Preferences.showSidebar = showSidebar

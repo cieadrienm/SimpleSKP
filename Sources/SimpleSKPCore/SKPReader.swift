@@ -179,12 +179,19 @@ public enum SKPReader {
                 var c = SUColor()
                 _ = f.SUMaterialGetColor(m, &c)
                 var opacity = 1.0
-                if bool(f.SUMaterialGetUseOpacity, m) { _ = f.SUMaterialGetOpacity(m, &opacity) }
+                if bool(f.SUMaterialGetUseOpacity, m) {
+                    _ = f.SUMaterialGetOpacity(m, &opacity)
+                } else if c.a < 255 && c.a > 0 {
+                    opacity = Double(c.a) / 255.0
+                }
+                let drawnTransparent = f.SUMaterialIsDrawnTransparent.map { bool($0, m) } ?? false
+                let isTransparent = opacity < 0.999 || drawnTransparent
                 var type: Int32 = 0
                 _ = f.SUMaterialGetType(m, &type)
                 var material = SKPModel.Material(name: string(f.SUMaterialGetName, m),
                                                  color: SIMD4(Float(c.r), Float(c.g), Float(c.b), Float(c.a)) / 255,
-                                                 opacity: Float(opacity))
+                                                 opacity: Float(opacity),
+                                                 isTransparent: isTransparent)
                 // SUMaterialType_Textured = 1, SUMaterialType_ColorizedTexture = 2
                 let texture = type == 1 || type == 2 ? ref(f.SUMaterialGetTexture, m) : nil
                 if let texture {
@@ -211,7 +218,18 @@ public enum SKPReader {
         func readLayers(_ model: Ref) {
             for (i, l) in refs(f.SUModelGetNumLayers, f.SUModelGetLayers, model).enumerated() {
                 if let l { layerIndex[l] = i }
-                layers.append(SKPModel.Layer(name: string(f.SULayerGetName, l), isVisible: bool(f.SULayerGetVisibility, l, default: true)))
+                var folderName: String? = nil
+                if let getFolder = f.SULayerGetParentLayerFolder,
+                   let getFolderName = f.SULayerFolderGetName,
+                   let folderRef = ref(getFolder, l) {
+                    let raw = string(getFolderName, folderRef).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !raw.isEmpty { folderName = raw }
+                }
+                layers.append(SKPModel.Layer(
+                    name: string(f.SULayerGetName, l),
+                    isVisible: bool(f.SULayerGetVisibility, l, default: true),
+                    folder: folderName
+                ))
             }
             // Unknown layers map to index 0, so it must exist.
             if layers.isEmpty { layers.append(SKPModel.Layer(name: "Layer0", isVisible: true)) }
@@ -261,12 +279,23 @@ public enum SKPReader {
                       f.SUMeshHelperGetVertexIndices(helper, triangles * 3, &indices, &got) == 0, got == triangles * 3
                 else { continue }
 
-                let material = ref(f.SUFaceGetFrontMaterial, face).flatMap { materialIndex[$0] }
+                let frontMaterial = ref(f.SUFaceGetFrontMaterial, face).flatMap { materialIndex[$0] }
+                let backMaterial = ref(f.SUFaceGetBackMaterial, face).flatMap { materialIndex[$0] }
+                let useBackMaterial: Bool = {
+                    if frontMaterial == nil, backMaterial != nil { return true }
+                    if let fMat = frontMaterial, let bMat = backMaterial,
+                       !materials[fMat].isTransparent, materials[bMat].isTransparent {
+                        return true
+                    }
+                    return false
+                }()
+                let material = useBackMaterial ? backMaterial : frontMaterial
                 // Own texture → STQ in repeats; no own material → STQ in inches (for an inherited texture), stored in metres.
                 let uvScale: Double? = material.map { textured[$0] ? 1 : nil } ?? inch
                 let hasUVs = uvScale != nil
                 if hasUVs {
-                    guard f.SUMeshHelperGetFrontSTQCoords(helper, vertices, &stq, &got) == 0, got == vertices else { continue }
+                    let stqGetter = useBackMaterial ? f.SUMeshHelperGetBackSTQCoords : f.SUMeshHelperGetFrontSTQCoords
+                    guard stqGetter(helper, vertices, &stq, &got) == 0, got == vertices else { continue }
                 }
                 let key = BatchKey(material: material, layer: layer(face))
                 let slot: Int

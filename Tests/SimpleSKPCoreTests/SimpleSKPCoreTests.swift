@@ -211,6 +211,60 @@ final class SimpleSKPCoreTests: XCTestCase {
         XCTAssertFalse(meshes.isEmpty)
         for mesh in meshes { XCTAssertEqual(mesh.uvs?.count, mesh.positions.count) }
     }
+
+    func testAutomaticLayerGroupingHierarchy() {
+        let layers: [SKPModel.Layer] = [
+            .init(name: "Layer0", isVisible: true),
+            .init(name: "0_Murs", isVisible: true),
+            .init(name: "0_Sol", isVisible: true),
+            .init(name: "0_Plafond", isVisible: false),
+            .init(name: "FRISS_VP_Sol", isVisible: true),
+            .init(name: "FRISS_VP_Fond", isVisible: true),
+            .init(name: "FRISS_Régie", isVisible: false),
+            .init(name: "Mur-Jardin", isVisible: true),
+            .init(name: "Mur-Cour", isVisible: true),
+            .init(name: "Mur-Lointain", isVisible: true),
+            .init(name: "Spotlight1", isVisible: true),
+            .init(name: "Spotlight2", isVisible: false),
+            .init(name: "Fond de plan-pdf", isVisible: false),
+            .init(name: "Fond de plan-skp", isVisible: false),
+            .init(name: "Existant", isVisible: true),
+        ]
+        let groups = SKPModel.buildLayerGroups(for: layers)
+        // Layer0 stays standalone at index 0
+        XCTAssertEqual(groups.first?.name, "Layer0")
+        XCTAssertTrue(groups.first?.isSingleLayer == true)
+
+        let groupByName = Dictionary(uniqueKeysWithValues: groups.map { ($0.name, $0) })
+        XCTAssertEqual(groupByName["0"]?.layerIndices, [1, 2, 3])
+        XCTAssertEqual(groupByName["0"]?.memberLabels[1], "Murs")
+        XCTAssertEqual(groupByName["FRISS"]?.layerIndices, [4, 5, 6])
+        XCTAssertEqual(groupByName["FRISS"]?.memberLabels[4], "VP_Sol")
+        XCTAssertEqual(groupByName["Mur"]?.layerIndices, [7, 8, 9])
+        XCTAssertEqual(groupByName["Mur"]?.memberLabels[7], "Jardin")
+        XCTAssertEqual(groupByName["Spotlight"]?.layerIndices, [10, 11])
+        XCTAssertEqual(groupByName["Fond de plan"]?.layerIndices, [12, 13])
+        XCTAssertEqual(groupByName["Fond de plan"]?.memberLabels[12], "pdf")
+        XCTAssertEqual(groupByName["Existant"]?.isSingleLayer, true)
+    }
+
+    func testFixtureBackFaceAndTransparentMaterialsAreRead() throws {
+        guard SketchUpAPI.locate() != nil else { throw XCTSkip("SketchUp not installed") }
+        let model = try SKPReader.load(Self.fixture)
+        defer { if let dir = model.textureDirectory { try? FileManager.default.removeItem(at: dir) } }
+        // In VerreMirroir.skp, all 3 painted faces are painted ONLY on SUFaceGetBackMaterial (SUFaceGetFrontMaterial == nil).
+        let allMeshes = ([model.root] + model.definitions).flatMap(\.meshes)
+        XCTAssertTrue(allMeshes.contains { $0.material != nil }, "back-painted faces in VerreMirroir.skp must retain their back material")
+
+        let orsay = URL(fileURLWithPath: "/Users/adrien/Dropbox/AMCB-Expos/20180200-Orsay/3D/Orsay_3D_V3.skp")
+        if FileManager.default.fileExists(atPath: orsay.path) {
+            let orsayModel = try SKPReader.load(orsay)
+            defer { if let dir = orsayModel.textureDirectory { try? FileManager.default.removeItem(at: dir) } }
+            XCTAssertTrue(orsayModel.materials.contains { $0.isTransparent && $0.opacity < 0.99 })
+            let multiGroups = orsayModel.layerGroups.filter { !$0.isSingleLayer }
+            XCTAssertGreaterThanOrEqual(multiGroups.count, 4)
+        }
+    }
 }
 
 final class Box<T>: @unchecked Sendable {

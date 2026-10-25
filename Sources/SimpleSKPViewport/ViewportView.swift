@@ -47,7 +47,7 @@ public final class ViewportView: SCNView {
         allowsCameraControl = false
         autoenablesDefaultLighting = false
         backgroundColor = NSColor(red: 0.067, green: 0.075, blue: 0.09, alpha: 1)
-        preferredFramesPerSecond = 60
+        preferredFramesPerSecond = max(60, NSScreen.screens.map(\.maximumFramesPerSecond).max() ?? 60)
         let camera = SCNCamera()
         Rendering.configure(camera: camera)
         Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera)

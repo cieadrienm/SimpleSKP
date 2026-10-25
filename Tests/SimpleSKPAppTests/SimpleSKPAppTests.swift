@@ -436,4 +436,50 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         XCTAssertNotNil(pdfData)
         XCTAssertEqual(String(decoding: (pdfData ?? Data()).prefix(5), as: UTF8.self), "%PDF-")
     }
+
+    func testLayerGroupToggleAndSoloOnDocumentModel() throws {
+        var skp = SyntheticModel.cube()
+        skp.layers = [
+            .init(name: "Layer0", isVisible: true),
+            .init(name: "Mur-Jardin", isVisible: true),
+            .init(name: "Mur-Cour", isVisible: true),
+            .init(name: "Mur-Lointain", isVisible: false),
+            .init(name: "Son-Face", isVisible: true),
+            .init(name: "Son-Retours", isVisible: true),
+        ]
+        skp.layerGroups = SKPModel.buildLayerGroups(for: skp.layers)
+
+        let model = DocumentModel()
+        model.setModel(skp)
+
+        let murGroup = try XCTUnwrap(skp.layerGroups.first { $0.name == "Mur" })
+        XCTAssertEqual(murGroup.layerIndices, [1, 2, 3])
+        XCTAssertEqual(model.visibleCount(in: murGroup), 2)
+        XCTAssertTrue(model.isLayerGroupVisible(murGroup))
+        XCTAssertTrue(model.isLayerGroupPartiallyVisible(murGroup))
+
+        // Toggling a partially visible group turns all its layers off
+        model.toggleLayerGroup(murGroup)
+        XCTAssertEqual(model.visibleCount(in: murGroup), 0)
+        XCTAssertFalse(model.isLayerGroupVisible(murGroup))
+
+        // Toggling again turns all its layers on
+        model.toggleLayerGroup(murGroup)
+        XCTAssertEqual(model.visibleCount(in: murGroup), 3)
+        XCTAssertFalse(model.isLayerGroupPartiallyVisible(murGroup))
+
+        // Soloing the group hides all other layers
+        model.soloLayerGroup(murGroup)
+        XCTAssertEqual(model.layerVisible, [false, true, true, true, false, false])
+
+        // Soloing again restores all layers
+        model.soloLayerGroup(murGroup)
+        XCTAssertEqual(model.layerVisible, [true, true, true, true, true, true])
+
+        // Verify RemoteControlServer state dictionary serializes cleanly to JSON even when selectedScene & selectedPointLight are nil
+        let stateDict = RemoteControlServer.shared.buildStateDictionary(for: model)
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(stateDict))
+        let jsonData = try JSONSerialization.data(withJSONObject: stateDict)
+        XCTAssertGreaterThan(jsonData.count, 100)
+    }
 }

@@ -321,12 +321,22 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
             guard route.count >= 2 else { return }
             if route[1] == "all", let b = message.bool(at: 0) {
                 model.setAllLayers(visible: b)
+            } else if route[1] == "group", let groupName = message.string(at: 0),
+                      let group = model.skp?.layerGroups.first(where: { $0.name.localizedCaseInsensitiveCompare(groupName) == .orderedSame }) {
+                if let b = message.bool(at: 1) {
+                    model.setLayerGroup(group, visible: b)
+                } else {
+                    model.toggleLayerGroup(group)
+                }
             } else if route[1] == "solo" {
                 if let idx = message.int(at: 0) {
                     model.soloLayer(idx)
-                } else if let name = message.string(at: 0),
-                          let idx = model.skp?.layers.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
-                    model.soloLayer(idx)
+                } else if let name = message.string(at: 0) {
+                    if let idx = model.skp?.layers.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
+                        model.soloLayer(idx)
+                    } else if let group = model.skp?.layerGroups.first(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
+                        model.soloLayerGroup(group)
+                    }
                 }
             } else if let idx = Int(route[1]), model.layerVisible.indices.contains(idx) {
                 if let b = message.bool(at: 0) {
@@ -1154,7 +1164,7 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
             }
             writeJSON([
                 "ok": true,
-                "selectedScene": model.selectedScene as Any,
+                "selectedScene": model.selectedScene ?? NSNull(),
                 "camera": buildCameraDictionary(model: model),
             ])
 
@@ -1166,11 +1176,24 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
             }
             if let all = args["all"] as? Bool {
                 model.setAllLayers(visible: all)
+            } else if let groupName = args["group"] as? String,
+                      let group = model.skp?.layerGroups.first(where: { $0.name.localizedCaseInsensitiveCompare(groupName) == .orderedSame }) {
+                if let visible = args["visible"] as? Bool {
+                    model.setLayerGroup(group, visible: visible)
+                } else {
+                    model.toggleLayerGroup(group)
+                }
+            } else if let soloGroupName = args["soloGroup"] as? String,
+                      let group = model.skp?.layerGroups.first(where: { $0.name.localizedCaseInsensitiveCompare(soloGroupName) == .orderedSame }) {
+                model.soloLayerGroup(group)
             } else if let soloIdx = (args["solo"] as? Int) ?? (args["solo"] as? Double).map(Int.init) {
                 model.soloLayer(soloIdx)
-            } else if let soloName = args["solo"] as? String,
-                      let idx = model.skp?.layers.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(soloName) == .orderedSame }) {
-                model.soloLayer(idx)
+            } else if let soloName = args["solo"] as? String {
+                if let idx = model.skp?.layers.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(soloName) == .orderedSame }) {
+                    model.soloLayer(idx)
+                } else if let group = model.skp?.layerGroups.first(where: { $0.name.localizedCaseInsensitiveCompare(soloName) == .orderedSame }) {
+                    model.soloLayerGroup(group)
+                }
             } else {
                 var targetIndex: Int? = (args["index"] as? Int) ?? (args["index"] as? Double).map(Int.init)
                 if targetIndex == nil, let name = args["name"] as? String {
@@ -1475,7 +1498,7 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                     "intensity": $0.intensity,
                     "isFromScene": $0.isFromScene,
                 ] as [String: Any]
-            } as Any,
+            } ?? NSNull(),
             "showsPointLightGizmo": model.showsPointLightGizmo,
             "backdropStyle": model.backdropStyle.rawValue,
             "customBackdropColor": [model.customBackdropColor.x, model.customBackdropColor.y, model.customBackdropColor.z],
@@ -1511,7 +1534,7 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
             ],
             "camera": buildCameraDictionary(model: model),
             "rendering": buildRenderingDictionary(model: model),
-            "selectedScene": model?.selectedScene as Any,
+            "selectedScene": model?.selectedScene ?? NSNull(),
             "scenes": (skp?.scenes ?? []).enumerated().map { idx, sc in
                 [
                     "index": idx,
@@ -1525,6 +1548,15 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                     "index": idx,
                     "name": layer.name,
                     "visible": (model?.layerVisible.indices.contains(idx) == true) ? model!.layerVisible[idx] : layer.isVisible,
+                ] as [String: Any]
+            },
+            "layerGroups": (skp?.layerGroups ?? []).filter { !$0.isSingleLayer }.map { group in
+                [
+                    "id": group.id,
+                    "name": group.name,
+                    "layerIndices": group.layerIndices,
+                    "visibleCount": model?.visibleCount(in: group) ?? group.layerIndices.count,
+                    "totalCount": group.layerIndices.count,
                 ] as [String: Any]
             },
         ]

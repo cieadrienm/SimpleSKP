@@ -40,6 +40,7 @@ extension SketchUpAPI {
         let SUMaterialGetColor: @convention(c) (Ref, UnsafeMutableRawPointer) -> Int32
         let SUMaterialGetOpacity: GetDouble
         let SUMaterialGetUseOpacity: GetBool
+        let SUMaterialIsDrawnTransparent: GetBool?
         let SUMaterialGetType: @convention(c) (Ref, UnsafeMutablePointer<Int32>) -> Int32
         let SUMaterialGetTexture: GetRef
         let SUTextureGetFileName: GetRef
@@ -47,6 +48,8 @@ extension SketchUpAPI {
         let SUTextureGetDimensions: @convention(c) (Ref, UnsafeMutablePointer<Int>, UnsafeMutablePointer<Int>, UnsafeMutablePointer<Double>, UnsafeMutablePointer<Double>) -> Int32
         let SULayerGetName: GetRef
         let SULayerGetVisibility: GetBool
+        let SULayerGetParentLayerFolder: GetRef?
+        let SULayerFolderGetName: GetRef?
         let SUEntitiesGetNumFaces: Count
         let SUEntitiesGetFaces: List
         let SUEntitiesGetNumEdges: @convention(c) (Ref, Bool, UnsafeMutablePointer<Int>) -> Int32
@@ -65,8 +68,10 @@ extension SketchUpAPI {
         let SUMeshHelperGetNormals: Points
         let SUMeshHelperGetVertexIndices: @convention(c) (Ref, Int, UnsafeMutablePointer<Int>, UnsafeMutablePointer<Int>) -> Int32
         let SUMeshHelperGetFrontSTQCoords: Points
+        let SUMeshHelperGetBackSTQCoords: Points
         let SUMeshHelperRelease: Release
         let SUFaceGetFrontMaterial: GetRef
+        let SUFaceGetBackMaterial: GetRef
         let SUEdgeGetSoft: GetBool
         let SUEdgeGetStartVertex: GetRef
         let SUEdgeGetEndVertex: GetRef
@@ -97,6 +102,10 @@ extension SketchUpAPI {
                 guard let p = dlsym(handle, name) else { throw SKPError.api(function: name, code: -1) }
                 return unsafeBitCast(p, to: T.self)
             }
+            func symOpt<T>(_ handle: UnsafeMutableRawPointer, _ name: String) -> T? {
+                guard let p = dlsym(handle, name) else { return nil }
+                return unsafeBitCast(p, to: T.self)
+            }
             SUInitialize = try sym(handle, "SUInitialize")
             SUStringCreate = try sym(handle, "SUStringCreate")
             SUStringGetUTF8Length = try sym(handle, "SUStringGetUTF8Length")
@@ -116,6 +125,7 @@ extension SketchUpAPI {
             SUMaterialGetColor = try sym(handle, "SUMaterialGetColor")
             SUMaterialGetOpacity = try sym(handle, "SUMaterialGetOpacity")
             SUMaterialGetUseOpacity = try sym(handle, "SUMaterialGetUseOpacity")
+            SUMaterialIsDrawnTransparent = symOpt(handle, "SUMaterialIsDrawnTransparent")
             SUMaterialGetType = try sym(handle, "SUMaterialGetType")
             SUMaterialGetTexture = try sym(handle, "SUMaterialGetTexture")
             SUTextureGetFileName = try sym(handle, "SUTextureGetFileName")
@@ -123,6 +133,8 @@ extension SketchUpAPI {
             SUTextureGetDimensions = try sym(handle, "SUTextureGetDimensions")
             SULayerGetName = try sym(handle, "SULayerGetName")
             SULayerGetVisibility = try sym(handle, "SULayerGetVisibility")
+            SULayerGetParentLayerFolder = symOpt(handle, "SULayerGetParentLayerFolder")
+            SULayerFolderGetName = symOpt(handle, "SULayerFolderGetName")
             SUEntitiesGetNumFaces = try sym(handle, "SUEntitiesGetNumFaces")
             SUEntitiesGetFaces = try sym(handle, "SUEntitiesGetFaces")
             SUEntitiesGetNumEdges = try sym(handle, "SUEntitiesGetNumEdges")
@@ -141,8 +153,10 @@ extension SketchUpAPI {
             SUMeshHelperGetNormals = try sym(handle, "SUMeshHelperGetNormals")
             SUMeshHelperGetVertexIndices = try sym(handle, "SUMeshHelperGetVertexIndices")
             SUMeshHelperGetFrontSTQCoords = try sym(handle, "SUMeshHelperGetFrontSTQCoords")
+            SUMeshHelperGetBackSTQCoords = try sym(handle, "SUMeshHelperGetBackSTQCoords")
             SUMeshHelperRelease = try sym(handle, "SUMeshHelperRelease")
             SUFaceGetFrontMaterial = try sym(handle, "SUFaceGetFrontMaterial")
+            SUFaceGetBackMaterial = try sym(handle, "SUFaceGetBackMaterial")
             SUEdgeGetSoft = try sym(handle, "SUEdgeGetSoft")
             SUEdgeGetStartVertex = try sym(handle, "SUEdgeGetStartVertex")
             SUEdgeGetEndVertex = try sym(handle, "SUEdgeGetEndVertex")

@@ -22,7 +22,8 @@ struct ContentView: View {
                 }
                 viewport
             }
-            .animation(.easeInOut(duration: 0.22), value: model.showSidebar)
+            .clipped()
+            .animation(.spring(duration: 0.22, bounce: 0.0), value: model.showSidebar)
             StatusBar(model: model)
         }
         .background(Theme.background.swiftUI)
@@ -1391,8 +1392,26 @@ struct SidebarView: View {
                         Spacer().frame(height: 10)
                     }
 
+                    let multiGroupCount = skp.layerGroups.filter { !$0.isSingleLayer }.count
                     SectionHeader(L("Calques", "Layers")) {
                         HStack(spacing: 5) {
+                            if multiGroupCount > 0 {
+                                let allExpanded = model.expandedLayerGroups.count >= multiGroupCount
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.16)) {
+                                        model.setAllLayerGroupsExpanded(!allExpanded)
+                                    }
+                                } label: {
+                                    Image(systemName: allExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(Theme.textDim.swiftUI)
+                                }
+                                .buttonStyle(.plain)
+                                .help(allExpanded
+                                    ? L("Replier tous les groupes de calques", "Collapse all layer groups")
+                                    : L("Déplier tous les groupes de calques", "Expand all layer groups"))
+                            }
+
                             if skp.layers.count > 1 {
                                 Button {
                                     model.setAllLayers(visible: true)
@@ -1452,15 +1471,66 @@ struct SidebarView: View {
                         .padding(.bottom, 4)
                     }
 
-                    let indices = filteredLayerIndices(skp)
-                    ForEach(indices, id: \.self) { index in
-                        LayerRow(
-                            name: skp.layers[index].name,
-                            isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
-                            canSolo: skp.layers.count > 1,
-                            onToggle: { model.toggleLayer(index) },
-                            onSolo: { model.soloLayer(index) }
-                        )
+                    let query = model.layerFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ForEach(skp.layerGroups) { group in
+                        let matchingIndices = matchingIndices(in: group, skp: skp, query: query)
+                        if !matchingIndices.isEmpty {
+                            if group.isSingleLayer, let index = matchingIndices.first {
+                                LayerRow(
+                                    name: skp.layers[index].name,
+                                    fullTooltip: skp.layers[index].name,
+                                    isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
+                                    canSolo: skp.layers.count > 1,
+                                    indented: false,
+                                    onToggle: { model.toggleLayer(index) },
+                                    onSolo: { model.soloLayer(index) }
+                                )
+                            } else {
+                                let isExpanded = !query.isEmpty || model.isLayerGroupExpanded(group.id)
+                                LayerGroupRow(
+                                    group: group,
+                                    visibleCount: model.visibleCount(in: group),
+                                    isVisible: model.isLayerGroupVisible(group),
+                                    isPartiallyVisible: model.isLayerGroupPartiallyVisible(group),
+                                    isExpanded: isExpanded,
+                                    canSolo: skp.layers.count > group.layerIndices.count,
+                                    onToggleExpand: {
+                                        withAnimation(.easeInOut(duration: 0.14)) {
+                                            model.toggleLayerGroupExpanded(group.id)
+                                        }
+                                    },
+                                    onToggleVisibility: {
+                                        model.toggleLayerGroup(group)
+                                    },
+                                    onSolo: {
+                                        model.soloLayerGroup(group)
+                                    }
+                                )
+                                if isExpanded {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        ForEach(matchingIndices, id: \.self) { index in
+                                            LayerRow(
+                                                name: group.memberLabels[index] ?? skp.layers[index].name,
+                                                fullTooltip: skp.layers[index].name,
+                                                isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
+                                                canSolo: skp.layers.count > 1,
+                                                indented: true,
+                                                onToggle: { model.toggleLayer(index) },
+                                                onSolo: { model.soloLayer(index) }
+                                            )
+                                        }
+                                    }
+                                    .padding(.leading, 12)
+                                    .overlay(alignment: .leading) {
+                                        Rectangle()
+                                            .fill(Color.white.opacity(0.08))
+                                            .frame(width: 1)
+                                            .padding(.leading, 6)
+                                            .padding(.vertical, 2)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Spacer().frame(height: 12)
@@ -1472,10 +1542,17 @@ struct SidebarView: View {
         .background(Theme.panel.swiftUI)
     }
 
-    private func filteredLayerIndices(_ skp: SKPModel) -> [Int] {
-        let query = model.layerFilter.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return Array(skp.layers.indices) }
-        return skp.layers.indices.filter { skp.layers[$0].name.localizedCaseInsensitiveContains(query) }
+    private func matchingIndices(in group: SKPModel.LayerGroup, skp: SKPModel, query: String) -> [Int] {
+        guard !query.isEmpty else { return group.layerIndices }
+        if !group.isSingleLayer && group.name.localizedCaseInsensitiveContains(query) {
+            return group.layerIndices
+        }
+        return group.layerIndices.filter { idx in
+            guard skp.layers.indices.contains(idx) else { return false }
+            if skp.layers[idx].name.localizedCaseInsensitiveContains(query) { return true }
+            if let short = group.memberLabels[idx], short.localizedCaseInsensitiveContains(query) { return true }
+            return false
+        }
     }
 
     private func sceneRow(_ name: String, hasCamera: Bool, index: Int) -> some View {
@@ -1502,10 +1579,109 @@ struct SidebarView: View {
     }
 }
 
+private struct LayerGroupRow: View {
+    let group: SKPModel.LayerGroup
+    let visibleCount: Int
+    let isVisible: Bool
+    let isPartiallyVisible: Bool
+    let isExpanded: Bool
+    let canSolo: Bool
+    let onToggleExpand: () -> Void
+    let onToggleVisibility: () -> Void
+    let onSolo: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Button(action: onToggleExpand) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                    .frame(width: 12, height: 14)
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded
+                ? L("Replier le groupe « \(group.name) »", "Collapse group “\(group.name)”")
+                : L("Déplier le groupe « \(group.name) »", "Expand group “\(group.name)”"))
+
+            Button(action: onToggleVisibility) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 3.5)
+                        .fill(isVisible ? Theme.accent.swiftUI : Color.white.opacity(0.08))
+                        .frame(width: 13.5, height: 13.5)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3.5)
+                                .strokeBorder(isVisible ? Theme.accent.swiftUI : Color.white.opacity(0.26), lineWidth: 1)
+                        )
+                    if isPartiallyVisible {
+                        Image(systemName: "minus")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(Color.white)
+                    } else if isVisible {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(Color.white)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .help(L("Activer ou désactiver tous les calques du groupe « \(group.name) »",
+                    "Enable or disable all layers in group “\(group.name)”"))
+
+            Button(action: onToggleExpand) {
+                HStack(spacing: 4) {
+                    Image(systemName: isExpanded ? "folder.fill" : "folder")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(isVisible ? Theme.accent.swiftUI : Theme.textFaint.swiftUI)
+                    Text(group.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI)
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+
+            if canSolo && hovering {
+                Button(action: onSolo) {
+                    Text("Solo")
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.accent.swiftUI)
+                        .padding(.horizontal, 4.5)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Theme.accent.swiftUI.opacity(0.15)))
+                }
+                .buttonStyle(.plain)
+                .help(L("Isoler ce groupe de calques (ou réafficher tous les calques)",
+                        "Solo this layer group (or restore all layers)"))
+            }
+
+            Text("\(visibleCount)/\(group.layerIndices.count)")
+                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(isVisible ? Theme.textDim.swiftUI : Theme.textFaint.swiftUI)
+                .padding(.horizontal, 4.5)
+                .padding(.vertical, 1)
+                .background(RoundedRectangle(cornerRadius: 3.5).fill(Color.white.opacity(0.05)))
+        }
+        .padding(.vertical, 2.5)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.white.opacity(hovering ? 0.055 : 0.025))
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+}
+
 private struct LayerRow: View {
     let name: String
+    let fullTooltip: String
     let isVisible: Bool
     let canSolo: Bool
+    let indented: Bool
     let onToggle: () -> Void
     let onSolo: () -> Void
 
@@ -1515,11 +1691,12 @@ private struct LayerRow: View {
         HStack(spacing: 4) {
             Toggle(isOn: Binding(get: { isVisible }, set: { _ in onToggle() })) {
                 Text(name)
-                    .font(.system(size: 12))
+                    .font(.system(size: indented ? 11.5 : 12))
                     .foregroundStyle(isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI)
                     .lineLimit(1)
             }
             .toggleStyle(.checkbox)
+            .help(fullTooltip)
 
             Spacer(minLength: 0)
 
