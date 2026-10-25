@@ -78,10 +78,11 @@ versions SketchUp 8 à 2023).
   3, projection automatique sur les calques visibles) ; environnement lumineux = ciel dégradé procédural (équirectangulaire généré en
   code : zénith bleu doux, horizon blanc chaud, sol gris) aussi utilisé en fond de la vue ; caméra HDR sans adaptation d'exposition,
   occlusion ambiante écran (intensité 1, rayon 0,4 m), anticrénelage ×4, pas de bloom ni de flou. Arêtes gardées mais discrètes
-  (gris à 35 % de la face, 1 px, ⌘E), biais de profondeur comme avant. Deux interrupteurs dans Présentation : Ombres (⌥⌘O) et
-  Occlusion ambiante (⌥⌘A), cochés par défaut, mémorisés. Fluidité : un appel de dessin par (ensemble de calques, matériau) grâce à
-  la fusion des instances (cible ≥ 30 i/s sur la salle de 97 Mo en iso, mesuré par `SCNRenderer`) ; si une scène dépasse 33 ms,
-  les ombres passent à 1 cascade / 1 024 automatiquement et le dit dans la barre d'état.
+  (gris à 35 % de la face, 1 px, ⌘E), biais de profondeur comme avant. Deux interrupteurs dans Présentation : Ombres (⌥⌘O, coché par défaut) et
+  Occlusion ambiante (⌥⌘A, décoché par défaut : aucun réglage ne donne l'ombre des coins sans bandes sur les sols ouverts, voir
+  DECISIONS D13), mémorisés. Fluidité : un appel de dessin par (ensemble de calques, matériau) grâce à
+  la fusion des instances (cible ≥ 30 i/s sur la salle de 97 Mo en iso, mesuré par `SCNRenderer`) ; la dégradation automatique des ombres (1 cascade / 1 024 au-delà de 33 ms) est remise à plus tard : toutes
+  les vues mesurées restent sous 19 ms ; `ViewportScene.setShadowQuality(_:)` existe pour le jour où il faudra.
 - **D8 — Pas d'OSC, d'API HTTP ni de MCP** : rien à piloter dans un visualiseur (même raisonnement que SimpleText).
   Pas d'export, pas d'édition, pas de sections, pas d'ombres, pas de styles SketchUp.
 - **D9 — Interface en français avec `L("fr", "en")`** et `Localization` de la famille, `fr.lproj` et `en.lproj`
