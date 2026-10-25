@@ -6,12 +6,13 @@ import simd
 public struct SKPModel: Sendable {
     public struct Material: Sendable {
         public var name: String
-        /// Linear sRGB components 0…1 (alpha included; `opacity` is the SketchUp opacity, applied by the viewport).
+        /// sRGB components 0…1 (bytes / 255, alpha included; `opacity` is the SketchUp opacity, applied by the viewport).
         public var color: SIMD4<Float>
         public var opacity: Float
         /// Texture written to a temporary file by the reader (`SUTextureWriteToFile`), nil for plain colours.
         public var textureURL: URL?
-        /// Metres per texture repeat along S and T (SketchUp texture width/height).
+        /// Metres per texture repeat along S and T (SketchUp texture width/height) = 0.0254 / s_scale, 0.0254 / t_scale
+        /// (texture.h: s_scale/t_scale are repeats per inch). Divide a nil-material mesh's `uvs` by it for an inherited texture.
         public var textureScale: SIMD2<Float>
 
         public init(name: String, color: SIMD4<Float>, opacity: Float = 1, textureURL: URL? = nil, textureScale: SIMD2<Float> = SIMD2(1, 1)) {
@@ -34,7 +35,8 @@ public struct SKPModel: Sendable {
         public var layer: Int
         public var positions: [SIMD3<Float>]
         public var normals: [SIMD3<Float>]
-        /// Front-face texture coordinates (already divided by q), nil when the material has no texture.
+        /// Front-face texture coordinates (already divided by q): texture repeats when `material` is textured; metres when
+        /// `material == nil`, to be divided by the inherited material's `textureScale`; nil otherwise.
         public var uvs: [SIMD2<Float>]?
         /// Triangle list, three indices per triangle.
         public var indices: [UInt32]

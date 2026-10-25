@@ -89,8 +89,14 @@ final class SimpleSKPCoreTests: XCTestCase {
             XCTAssertEqual(mesh.indices.count % 3, 0)
             XCTAssertLessThan(Int(mesh.indices.max() ?? 0), mesh.positions.count)
             if let uvs = mesh.uvs { XCTAssertEqual(uvs.count, mesh.positions.count) }
+            XCTAssertLessThan(mesh.layer, model.layers.count)
+            if let material = mesh.material { XCTAssertLessThan(material, model.materials.count) }
+        }
+        for child in ([model.root] + model.definitions).flatMap(\.children) {
+            XCTAssertLessThan(child.definition, model.definitions.count)
         }
         let size = model.size
+        XCTAssertLessThan(size.max(), 10, "positions must be in metres")
         XCTAssertGreaterThan(size.x + size.y + size.z, 0)
         XCTAssertTrue(size.x > 0 && size.y > 0 || size.y > 0 && size.z > 0 || size.x > 0 && size.z > 0)
         XCTAssertGreaterThan(model.stats.loadSeconds, 0)
@@ -105,4 +111,45 @@ final class SimpleSKPCoreTests: XCTestCase {
             guard case SKPError.cancelled = error else { return XCTFail("\(error)") }
         }
     }
+
+    /// Cancelled during the face conversion (after materials and textures were read): throws and leaves no texture folder.
+    func testCancellationDuringConversionCleansTextures() throws {
+        guard SketchUpAPI.locate() != nil else { throw XCTSkip("SketchUp not installed") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SimpleSKP")
+        // The fixture has no texture; the Arles file (35 textures) exercises the cleanup when present.
+        let arles = URL(fileURLWithPath: "/Users/adrien/Dropbox/AMCB-MM-Diff/TOUR 2018/0930-Arles/3D/MM_Arles_3D_V003.skp")
+        for url in [Self.fixture, arles] where FileManager.default.fileExists(atPath: url.path) {
+            let before = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+            let calls = CallCounter()
+            XCTAssertThrowsError(try SKPReader.load(url, isCancelled: { calls.next() > 1 })) { error in
+                guard case SKPError.cancelled = error else { return XCTFail("\(error)") }
+            }
+            XCTAssertEqual(calls.count, 2, "first check after open passes, the face-0 check cancels")
+            let after = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+            XCTAssertEqual(after.subtracting(before), [], url.lastPathComponent)
+        }
+    }
+
+    /// Faces without their own material carry UVs in metres (for a texture inherited from a group or instance).
+    func testNilMaterialMeshesHaveUVs() throws {
+        guard SketchUpAPI.locate() != nil else { throw XCTSkip("SketchUp not installed") }
+        var model = try SKPReader.load(Self.fixture)
+        var meshes = ([model.root] + model.definitions).flatMap(\.meshes).filter { $0.material == nil }
+        if meshes.isEmpty {
+            let arles = URL(fileURLWithPath: "/Users/adrien/Dropbox/AMCB-MM-Diff/TOUR 2018/0930-Arles/3D/MM_Arles_3D_V003.skp")
+            guard FileManager.default.fileExists(atPath: arles.path) else { throw XCTSkip("no nil-material mesh available") }
+            if let dir = model.textureDirectory { try? FileManager.default.removeItem(at: dir) }
+            model = try SKPReader.load(arles)
+            meshes = ([model.root] + model.definitions).flatMap(\.meshes).filter { $0.material == nil }
+        }
+        defer { if let dir = model.textureDirectory { try? FileManager.default.removeItem(at: dir) } }
+        XCTAssertFalse(meshes.isEmpty)
+        for mesh in meshes { XCTAssertEqual(mesh.uvs?.count, mesh.positions.count) }
+    }
+}
+
+final class CallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var count = 0
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; count += 1; return count }
 }

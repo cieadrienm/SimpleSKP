@@ -18,7 +18,7 @@ public enum SKPReader {
         isCancelled: @Sendable () -> Bool = { false }
     ) throws -> SKPModel {
         let fileInfo = try SKPFileInfo.read(url)
-        let f = try SketchUpAPI.shared.get()
+        let f = try SketchUpAPI.functions()
         lock.lock()
         defer { lock.unlock() }
 
@@ -39,11 +39,13 @@ public enum SKPReader {
             let c = Converter(f: f, progress: progress, isCancelled: isCancelled)
             c.readMaterials(model)
             c.readLayers(model)
-            var rootEntities: Ref = nil
-            let r = f.SUModelGetEntities(model, &rootEntities)
-            guard r == 0 else { throw SKPError.api(function: "SUModelGetEntities", code: r) }
             let root: SKPModel.Definition, box: Box
-            do { (root, box) = try c.convert(rootEntities, name: "", depth: 0) } catch {
+            do {
+                var rootEntities: Ref = nil
+                let r = f.SUModelGetEntities(model, &rootEntities)
+                guard r == 0 else { throw SKPError.api(function: "SUModelGetEntities", code: r) }
+                (root, box) = try c.convert(rootEntities, name: "", depth: 0)
+            } catch {
                 // No model will own the written textures: delete them now.
                 if let dir = c.textureDirectory { try? FileManager.default.removeItem(at: dir) }
                 throw error
@@ -207,6 +209,8 @@ public enum SKPReader {
                 if let l { layerIndex[l] = i }
                 layers.append(SKPModel.Layer(name: string(f.SULayerGetName, l), isVisible: bool(f.SULayerGetVisibility, l, default: true)))
             }
+            // Unknown layers map to index 0, so it must exist.
+            if layers.isEmpty { layers.append(SKPModel.Layer(name: "Layer0", isVisible: true)) }
         }
 
         func camera(_ cam: UnsafeMutableRawPointer) -> SKPModel.Camera? {
@@ -248,13 +252,18 @@ public enum SKPReader {
                     points = Array(repeating: SUPoint3D(), count: vertices); normals = points; stq = points
                 }
                 if indices.count < triangles * 3 { indices = Array(repeating: 0, count: triangles * 3) }
-                _ = f.SUMeshHelperGetVertices(helper, vertices, &points, &got)
-                _ = f.SUMeshHelperGetNormals(helper, vertices, &normals, &got)
-                _ = f.SUMeshHelperGetVertexIndices(helper, triangles * 3, &indices, &got)
+                guard f.SUMeshHelperGetVertices(helper, vertices, &points, &got) == 0, got == vertices,
+                      f.SUMeshHelperGetNormals(helper, vertices, &normals, &got) == 0, got == vertices,
+                      f.SUMeshHelperGetVertexIndices(helper, triangles * 3, &indices, &got) == 0, got == triangles * 3
+                else { continue }
 
                 let material = ref(f.SUFaceGetFrontMaterial, face).flatMap { materialIndex[$0] }
-                let hasUVs = material.map { textured[$0] } ?? false
-                if hasUVs { _ = f.SUMeshHelperGetFrontSTQCoords(helper, vertices, &stq, &got) }
+                // Own texture → STQ in repeats; no own material → STQ in inches (for an inherited texture), stored in metres.
+                let uvScale: Double? = material.map { textured[$0] ? 1 : nil } ?? inch
+                let hasUVs = uvScale != nil
+                if hasUVs {
+                    guard f.SUMeshHelperGetFrontSTQCoords(helper, vertices, &stq, &got) == 0, got == vertices else { continue }
+                }
                 let key = BatchKey(material: material, layer: layer(face))
                 let slot: Int
                 if let existing = batches[key] { slot = existing } else {
@@ -262,7 +271,7 @@ public enum SKPReader {
                     batches[key] = slot
                     def.meshes.append(SKPModel.Mesh(material: material, layer: key.layer, positions: [], normals: [], uvs: hasUVs ? [] : nil, indices: []))
                 }
-                append(into: &def.meshes[slot], vertices: vertices, triangles: triangles, uvs: hasUVs, box: &box)
+                append(into: &def.meshes[slot], vertices: vertices, triangles: triangles, uvScale: uvScale, box: &box)
                 stats.triangles += triangles
             }
 
@@ -288,19 +297,21 @@ public enum SKPReader {
 
             var matrix = [Double](repeating: 0, count: 16)
             for group in refs(f.SUEntitiesGetNumGroups, f.SUEntitiesGetGroups, entities) where !bool(f.SUDrawingElementGetHidden, group) {
-                guard let groupEntities = ref(f.SUGroupGetEntities, group) else { continue }
-                let (child, childBox) = try convert(groupEntities, name: string(f.SUGroupGetName, group), depth: depth + 1)
-                definitions.append(child)
-                _ = f.SUGroupGetTransform(group, &matrix)
+                guard let groupEntities = ref(f.SUGroupGetEntities, group), f.SUGroupGetTransform(group, &matrix) == 0 else { continue }
                 let t = transform(matrix)
+                let name = string(f.SUGroupGetName, group)
+                let (child, childBox) = try convert(groupEntities, name: name, depth: depth + 1)
+                definitions.append(child)
                 def.children.append(SKPModel.Instance(definition: definitions.count - 1, transform: t, layer: layer(group), isGroup: true,
-                                                      material: material(group), name: string(f.SUGroupGetName, group)))
+                                                      material: material(group), name: name))
                 box.add(childBox, t)
                 stats.instances += 1
             }
 
             for instance in refs(f.SUEntitiesGetNumInstances, f.SUEntitiesGetInstances, entities) where !bool(f.SUDrawingElementGetHidden, instance) {
-                guard let component = ref(f.SUComponentInstanceGetDefinition, instance) else { continue }
+                guard let component = ref(f.SUComponentInstanceGetDefinition, instance),
+                      f.SUComponentInstanceGetTransform(instance, &matrix) == 0 else { continue }
+                let t = transform(matrix)
                 let cached: (index: Int, box: Box)
                 if let hit = definitionCache[component] { cached = hit } else {
                     guard let componentEntities = ref(f.SUComponentDefinitionGetEntities, component) else { continue }
@@ -309,8 +320,6 @@ public enum SKPReader {
                     cached = (definitions.count - 1, childBox)
                     definitionCache[component] = cached
                 }
-                _ = f.SUComponentInstanceGetTransform(instance, &matrix)
-                let t = transform(matrix)
                 def.children.append(SKPModel.Instance(definition: cached.index, transform: t, layer: layer(instance), isGroup: false,
                                                       material: material(instance), name: string(f.SUComponentInstanceGetName, instance)))
                 box.add(cached.box, t)
@@ -320,7 +329,7 @@ public enum SKPReader {
         }
 
         /// Appends the current scratch buffers (one face) to a batch, rebasing indices.
-        func append(into mesh: inout SKPModel.Mesh, vertices: Int, triangles: Int, uvs: Bool, box: inout Box) {
+        func append(into mesh: inout SKPModel.Mesh, vertices: Int, triangles: Int, uvScale: Double?, box: inout Box) {
             let base = UInt32(mesh.positions.count)
             for i in 0..<vertices {
                 let p = metres(points[i])
@@ -328,9 +337,10 @@ public enum SKPReader {
                 box.add(p)
                 let n = normals[i]
                 mesh.normals.append(SIMD3(Float(n.x), Float(n.y), Float(n.z)))
-                if uvs {
+                if let k = uvScale {
                     let s = stq[i]
-                    mesh.uvs?.append(s.z != 0 ? SIMD2(Float(s.x / s.z), Float(s.y / s.z)) : SIMD2(Float(s.x), Float(s.y)))
+                    let q = s.z != 0 ? s.z : 1
+                    mesh.uvs?.append(SIMD2(Float(s.x / q * k), Float(s.y / q * k)))
                 }
             }
             for i in 0..<triangles * 3 { mesh.indices.append(base + UInt32(indices[i])) }

@@ -47,8 +47,15 @@ public enum SketchUpAPI {
         return [Location(frameworkURL: Bundle.main.bundleURL.appendingPathComponent(frameworkPath), appVersion: nil)] + hosts + unity
     }
 
-    /// The loaded C API, resolved and initialised once per process.
-    static let shared: Result<Functions, Error> = Result {
+    private static let loadLock = NSLock()
+    nonisolated(unsafe) private static var loaded: Functions?
+
+    /// The C API, resolved and initialised once per process. Only success is cached: a SketchUp installed (or a
+    /// framework dropped in) after a failed attempt is found on the next call.
+    static func functions() throws -> Functions {
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        if let loaded { return loaded }
         guard let location = locate() else { throw SKPError.sketchUpNotFound(searched: searchedURLs) }
         let framework = location.frameworkURL
         if !FileManager.default.fileExists(atPath: framework.appendingPathComponent("Versions/A/Libraries").path) {
@@ -59,6 +66,7 @@ public enum SketchUpAPI {
         }
         let functions = try Functions(handle: handle)
         functions.SUInitialize()
+        loaded = functions
         return functions
     }
 
