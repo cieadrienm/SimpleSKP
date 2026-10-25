@@ -23,19 +23,20 @@ versions SketchUp 8 à 2023).
 
 ## Décisions prises pour lui (voir DECISIONS.md)
 
-- **D1 — Le fichier est lu par le framework de SketchUp lui-même**, `SketchUpAPI.framework` (API C, version 11.0),
-  chargé dynamiquement (`dlopen`) depuis `/Applications/SketchUp.app/Contents/Frameworks`. Le format `.skp` est
-  propriétaire et non documenté ; le réécrire est un travail de mois et casse à chaque version. Vérifié le
-  2026-10-25 par un essai : le framework se charge en 116 ms une fois ses dylibs sœurs (`libCommon*.dylib`)
-  préchargées par chemin absolu (son `@rpath` suppose l'exécutable de SketchUp) ; il lit le fichier de 97 Mo en
-  2,9 s, celui de 45 Mo en 1,9 s, un petit en 0 ms. Chemins cherchés dans l'ordre : `Contents/Frameworks` de
-  SimpleSKP.app (si Adrien y dépose un jour le SDK officiel), puis chaque `/Applications/SketchUp*.app` et
-  `~/Applications/SketchUp*.app` (le plus récent d'abord ; là, les dylibs sœurs se préchargent), puis le
-  framework autonome livré dans Unity (`/Applications/Unity/Hub/Editor/*/Unity.app/Contents/Frameworks/
-  SketchUpAPI.framework`, dont le dossier `Libraries` contient ses dylibs). Les en-têtes officiels du SDK sont
-  lisibles dans cette copie Unity (`Versions/A/Headers`) : les prototypes y sont transcrits, les fichiers ne
-  sont pas copiés (licence Trimble). Sans SketchUp installé, l'app montre la vignette PNG incluse dans le fichier
-  et explique où trouver SketchUp. Aucun code Trimble n'est redistribué.
+- **D1 — Le fichier est lu par le framework du SDK C de SketchUp, embarqué dans l'app** (`SketchUpAPI.framework`, API C,
+  version 11.0), chargé dynamiquement (`dlopen`). Le format `.skp` est propriétaire et non documenté ; le réécrire est un travail
+  de mois et casse à chaque version. **Adrien, 2026-10-25 : l'app doit fonctionner sans SketchUp installé, c'est son intérêt** ;
+  le framework est donc livré dans `SimpleSKP.app/Contents/Frameworks` par `Scripts/bundle.sh` (aminci à l'architecture de la
+  machine, sans en-têtes, ≈ 11 Mo), pris dans `SKETCHUP_SDK`, sinon `Vendor/SketchUpAPI.framework` (SDK officiel téléchargé chez
+  Trimble, ignoré par git), sinon la copie du même SDK livrée avec Unity sur ce Mac (voir `.project-map/decisions.md` d2).
+  Vérifié le 2026-10-25 par un essai : la copie autonome (dossier `Versions/A/Libraries` avec ses dylibs `libCommon*`) se charge
+  en 48 ms et lit le fichier de 97 Mo en 3,0 s, celui de 45 Mo en 1,9 s, un petit en 5 ms. Chemins cherchés par l'app dans l'ordre :
+  la variable `SIMPLESKP_SKETCHUP_SDK` (tests, développement), `Contents/Frameworks` de SimpleSKP.app, puis, pour les exécutions
+  hors bundle seulement, chaque `/Applications/SketchUp*.app` et `/Applications/SketchUp*/SketchUp*.app` (et sous `~/Applications`,
+  le plus récent d'abord ; là, les dylibs sœurs se préchargent par chemin absolu, leur `@rpath` supposant l'exécutable de SketchUp),
+  puis le framework livré dans Unity. Les en-têtes officiels du SDK sont lisibles dans la copie Unity (`Versions/A/Headers`) : les
+  prototypes y sont transcrits, les fichiers ne sont pas copiés. Si le framework manque (bundle cassé), l'app montre la vignette PNG
+  incluse dans le fichier et le dit.
 - **D2 — SceneKit pour l'affichage.** Caméra, lumière, matériaux, tests de collision et contrôleur d'orbite
   fournis par le système ; des dizaines de milliers de lignes évitées par rapport à Metal nu. Les faces sont
   triangulées par `SUMeshHelper`, regroupées par (matériau, calque) en une seule géométrie par lot, les
