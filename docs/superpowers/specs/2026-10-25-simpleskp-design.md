@@ -88,9 +88,10 @@ versions SketchUp 8 à 2023).
   minimaux pour qu'AppKit parle français. `SimpleUpdater` repris de SimplePJ (dépôt `cieadrienm/SimpleSKP`).
 - **D10 — Identifiant `net.cieadrienm.simpleskp`**, version `1.0.0` dans `Scripts/bundle.sh` seulement, rôle
   `Viewer` sur le type `com.sketchup.skp` (déclaration importée, extension `skp`, rang `Alternate` : SketchUp
-  reste propriétaire). Signature Developer ID avec l'entitlement `com.apple.security.cs.disable-library-validation`
-  (sans lui, le runtime durci refuse de charger un framework signé par Trimble) ; signature Apple Development
-  sans runtime durci sinon, comme les sœurs.
+  reste propriétaire). Le framework embarqué est re-signé avec l'identité de SimpleSKP par
+  `Scripts/bundle.sh`, donc la validation de bibliothèque du runtime durci (Developer ID) passe sans entitlement ; l'entitlement
+  `com.apple.security.cs.disable-library-validation` est gardé (inoffensif) pour le cas d'un framework laissé signé par Trimble.
+  Signature Apple Development sans runtime durci sinon, comme les sœurs.
 - **D11 — Vérifier sans écran** : `--snapshot sortie.png [fichier.skp]` photographie la fenêtre avec le modèle
   chargé (la vue SceneKit se capture par `SCNView.snapshot()`, `cacheDisplay` ne voyant pas Metal) ;
   `--self-test [fichier.skp]` vérifie l'en-tête, la présence du framework, la construction de scène sur un modèle
