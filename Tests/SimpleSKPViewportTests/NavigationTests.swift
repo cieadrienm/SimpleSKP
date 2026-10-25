@@ -282,4 +282,40 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(view.cursorHides, 0)
         XCTAssertEqual(changes, [true, false, true, false, true, false])
     }
+
+    // MARK: Polish
+
+    /// A pick goes through edges to the face. SceneKit hit tests a `.line` element's indices as triangles: three
+    /// segments above the face make a phantom triangle over the view centre, closer than the face.
+    func testHitIgnoresEdgesInFrontOfFaces() throws {
+        let quad = SKPModel.Mesh(material: nil, layer: 0, positions: [SIMD3(-5, -5, 0), SIMD3(5, -5, 0), SIMD3(5, 5, 0), SIMD3(-5, 5, 0)],
+                                 normals: Array(repeating: SIMD3(0, 0, 1), count: 4), indices: [0, 1, 2, 0, 2, 3])
+        let edge = SKPModel.EdgeSet(layer: 0, positions: [SIMD3(-4, -4, 0.5), SIMD3(4, -4, 0.5), SIMD3(0, 4, 0.5),
+                                                          SIMD3(1, 4, 0.5), SIMD3(2, 4, 0.5), SIMD3(3, 4, 0.5)])
+        let model = SKPModel(root: SKPModel.Definition(name: "", meshes: [quad], edges: [edge]), layers: [SKPModel.Layer(name: "Layer0", isVisible: true)],
+                             boundsMin: SIMD3(-5, -5, 0), boundsMax: SIMD3(5, 5, 0.5),
+                             fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/x.skp"), fileSize: 0, version: nil, versionLabel: nil, thumbnailPNG: nil))
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view.present(ViewportScene(model: model))
+        view.apply(camera: SKPModel.Camera(position: SIMD3(0, 0, 10), target: .zero, up: SIMD3(0, 1, 0)), animated: false)
+        let hit = try XCTUnwrap(view.hit(CGPoint(x: 400, y: 300)))
+        XCTAssertEqual(hit.z, 0, accuracy: 1e-3, "the face, not the edge above it")
+    }
+
+    /// SSAO follows every projection change (it is wrong in parallel).
+    func testAmbientOcclusionFollowsProjection() {
+        let (view, scene) = presented()
+        let camera = view.cameraNode.camera!
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 1)
+        view.isPerspective = false
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0)
+        view.isPerspective = true
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 1)
+        var parallel = scene.model.scenes[0].camera!
+        parallel.isPerspective = false
+        view.apply(camera: parallel, animated: true)
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 0, "a scene glide to a parallel view")
+        view.apply(camera: scene.model.scenes[0].camera!, animated: false)
+        XCTAssertEqual(camera.screenSpaceAmbientOcclusionIntensity, 1)
+    }
 }

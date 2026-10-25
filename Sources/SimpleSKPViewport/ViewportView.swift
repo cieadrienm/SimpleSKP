@@ -110,6 +110,7 @@ public final class ViewportView: SCNView {
         camera.fieldOfView = CGFloat(model.fovDegrees) // kept for a later switch to perspective
         let scale = model.isPerspective ? nil : Double(model.orthoHeight / 2)
         camera.usesOrthographicProjection = !model.isPerspective // a projection change cannot be tweened: switch, then glide
+        Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera)
         if animated { rig.glide(to: CameraRig.pose(model), orthographicScale: scale) } else { rig.set(CameraRig.pose(model), orthographicScale: scale) }
         isPerspective = model.isPerspective
     }
@@ -128,6 +129,7 @@ public final class ViewportView: SCNView {
                 camera.orthographicScale = Double(rig.pose.distance * tanHalf)
             }
             camera.usesOrthographicProjection = !isPerspective
+            Rendering.setAmbientOcclusion(ambientOcclusionEnabled, on: camera)
             setNeedsDisplay(bounds)
         }
     }
@@ -414,10 +416,10 @@ public final class ViewportView: SCNView {
         return simd_normalize(pose.forward + pose.right * x + pose.up * y)
     }
 
-    /// Nearest model point under `point`, model space (results are sorted by distance). Back faces count: SketchUp
-    /// rooms are often single-sided walls facing outwards. A segment test on the scene graph: `SCNView.hitTest` finds
-    /// nothing before a first frame.
-    private func hit(_ point: CGPoint) -> SIMD3<Float>? {
+    /// Nearest face point under `point`, model space. Back faces count: SketchUp rooms are often single-sided walls facing
+    /// outwards. Faces only (category 1): edges, hit with a tolerance, would win the closest-only search and lie off the
+    /// surface. A segment test on the scene graph: `SCNView.hitTest` finds nothing before a first frame.
+    func hit(_ point: CGPoint) -> SIMD3<Float>? {
         guard let root = viewportScene?.modelRoot, let bounds = viewportScene?.visibleBounds else { return nil }
         let pose = rig.pose, reach = simd_distance(pose.position, (bounds.min + bounds.max) / 2) + simd_distance(bounds.min, bounds.max)
         var from = pose.position, direction = ray(through: point)
@@ -427,9 +429,9 @@ public final class ViewportView: SCNView {
             direction = pose.forward
         }
         let to = from + direction * reach
-        return root.hitTestWithSegment(from: SCNVector3(from), to: SCNVector3(to), options: [SCNHitTestOption.backFaceCulling.rawValue: false])
-            .first { $0.node.geometry?.elements.first?.primitiveType != .line } // edges hit with a tolerance, off the surface
-            .map { worldToModel(SIMD3<Float>($0.worldCoordinates)) }
+        return root.hitTestWithSegment(from: SCNVector3(from), to: SCNVector3(to),
+                                       options: [SCNHitTestOption.backFaceCulling.rawValue: false, SCNHitTestOption.categoryBitMask.rawValue: 1])
+            .first.map { worldToModel(SIMD3<Float>($0.worldCoordinates)) }
     }
 
     private func modelToWorld(_ point: SIMD3<Float>) -> SIMD3<Float> {

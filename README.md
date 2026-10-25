@@ -92,12 +92,11 @@ SimpleSKP --lang fr|en                         # langue de l'interface
 | `04-Monticule.skp` (157 Ko) → 3D visible | < 0,5 s | lecture 0,18 s |
 | `MM_Arles_3D_V003.skp` (45 Mo, 35 textures) → 3D | < 4 s (lecture API 1,9 s) | lecture 2,3 s + scène 0,13 s ; lancement → capture 3,2 s |
 | `B-SEINE MUSICALE…V40.skp` (97 Mo, 14 758 composants, 641 572 arêtes, 151 calques) → 3D | < 7 s (lecture API 2,9 s) | lecture 3,7 s + scène 0,6 s (2,95 s avant les calques masqués construits à la demande) ; lancement → capture 6,0 s |
-| Orbite sur la salle | 60 i/s sur Apple Silicon | M2 Max, 2760 × 1640, MSAA ×4, `SCNRenderer` : caméra du fichier (dessus, parallèle) 54 i/s ; iso, calques du fichier (49 700 nœuds) 13 i/s ; scène « VUE DESSUS COUPE » (82 500 nœuds, 19,6 M triangles, 9 M segments) 8–9 i/s ; Arles > 400 i/s |
-| Mémoire | ≤ 3 × la taille du fichier | pic pendant la lecture par le framework SketchUp : 0,95 Go (salle), 1,1 Go (Arles, textures décodées par SketchUp) ; empreinte une fois la scène affichée ≈ 0,7 Go pour la salle |
+| Orbite sur la salle | 60 i/s sur Apple Silicon | M2 Max, 2760 × 1640, MSAA ×4, `SCNRenderer`, instances fusionnées, rendu ombré (ombres + occlusion) : caméra du fichier 142 i/s ; iso 118 i/s (17 avant la fusion) ; « VUE DESSUS COUPE » 53 i/s (10 avant, 128 sans ombrage) ; « FOH » 207 i/s ; Arles > 400 i/s ; scène construite en 0,15 s |
+| Mémoire | ≤ 3 × la taille du fichier | salle : empreinte 1,2 Go une fois la vue du fichier affichée, 1,5 Go en iso, 2,5 Go après « VUE DESSUS COUPE » (calques en plus) ; `--snapshot` de la salle : pic d'empreinte 1,16 Go, RSS max 1,43 Go ; Arles : pic 0,47 Go |
 | Binaire | ≈ 3 Mo | 1,4 Mo en release, 2,7 Mo empaqueté avec l'icône ; 13 Mo avec le SDK SketchUp (11 Mo, aminci à arm64, sans en-têtes) |
 
 Mesuré le 25 octobre 2026 sur Apple Silicon, build release, cache disque chaud (`.build/release/SimpleSKP --snapshot` et `--self-test`, deux passes identiques).
-La salle reste sous les 60 i/s dès que beaucoup de calques sont visibles : une passe de fusion des instances (moins de nœuds, moins d'appels de dessin) est le prochain jalon.
 
 ## Crédits & Licence
 

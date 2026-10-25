@@ -241,6 +241,20 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertEqual(bounds.max, model.boundsMax, "nothing shown: the model's bounds")
     }
 
+    /// Edges alone on a layer set count in the bounds only while edges are shown.
+    func testVisibleBoundsFollowEdges() {
+        var model = SyntheticModel.cube()
+        model.root.edges.append(SKPModel.EdgeSet(layer: 0, positions: [SIMD3(0, 0, 0), SIMD3(0, 0, 9)]))
+        model.root.children[0].layer = 1 // only the root cube and its edges on Layer0
+        model.layers[1].isVisible = false
+        let scene = ViewportScene(model: model)
+        XCTAssertEqual(scene.visibleBounds.max.z, 9, accuracy: 1e-5)
+        scene.showsEdges = false
+        XCTAssertEqual(scene.visibleBounds.max.z, 1, accuracy: 1e-5, "the edge-only height left with the edges")
+        scene.showsEdges = true
+        XCTAssertEqual(scene.visibleBounds.max.z, 9, accuracy: 1e-5)
+    }
+
     func testBuildsOffMainThread() async {
         let model = SyntheticModel.cube()
         let count = await Task.detached { ViewportScene(model: model).layerSets[[0]]?.node?.childNodes.count }.value

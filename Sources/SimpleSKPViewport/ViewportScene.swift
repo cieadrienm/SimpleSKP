@@ -1,4 +1,5 @@
 import SceneKit
+import Metal
 import SimpleSKPCore
 
 /// Builds the SceneKit scene for a model. May be constructed off the main thread, right after `SKPReader.load`.
@@ -128,7 +129,7 @@ public final class ViewportScene {
     }
 
     public var showsEdges: Bool = true {
-        didSet { for node in edgeNodes { node.isHidden = !showsEdges } }
+        didSet { for node in edgeNodes { node.isHidden = !showsEdges }; cachedVisibleBounds = nil }
     }
 
     /// Bounds of what is shown, in model space (metres, Z up): hidden layer sets are left out.
@@ -138,7 +139,7 @@ public final class ViewportScene {
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
         for set in layerSets.values {
             guard let node = set.node, !node.isHidden else { continue }
-            for child in node.childNodes where child.geometry != nil { // merged geometries are in model space
+            for child in node.childNodes where child.geometry != nil && !child.isHidden { // merged geometries are in model space
                 let (a, b) = child.geometry!.boundingBox
                 lo = simd_min(lo, SIMD3(a)); hi = simd_max(hi, SIMD3(b))
             }
@@ -249,13 +250,13 @@ public final class ViewportScene {
 
         if ProcessInfo.processInfo.environment["SIMPLESKP_TIMING"] == "1" {
             let faces = chunks.filter { $0.material != nil }, edges = chunks.filter { $0.material == nil }
-            let bytes = faces.reduce(0) { $0 + $1.vertices * ($1.textured ? 32 : 24) + $1.indices * 4 } + edges.reduce(0) { $0 + $1.vertices * 16 }
+            let bytes = faces.reduce(0) { $0 + $1.vertices * ($1.textured ? 32 : 24) + $1.indices * 4 } + edges.reduce(0) { $0 + $1.vertices * 12 }
             let largest = Dictionary(grouping: faces) { ObjectIdentifier($0.set) }.values.map { $0.reduce(0) { $0 + $1.indices / 3 } }.max() ?? 0
             print(String(format: "ViewportScene: building %d layer sets, %d chunks, %.2f M triangles (largest set %.2f M), %.2f M segments, %.0f MB",
                          sets.count, chunks.count, Double(faces.reduce(0) { $0 + $1.indices / 3 }) / 1e6, Double(largest) / 1e6,
                          Double(edges.reduce(0) { $0 + $1.vertices / 2 }) / 1e6, Double(bytes) / 1_048_576))
         }
-        var merged = [Merged](repeating: Merged(), count: chunks.count)
+        var merged = [Merged?](repeating: nil, count: chunks.count)
         merged.withUnsafeMutableBufferPointer { out in
             let out = out // the closure below may not capture an inout parameter
             DispatchQueue.concurrentPerform(iterations: chunks.count) { i in
@@ -270,7 +271,7 @@ public final class ViewportScene {
             modelRoot.addChildNode(node)
         }
         for (chunk, data) in zip(chunks, merged) {
-            let child = SCNNode(geometry: chunk.material == nil ? edgeGeometry(data.positions, data.indices, count: chunk.vertices) : faceGeometry(chunk, data))
+            let child = SCNNode(geometry: geometry(chunk, data!))
             if chunk.material == nil {
                 child.categoryBitMask = Self.edgeCategory
                 child.castsShadow = false
@@ -296,97 +297,95 @@ public final class ViewportScene {
         return spread(cell.x) | spread(cell.y) << 1 | spread(cell.z) << 2
     }
 
-    /// A merged geometry's buffers, one per source: SceneKit copies a shared interleaved buffer once per source.
+    /// Merged buffers are Metal buffers in shared memory, handed to SceneKit as they are: `Data` sources were kept by
+    /// SceneKit and copied once more to the GPU (2 × 750 MB on the Seine file). Hit tests still read these buffers.
+    /// shortcut: the system default GPU, the one SCNView uses; a Mac with several GPUs rendering elsewhere would copy.
+    nonisolated(unsafe) static let device = MTLCreateSystemDefaultDevice()!
+
+    /// A merged geometry's buffers, one per source (nil: absent); face indices stay `Data`.
     private struct Merged {
-        var positions = Data(), normals = Data(), uvs = Data(), indices = Data()
+        var positions: MTLBuffer, normals: MTLBuffer?, uvs: MTLBuffer?, indices: Data?
     }
 
-    /// Positions, normals (and UVs when textured) in model space, packed `Float`s; 32-bit indices rebased per piece.
+    private static func buffer(_ bytes: Int) -> MTLBuffer {
+        device.makeBuffer(length: max(bytes, 4), options: .storageModeShared)!
+    }
+
+    /// Positions, normals (and UVs when textured) in model space, packed `Float`s, one buffer per source; 32-bit indices
+    /// rebased per piece.
     private func mergeFaces(_ chunk: Chunk) -> Merged {
-        var out = Merged(positions: Data(count: chunk.vertices * 12), normals: Data(count: chunk.vertices * 12),
-                         uvs: Data(count: chunk.textured ? chunk.vertices * 8 : 0), indices: Data(count: chunk.indices * 4))
-        out.positions.withUnsafeMutableBytes { pb in
-            out.normals.withUnsafeMutableBytes { nb in
-                out.uvs.withUnsafeMutableBytes { ub in
-                    out.indices.withUnsafeMutableBytes { ib in
-                        let pv = pb.bindMemory(to: Float.self).baseAddress!, nv = nb.bindMemory(to: Float.self).baseAddress!
-                        let uv = ub.bindMemory(to: SIMD2<Float>.self).baseAddress, ix = ib.bindMemory(to: UInt32.self).baseAddress!
-                        var vo = 0, io = 0, base: UInt32 = 0
-                        for piece in chunk.pieces {
-                            let placement = placements[piece.placement]
-                            let mesh = definition(placement.definition).meshes[piece.item]
-                            let m = placement.transform
-                            let linear = simd_float3x3(SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z), SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
-                                                       SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
-                            let normalMatrix = linear.inverse.transpose // what SceneKit applies per node
-                            // A mirrored placement reverses the winding: swap two indices so it agrees with the transformed normal.
-                            let (b, c) = simd_determinant(linear) < 0 ? (2, 1) : (1, 2)
-                            mesh.positions.withUnsafeBufferPointer { positions in
-                                mesh.normals.withUnsafeBufferPointer { normals in
-                                    for i in 0..<positions.count {
-                                        let p = m * SIMD4(positions[i], 1), n = simd_normalize(normalMatrix * normals[i])
-                                        let o = (vo + i) * 3
-                                        pv[o] = p.x; pv[o + 1] = p.y; pv[o + 2] = p.z
-                                        nv[o] = n.x; nv[o + 1] = n.y; nv[o + 2] = n.z
-                                    }
-                                }
-                            }
-                            if chunk.textured, let uv, let uvs = mesh.uvs { for (i, t) in uvs.enumerated() { uv[vo + i] = t } }
-                            mesh.indices.withUnsafeBufferPointer { idx in
-                                var t = 0
-                                while t < idx.count {
-                                    ix[io] = base + idx[t]; ix[io + 1] = base + idx[t + b]; ix[io + 2] = base + idx[t + c]
-                                    io += 3; t += 3
-                                }
-                            }
-                            vo += mesh.positions.count
-                            base += UInt32(mesh.positions.count)
+        let positions = Self.buffer(chunk.vertices * 12), normals = Self.buffer(chunk.vertices * 12)
+        var indices = Data(count: chunk.indices * 4) // observed: an element made from a buffer gets no hit test results
+        let uvs = chunk.textured ? Self.buffer(chunk.vertices * 8) : nil
+        let pv = positions.contents().bindMemory(to: Float.self, capacity: chunk.vertices * 3)
+        let nv = normals.contents().bindMemory(to: Float.self, capacity: chunk.vertices * 3)
+        let uv = uvs?.contents().bindMemory(to: SIMD2<Float>.self, capacity: chunk.vertices)
+        var vo = 0, io = 0, base: UInt32 = 0
+        indices.withUnsafeMutableBytes { ib in
+            let ix = ib.bindMemory(to: UInt32.self).baseAddress!
+            for piece in chunk.pieces {
+                let placement = placements[piece.placement]
+                let mesh = definition(placement.definition).meshes[piece.item]
+                let m = placement.transform
+                let linear = simd_float3x3(SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z), SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                           SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+                let normalMatrix = linear.inverse.transpose // what SceneKit applies per node
+                // A mirrored placement reverses the winding: swap two indices so it agrees with the transformed normal.
+                let (b, c) = simd_determinant(linear) < 0 ? (2, 1) : (1, 2)
+                mesh.positions.withUnsafeBufferPointer { positions in
+                    mesh.normals.withUnsafeBufferPointer { normals in
+                        for i in 0..<positions.count {
+                            let p = m * SIMD4(positions[i], 1), n = simd_normalize(normalMatrix * normals[i])
+                            let o = (vo + i) * 3
+                            pv[o] = p.x; pv[o + 1] = p.y; pv[o + 2] = p.z
+                            nv[o] = n.x; nv[o + 1] = n.y; nv[o + 2] = n.z
                         }
                     }
                 }
-            }
-        }
-        return out
-    }
-
-    /// Packed segment end points in model space, with explicit indices (implicit ones were not re-tested after an unrelated crash).
-    private func mergeEdges(_ chunk: Chunk) -> Merged {
-        var out = Merged(positions: Data(count: chunk.vertices * 12))
-        out.indices = [UInt32](0..<UInt32(chunk.vertices)).withUnsafeBytes { Data($0) }
-        out.positions.withUnsafeMutableBytes { vb in
-            let v = vb.bindMemory(to: Float.self).baseAddress!
-            var vo = 0
-            for piece in chunk.pieces {
-                let placement = placements[piece.placement], m = placement.transform
-                for point in definition(placement.definition).edges[piece.item].positions {
-                    let p = m * SIMD4(point, 1)
-                    v[vo] = p.x; v[vo + 1] = p.y; v[vo + 2] = p.z
-                    vo += 3
+                if let uv, let meshUVs = mesh.uvs { for (i, t) in meshUVs.enumerated() { uv[vo + i] = t } }
+                mesh.indices.withUnsafeBufferPointer { idx in
+                    var t = 0
+                    while t < idx.count {
+                        ix[io] = base + idx[t]; ix[io + 1] = base + idx[t + b]; ix[io + 2] = base + idx[t + c]
+                        io += 3; t += 3
+                    }
                 }
+                vo += mesh.positions.count
+                base += UInt32(mesh.positions.count)
             }
         }
-        return out
+        return Merged(positions: positions, normals: normals, uvs: uvs, indices: indices)
     }
 
-    private func faceGeometry(_ chunk: Chunk, _ merged: Merged) -> SCNGeometry {
-        func source(_ data: Data, _ semantic: SCNGeometrySource.Semantic, components: Int) -> SCNGeometrySource {
-            SCNGeometrySource(data: data, semantic: semantic, vectorCount: chunk.vertices, usesFloatComponents: true,
-                              componentsPerVector: components, bytesPerComponent: 4, dataOffset: 0, dataStride: components * 4)
+    /// Packed segment end points in model space; implicit indices (consecutive pairs).
+    private func mergeEdges(_ chunk: Chunk) -> Merged {
+        let positions = Self.buffer(chunk.vertices * 12)
+        let v = positions.contents().bindMemory(to: Float.self, capacity: chunk.vertices * 3)
+        var vo = 0
+        for piece in chunk.pieces {
+            let placement = placements[piece.placement], m = placement.transform
+            for point in definition(placement.definition).edges[piece.item].positions {
+                let p = m * SIMD4(point, 1)
+                v[vo] = p.x; v[vo + 1] = p.y; v[vo + 2] = p.z
+                vo += 3
+            }
         }
-        var sources = [source(merged.positions, .vertex, components: 3), source(merged.normals, .normal, components: 3)]
-        if chunk.textured { sources.append(source(merged.uvs, .texcoord, components: 2)) }
-        let element = SCNGeometryElement(data: merged.indices, primitiveType: .triangles, primitiveCount: chunk.indices / 3, bytesPerIndex: 4)
-        let geometry = SCNGeometry(sources: sources, elements: [element])
-        geometry.materials = [chunk.material!]
-        return geometry
+        return Merged(positions: positions, normals: nil, uvs: nil, indices: nil)
     }
 
-    private func edgeGeometry(_ vertices: Data, _ indices: Data, count: Int) -> SCNGeometry {
-        let source = SCNGeometrySource(data: vertices, semantic: .vertex, vectorCount: count, usesFloatComponents: true,
-                                       componentsPerVector: 3, bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
-        let element = SCNGeometryElement(data: indices, primitiveType: .line, primitiveCount: count / 2, bytesPerIndex: 4)
-        let geometry = SCNGeometry(sources: [source], elements: [element])
-        geometry.materials = [edgeMaterial]
+    /// Serial side of the build: SceneKit objects are not made from the merge threads. Edges (no material) use implicit indices.
+    private func geometry(_ chunk: Chunk, _ merged: Merged) -> SCNGeometry {
+        func source(_ buffer: MTLBuffer, _ semantic: SCNGeometrySource.Semantic, _ format: MTLVertexFormat, stride: Int) -> SCNGeometrySource {
+            SCNGeometrySource(buffer: buffer, vertexFormat: format, semantic: semantic, vertexCount: chunk.vertices, dataOffset: 0, dataStride: stride)
+        }
+        var sources = [source(merged.positions, .vertex, .float3, stride: 12)]
+        if let normals = merged.normals { sources.append(source(normals, .normal, .float3, stride: 12)) }
+        if let uvs = merged.uvs { sources.append(source(uvs, .texcoord, .float2, stride: 8)) }
+        let element = chunk.material == nil
+            ? SCNGeometryElement(data: nil, primitiveType: .line, primitiveCount: chunk.vertices / 2, bytesPerIndex: 4)
+            : SCNGeometryElement(data: merged.indices, primitiveType: .triangles, primitiveCount: chunk.indices / 3, bytesPerIndex: 4)
+        let geometry = SCNGeometry(sources: sources, elements: [element])
+        geometry.materials = [chunk.material ?? edgeMaterial]
         return geometry
     }
 

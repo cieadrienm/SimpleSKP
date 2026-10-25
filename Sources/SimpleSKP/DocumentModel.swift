@@ -16,9 +16,14 @@ final class DocumentModel {
     }
 
     var info: SKPFileInfo? {
-        didSet { thumbnail = info?.thumbnailPNG.flatMap(NSImage.init(data:)) }
+        didSet {
+            thumbnail = info?.thumbnailPNG.flatMap(NSImage.init(data:))
+            sketchUpApp = info.flatMap { Self.sketchUpApp(opening: $0.url) } // once: menu validation and banners read it often
+        }
     }
     private(set) var thumbnail: NSImage?
+    /// The installed SketchUp that opens this file (nil without one).
+    private(set) var sketchUpApp: URL?
     var state: State = .loading(nil)
     /// Set with the scene, in `present` (`setModel` alone in the tests).
     private(set) var skp: SKPModel?
@@ -163,10 +168,9 @@ final class DocumentModel {
         pasteboard.setData(png, forType: .png)
     }
 
-    /// The installed SketchUp that opens this file (nil without one): the one the framework came from when it is a
-    /// SketchUp.app, else any SketchUp registered for `.skp` (the default app may be SimpleSKP itself).
-    var sketchUpApp: URL? {
-        guard let url = info?.url else { return nil }
+    /// The one the framework came from when it is a SketchUp.app, else any SketchUp registered for `.skp` (the default
+    /// app may be SimpleSKP itself).
+    private static func sketchUpApp(opening url: URL) -> URL? {
         let host = SketchUpAPI.locate()?.frameworkURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         if let host, host.pathExtension == "app", host.lastPathComponent.hasPrefix("SketchUp") { return host }
         return NSWorkspace.shared.urlsForApplications(toOpen: url).first { $0.lastPathComponent.hasPrefix("SketchUp") }

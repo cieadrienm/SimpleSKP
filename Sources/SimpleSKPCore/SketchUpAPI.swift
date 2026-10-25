@@ -1,7 +1,8 @@
 import Foundation
 
 /// Locates and dynamically loads the SketchUp SDK's `SketchUpAPI.framework` (C API). Search order:
-/// 0. `$SIMPLESKP_SKETCHUP_SDK` (a path to a `.framework`: tests, development),
+/// 0. `$SIMPLESKP_SKETCHUP_SDK` (a path to a `.framework`: tests, development; ignored by the bundled app, which must not
+///    load code an environment variable points at),
 /// 1. `SimpleSKP.app/Contents/Frameworks/SketchUpAPI.framework` (shipped in the app by `Scripts/bundle.sh`, D1),
 /// then, unless `$SIMPLESKP_BUNDLED_SDK_ONLY` is set (proof that the app needs no SketchUp):
 /// 2. `/Applications/SketchUp*.app/Contents/Frameworks/SketchUpAPI.framework` and `~/Applications/…`, newest first
@@ -30,11 +31,14 @@ public enum SketchUpAPI {
 
     static let frameworkPath = "Contents/Frameworks/SketchUpAPI.framework"
 
+    /// Running as SimpleSKP.app (not `swift run`, not the tests).
+    static var isBundledApp: Bool { Bundle.main.bundleIdentifier == "net.cieadrienm.simpleskp" }
+
     static func candidates() -> [Location] {
         // getenv, not ProcessInfo: the tests change the variables with setenv.
         func env(_ name: String) -> String? { getenv(name).map { String(cString: $0) } }
         var found: [Location] = []
-        if let sdk = env("SIMPLESKP_SKETCHUP_SDK") { found.append(Location(frameworkURL: URL(fileURLWithPath: sdk), appVersion: nil)) }
+        if let sdk = env("SIMPLESKP_SKETCHUP_SDK"), !isBundledApp { found.append(Location(frameworkURL: URL(fileURLWithPath: sdk), appVersion: nil)) }
         found.append(Location(frameworkURL: Bundle.main.bundleURL.appendingPathComponent(frameworkPath), appVersion: nil, isBundled: true))
         if env("SIMPLESKP_BUNDLED_SDK_ONLY") != nil { return found }
 

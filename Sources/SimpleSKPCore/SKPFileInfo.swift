@@ -31,7 +31,7 @@ public struct SKPFileInfo: Sendable {
     /// Parses an in-memory header (for tests and `read`).
     public static func parse(header: Data, url: URL, fileSize: Int) -> SKPFileInfo {
         let version = parseVersion(header)
-        return SKPFileInfo(url: url, fileSize: fileSize, version: version, versionLabel: version.map(label), thumbnailPNG: thumbnail(header))
+        return SKPFileInfo(url: url, fileSize: fileSize, version: version, versionLabel: version.flatMap(label), thumbnailPNG: thumbnail(header))
     }
 
     static func utf16(_ s: String) -> Data { s.data(using: .utf16LittleEndian)! }
@@ -46,8 +46,9 @@ public struct SKPFileInfo: Sendable {
         return version?.isEmpty == false ? version : nil
     }
 
-    static func label(_ version: String) -> String {
-        let major = Int(version.prefix { $0.isNumber }) ?? 0
+    /// nil when the version does not start with a number.
+    static func label(_ version: String) -> String? {
+        guard let major = Int(version.prefix { $0.isASCII && $0.isNumber }) else { return nil }
         switch major {
         case 13...99: return "SketchUp 20\(String(format: "%02d", major))"
         default: return "SketchUp \(major)"

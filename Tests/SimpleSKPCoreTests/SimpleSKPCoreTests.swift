@@ -34,6 +34,7 @@ final class SimpleSKPCoreTests: XCTestCase {
         XCTAssertEqual(SKPFileInfo.label("8.0.3161"), "SketchUp 8")
         XCTAssertEqual(SKPFileInfo.label("13.0.4812"), "SketchUp 2013")
         XCTAssertEqual(SKPFileInfo.label("23.0.396"), "SketchUp 2023")
+        XCTAssertNil(SKPFileInfo.label("beta.1"), "no numeric major: no label, not « SketchUp 0 »")
     }
 
     /// A scene that does not save layer visibility maps to nil (layers left as they are), not to « all shown ».
@@ -94,16 +95,20 @@ final class SimpleSKPCoreTests: XCTestCase {
     }
 
     /// Runs `body` with environment variables set (nil: unset), then restores them.
-    private func withEnvironment(_ values: [String: String?], _ body: () throws -> Void) rethrows {
+    private func withEnvironment<T>(_ values: [String: String?], _ body: () throws -> T) rethrows -> T {
         let saved = values.keys.map { ($0, getenv($0).map { String(cString: $0) }) }
         defer { for (name, value) in saved { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
         for (name, value) in values { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
-        try body()
+        return try body()
     }
 
     func testLocateHonoursSDKVariable() throws {
-        let unity = "/Applications/Unity/Hub/Editor/6000.3.12f1/Unity.app/Contents/Frameworks/SketchUpAPI.framework"
-        guard FileManager.default.fileExists(atPath: unity) else { throw XCTSkip("no Unity copy of the SDK") }
+        let found = withEnvironment(["SIMPLESKP_BUNDLED_SDK_ONLY": nil]) {
+            SketchUpAPI.candidates().map(\.frameworkURL.path).first {
+                $0.hasPrefix("/Applications/Unity/Hub/Editor/") && FileManager.default.fileExists(atPath: $0 + "/SketchUpAPI")
+            }
+        }
+        guard let unity = found else { throw XCTSkip("no Unity copy of the SDK") }
         try withEnvironment(["SIMPLESKP_SKETCHUP_SDK": unity, "SIMPLESKP_BUNDLED_SDK_ONLY": "1"]) {
             let location = try XCTUnwrap(SketchUpAPI.locate())
             XCTAssertEqual(location.frameworkURL.path, unity)
@@ -167,14 +172,26 @@ final class SimpleSKPCoreTests: XCTestCase {
         // The fixture has no texture; the Arles file (35 textures) exercises the cleanup when present.
         let arles = URL(fileURLWithPath: "/Users/adrien/Dropbox/AMCB-MM-Diff/TOUR 2018/0930-Arles/3D/MM_Arles_3D_V003.skp")
         for url in [Self.fixture, arles] where FileManager.default.fileExists(atPath: url.path) {
-            let before = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+            let start = Date()
             let calls = CallCounter()
-            XCTAssertThrowsError(try SKPReader.load(url, isCancelled: { calls.next() > 1 })) { error in
+            let created = Box<URL?>(nil)
+            XCTAssertThrowsError(try SKPReader.load(url, isCancelled: {
+                guard calls.next() > 1 else { return false }
+                // Textures written, loads serialised by the reader's lock: this load's folder is the newest one. Folders
+                // left by other tests' background loads, or other processes, do not count.
+                let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.creationDateKey])) ?? []
+                created.value = folders.max { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
+                    .flatMap { ($0.creationDate ?? .distantPast) >= start ? $0 : nil }
+                return true
+            })) { error in
                 guard case SKPError.cancelled = error else { return XCTFail("\(error)") }
             }
             XCTAssertEqual(calls.count, 2, "first check after open passes, the face-0 check cancels")
-            let after = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
-            XCTAssertEqual(after.subtracting(before), [], url.lastPathComponent)
+            if let folder = created.value {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), url.lastPathComponent)
+            } else {
+                XCTAssertNotEqual(url, arles, "Arles writes textures before the faces")
+            }
         }
     }
 
@@ -194,6 +211,15 @@ final class SimpleSKPCoreTests: XCTestCase {
         XCTAssertFalse(meshes.isEmpty)
         for mesh in meshes { XCTAssertEqual(mesh.uvs?.count, mesh.positions.count) }
     }
+}
+
+final class Box<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
+
+private extension URL {
+    var creationDate: Date? { try? resourceValues(forKeys: [.creationDateKey]).creationDate }
 }
 
 final class CallCounter: @unchecked Sendable {

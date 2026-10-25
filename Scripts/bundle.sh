@@ -55,7 +55,16 @@ mkdir -p "$APP/Contents/Frameworks"
 ditto "$SDK" "$FW"
 rm -rf "$FW/Headers" "$FW/Versions/A/Headers"
 ARCH="$(uname -m)"
+# The SketchUp.app copy lacks these (its libCommon*.dylib live beside it and need the app's rpath): use the SDK or Unity's.
+if ! ls "$FW"/Versions/A/Libraries/*.dylib >/dev/null 2>&1; then
+    echo "error: $SDK has no Versions/A/Libraries/*.dylib: not a self-contained SDK (take the SketchUp SDK or Unity's copy)" >&2
+    exit 1
+fi
 for MACHO in "$FW/Versions/A/SketchUpAPI" "$FW"/Versions/A/Libraries/*.dylib; do
+    if [[ " $(lipo -archs "$MACHO") " != *" $ARCH "* ]]; then
+        echo "error: $MACHO is built for $(lipo -archs "$MACHO"), not for this Mac ($ARCH)" >&2
+        exit 1
+    fi
     if [ "$(lipo -archs "$MACHO")" != "$ARCH" ]; then
         lipo -thin "$ARCH" "$MACHO" -output "$MACHO.thin"
         mv "$MACHO.thin" "$MACHO"
