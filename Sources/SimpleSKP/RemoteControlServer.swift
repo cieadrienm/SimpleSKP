@@ -375,9 +375,15 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                 model.setAmbientOcclusionIntensity(v)
             }
 
-        case "lighting":
+        case "lighting", "ambient":
+            if head == "ambient", let amb = message.float(at: 0) {
+                model.setAmbientIntensity(amb)
+                break
+            }
             let sub = route.count > 1 ? route[1] : "mode"
-            if sub == "mode", let s = message.string(at: 0)?.lowercased() {
+            if sub == "ambient", let amb = message.float(at: 0) {
+                model.setAmbientIntensity(amb)
+            } else if sub == "mode", let s = message.string(at: 0)?.lowercased() {
                 if s == "point" || s == "omni" || s == "ponctuel" {
                     model.setLightingMode(.point)
                 } else if s == "sun" || s == "soleil" {
@@ -395,6 +401,10 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
             case "elevation":
                 if let el = message.float(at: 0) {
                     model.setSun(azimuth: model.sunAzimuthDegrees, elevation: max(8, min(85, el)))
+                }
+            case "intensity", "power":
+                if let power = message.float(at: 0) {
+                    model.setSunIntensity(power)
                 }
             case "angles":
                 if let az = message.float(at: 0), let el = message.float(at: 1) {
@@ -598,6 +608,8 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
         let speed = Double(model?.cameraSpeedScale ?? 1)
         let sunAz = Double(model?.sunAzimuthDegrees ?? -135)
         let sunEl = Double(model?.sunElevationDegrees ?? 45)
+        let sunInt = Double(model?.sunIntensity ?? 1.0)
+        let ambientInt = Double(model?.ambientIntensity ?? 1.0)
         let ssao = Double(model?.ambientOcclusionEnabled == true ? (model?.ambientOcclusionIntensity ?? 0.7) : 0.0)
         let lightPos = model?.selectedPointLight?.position ?? .zero
         let lightIntensity = Double(model?.selectedPointLight?.intensity ?? 1.0)
@@ -844,6 +856,14 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                 values: [model?.lightingMode.rawValue ?? LightingMode.sun.rawValue]
             ),
             OSCQueryParameterSpec(
+                path: "/simpleskp/lighting/ambient",
+                typeTag: "f",
+                description: "Puissance de la lumière ambiante (0.0..2.0, 0 = noir complet quand les lumières sont à 0%)",
+                min: 0.0,
+                max: 2.0,
+                values: [ambientInt]
+            ),
+            OSCQueryParameterSpec(
                 path: "/simpleskp/sun/angles",
                 typeTag: "ff",
                 description: "Orientation du soleil : Azimut (-180..180°) et Hauteur (8..85°)",
@@ -866,6 +886,14 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                 min: 8.0,
                 max: 85.0,
                 values: [sunEl]
+            ),
+            OSCQueryParameterSpec(
+                path: "/simpleskp/sun/intensity",
+                typeTag: "f",
+                description: "Puissance du soleil (0.0..3.0)",
+                min: 0.0,
+                max: 3.0,
+                values: [sunInt]
             ),
             OSCQueryParameterSpec(
                 path: "/simpleskp/light/position",
@@ -1193,6 +1221,40 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                 }
             }
 
+        case ("GET", "/v1/pdf"), ("POST", "/v1/pdf"):
+            let targetModel: DocumentModel = {
+                if let m = activeModel, m.isReady { return m }
+                let temp = DocumentModel()
+                temp.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0)
+                return temp
+            }()
+            let w = (args["width"] as? NSNumber)?.doubleValue
+            let h = (args["height"] as? NSNumber)?.doubleValue
+            let customSize: CGSize? = (w != nil && h != nil) ? CGSize(width: w!, height: h!) : nil
+            guard let pdfData = targetModel.renderVectorPDF(pageSize: customSize) else {
+                statusBox.set(500)
+                writeJSON(["error": "Failed to generate vector PDF"])
+                return
+            }
+            if let savePath = args["path"] as? String, !savePath.isEmpty {
+                let url = URL(fileURLWithPath: (savePath as NSString).expandingTildeInPath)
+                do {
+                    try pdfData.write(to: url, options: .atomic)
+                    writeJSON([
+                        "ok": true,
+                        "path": url.path,
+                        "bytes": pdfData.count,
+                        "vector": true,
+                    ])
+                } catch {
+                    statusBox.set(500)
+                    writeJSON(["error": error.localizedDescription])
+                }
+            } else {
+                contentTypeBox.set("application/pdf")
+                box.set(pdfData)
+            }
+
         default:
             statusBox.set(404)
             writeJSON(["error": "not found", "path": path])
@@ -1336,6 +1398,12 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                 elevation: sunEl ?? model.sunElevationDegrees
             )
         }
+        if let sunInt = (args["sunIntensity"] as? NSNumber)?.floatValue {
+            model.setSunIntensity(sunInt)
+        }
+        if let ambInt = (args["ambientIntensity"] as? NSNumber)?.floatValue ?? (args["ambient"] as? NSNumber)?.floatValue {
+            model.setAmbientIntensity(ambInt)
+        }
         if let lpos = args["lightPosition"] as? [Any], lpos.count >= 3,
            let lx = (lpos[0] as? NSNumber)?.floatValue,
            let ly = (lpos[1] as? NSNumber)?.floatValue,
@@ -1395,8 +1463,10 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
             "ambientOcclusionEnabled": model.ambientOcclusionEnabled,
             "ambientOcclusionIntensity": model.ambientOcclusionIntensity,
             "lightingMode": model.lightingMode.rawValue,
+            "ambientIntensity": model.ambientIntensity,
             "sunAzimuthDegrees": model.sunAzimuthDegrees,
             "sunElevationDegrees": model.sunElevationDegrees,
+            "sunIntensity": model.sunIntensity,
             "pointLightCount": model.pointLights.count,
             "selectedPointLight": light.map {
                 [

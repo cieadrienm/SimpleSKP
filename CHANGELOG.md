@@ -9,6 +9,14 @@
   - Réglage continu de l'**angle d'ouverture vertical (FOV)** de `10°` à `120°` et de la **focale équivalente 24×36 (`mm`)** avec 5 objectifs rapides (`14 mm`, `24 mm`, `35 mm`, `50 mm`, `85 mm`).
   - Positionnement exact de la caméra en mètres (**X, Y, Z**) avec boutons de pas `±0,5 m`, raccourcis **`Œil 1,70 m`**, **`Au centre`** et **`Horizon 0°`**.
   - Réglage direct de l'**orientation** (**Azimut / Lacet** `-180°…180°` et **Inclinaison / Tangage** `-89°…89°`, distance à la cible) et de l'**exposition HDR** (`-3,0…+3,0 EV`).
+- **Contraste adaptatif du filaire & des arêtes** : la couleur des arêtes vectorielles et du mode **Filaire** (`wireframe`) s'adapte automatiquement à la luminance du fond (**Studio sombre**, **Ciel architectural**, **Papier chaud** ou **Couleur personnalisée** quelle qu'elle soit) avec compensation HDR pour rester parfaitement contrastée en toutes circonstances.
+- **Puissance lumineuse logarithmique & Lumière ambiante réglable** :
+  - Échelle **logarithmique** (`0 %…300 %`, exposant `2,6`) sur les curseurs de puissance lumineuse (ponctuelle et solaire) offrant une finesse de réglage au dixième de pourcent dans les basses valeurs.
+  - Nouveau curseur **Lumière ambiante** (`0 %…200 %`, également pilotable en OSC `/simpleskp/lighting/ambient` et MCP) contrôlant ce qui reste lorsque les lumières sont à `0 %` (noir complet possible à `0 %`).
+- **Export en PDF vectoriel (`⌥⌘E`)** : bouton dans la barre d'outils (`doc.richtext`), entrée `Fichier ▸ Exporter en PDF vectoriel…` (`⌥⌘E`) et endpoint HTTP/MCP (`POST /v1/pdf`, `simpleskp_snapshot` avec `format: "pdf"`) projetant les faces, les arêtes non adoucies, la grille et les axes XYZ en **chemins vectoriels PDF 100 % natifs** (`CGContext` PDF, perspective ou parallèle, tri en profondeur et suppression des lignes cachées en mode ombré).
+- **Transition de scène ralentie 10× avec `⇧` (`Shift`)** : maintenir `⇧` lors d'un clic sur une scène, sur les boutons `‹` / `›` ou via `⇧⌘[` / `⇧⌘]` effectue un travelling de **3,5 s** (au lieu de `0,35 s`).
+- **Déplacement caméra au clavier 4× plus progressif** : vitesse nominale réduite d'un facteur 4 (`diagonale / 32`, bornée à `0,125…12,5 m/s`).
+- **Masquage et affichage animés de la barre latérale (`⌥⌘S`)** : transition fluide en glissement et fondu (`0,22 s`).
 - **Éclairage ponctuel calibré** : intensité nominale (`100 %`) portée à `2 600 lm` avec atténuation douce à longue portée et redessin immédiat de la vue 3D à chaque modification des curseurs.
 
 ## 1.1.0 — 2026-10-25

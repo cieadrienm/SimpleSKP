@@ -1,7 +1,7 @@
 import AppKit
 import SimpleSKPCore
 import SimpleSKPMCPCore
-import SimpleSKPViewport
+@testable import SimpleSKPViewport
 import XCTest
 @testable import SimpleSKP
 
@@ -407,5 +407,33 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         XCTAssertEqual(capturedMethod, "POST")
         XCTAssertEqual(capturedPath, "/v1/camera")
         XCTAssertTrue(camResp.contains("fovDegrees"), camResp)
+    }
+
+    func testSlowSceneTransitionAmbientLightAndVectorPDFOnDocumentModel() {
+        let model = DocumentModel()
+        model.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0.1)
+
+        // Normal scene transition (0.35 s) finishes within 0.5 s
+        model.selectScene(1, slow: false)
+        model.viewport.rig.step(dt: 0.5)
+        XCTAssertFalse(model.viewport.rig.isMoving, "normal scene glide finished in 0.35 s")
+
+        // Shift / slow scene transition (3.5 s = 10x slower) is still moving at 1.5 s and finishes at 3.6 s
+        model.selectScene(0, slow: true)
+        model.viewport.rig.step(dt: 1.5)
+        XCTAssertTrue(model.viewport.rig.isMoving, "slow scene glide takes 3.5 s (10x slower)")
+        model.viewport.rig.step(dt: 2.1)
+        XCTAssertFalse(model.viewport.rig.isMoving, "slow scene glide completed after 3.5 s")
+
+        // Ambient & sun intensity controls
+        model.setAmbientIntensity(0.0)
+        XCTAssertEqual(model.ambientIntensity, 0.0, accuracy: 1e-5)
+        model.setSunIntensity(1.8)
+        XCTAssertEqual(model.sunIntensity, 1.8, accuracy: 1e-5)
+
+        // Vector PDF rendering from DocumentModel
+        let pdfData = model.renderVectorPDF()
+        XCTAssertNotNil(pdfData)
+        XCTAssertEqual(String(decoding: (pdfData ?? Data()).prefix(5), as: UTF8.self), "%PDF-")
     }
 }

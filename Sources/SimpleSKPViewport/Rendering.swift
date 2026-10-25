@@ -119,6 +119,111 @@ public enum ShadingStyle: String, CaseIterable, Identifiable, Sendable {
 public enum Rendering {
     public static let defaultAmbientOcclusionIntensity: CGFloat = 0.7
     public static let defaultCustomBackdropColor = SIMD3<Float>(0.14, 0.16, 0.20)
+    public static let defaultAmbientIntensity: Float = 1.0
+    public static let defaultSunIntensity: Float = 1.0
+
+    /// Logarithmic / perceptual curve exponent (`2.6`) for light intensity sliders:
+    /// slider position `t` in `0...1` maps to `maxIntensity * t^2.6`, giving ~3× finer resolution in the 0–30% range.
+    public static let lightCurveExponent: Double = 2.6
+
+    /// Maps a normalized slider position `t` (`0.0 ... 1.0`) to a light intensity (`0.0 ... maxIntensity`) with logarithmic feel in low values.
+    public static func sliderToLightIntensity(_ sliderValue: Double, maxIntensity: Double = 3.0) -> Float {
+        let t = max(0.0, min(1.0, sliderValue))
+        if t <= 1e-5 { return 0.0 }
+        return Float(maxIntensity * pow(t, lightCurveExponent))
+    }
+
+    /// Maps a light intensity (`0.0 ... maxIntensity`) back to a normalized slider position `t` (`0.0 ... 1.0`).
+    public static func lightIntensityToSlider(_ intensity: Float, maxIntensity: Double = 3.0) -> Double {
+        let clamped = max(0.0, min(maxIntensity, Double(intensity)))
+        if clamped <= 1e-6 || maxIntensity <= 0 { return 0.0 }
+        return pow(clamped / maxIntensity, 1.0 / lightCurveExponent)
+    }
+
+    /// Formats a light intensity multiplier (`1.0` = `100 %`) with 1 decimal place below `10 %` for fine low-level readout.
+    public static func formatLightPercentage(_ intensity: Float) -> String {
+        let pct = max(0.0, Double(intensity) * 100.0)
+        if pct < 0.05 {
+            return "0 %"
+        } else if pct < 10.0 {
+            let formatted = String(format: "%.1f", pct)
+            return (Localization.isEnglish ? formatted : formatted.replacingOccurrences(of: ".", with: ",")) + " %"
+        } else {
+            return "\(Int(pct.rounded())) %"
+        }
+    }
+
+    /// Representative mid-screen sRGB color (`0...1`) of the backdrop for contrast and PDF background calculations.
+    public static func backdropRepresentativeColor(for style: BackdropStyle, customColor: SIMD3<Float> = defaultCustomBackdropColor) -> SIMD3<Float> {
+        let stops = backdropGradientStops(for: style, customColor: customColor)
+        return stops.mid
+    }
+
+    /// Top, middle, and bottom sRGB colors (`0...1`) of the vertical backdrop gradient.
+    public static func backdropGradientStops(
+        for style: BackdropStyle,
+        customColor: SIMD3<Float> = defaultCustomBackdropColor
+    ) -> (top: SIMD3<Float>, mid: SIMD3<Float>, bottom: SIMD3<Float>) {
+        switch style {
+        case .architecturalSky:
+            return (
+                top: SIMD3<Float>(0.24, 0.31, 0.42),
+                mid: SIMD3<Float>(0.42, 0.49, 0.59),
+                bottom: SIMD3<Float>(0.72, 0.74, 0.77)
+            )
+        case .studioDark:
+            return (
+                top: SIMD3<Float>(0.09, 0.11, 0.14),
+                mid: SIMD3<Float>(0.13, 0.15, 0.20),
+                bottom: SIMD3<Float>(0.18, 0.21, 0.26)
+            )
+        case .warmPaper:
+            return (
+                top: SIMD3<Float>(0.88, 0.87, 0.84),
+                mid: SIMD3<Float>(0.93, 0.92, 0.89),
+                bottom: SIMD3<Float>(0.83, 0.81, 0.78)
+            )
+        case .customColor:
+            let clamped = simd_clamp(customColor, .zero, SIMD3(repeating: 1))
+            return (
+                top: simd_clamp(clamped * 0.92, .zero, SIMD3(repeating: 1)),
+                mid: clamped,
+                bottom: simd_clamp(clamped + SIMD3(repeating: 0.04), .zero, SIMD3(repeating: 1))
+            )
+        }
+    }
+
+    /// Relative perceptual luminance (`0...1`) of the backdrop.
+    public static func backdropLuminance(for style: BackdropStyle, customColor: SIMD3<Float> = defaultCustomBackdropColor) -> Float {
+        let c = backdropRepresentativeColor(for: style, customColor: customColor)
+        return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+    }
+
+    /// Returns a high-contrast sRGB edge color (`0...1`) that always stands out against the active backdrop.
+    /// When the backdrop is dark (`luma < 0.52`), edges become crisp light silver-white; when light (`luma >= 0.52`), deep charcoal ink.
+    public static func contrastingEdgeColor(
+        for style: BackdropStyle,
+        customColor: SIMD3<Float> = defaultCustomBackdropColor,
+        shadingStyle: ShadingStyle = .wireframe
+    ) -> SIMD3<Float> {
+        let luma = backdropLuminance(for: style, customColor: customColor)
+        // In clay mode, faces are bright white plaster, so unless we are in wireframe/xray, keep edges dark on the white clay.
+        if shadingStyle == .clay && style != .warmPaper && luma < 0.52 {
+            return SIMD3<Float>(0.16, 0.18, 0.22)
+        }
+        if style == .architecturalSky && shadingStyle != .wireframe {
+            return SIMD3<Float>(0.14, 0.16, 0.20)
+        }
+        if luma < 0.52 {
+            return shadingStyle == .wireframe
+                ? SIMD3<Float>(0.95, 0.96, 0.99)
+                : SIMD3<Float>(0.86, 0.89, 0.94)
+        } else {
+            return shadingStyle == .wireframe
+                ? SIMD3<Float>(0.07, 0.09, 0.12)
+                : SIMD3<Float>(0.14, 0.16, 0.20)
+        }
+    }
 
     /// Camera post-processing: HDR without exposure adaptation, screen-space ambient occlusion, subtle contrast, no bloom/blur/fringe.
     public static func configure(camera: SCNCamera) {

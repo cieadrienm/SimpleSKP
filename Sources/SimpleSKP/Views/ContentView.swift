@@ -13,12 +13,16 @@ struct ContentView: View {
             TopBar(model: model)
             HStack(spacing: 0) {
                 if model.showSidebar {
-                    SidebarView(model: model)
-                        .frame(width: 244)
-                    Rectangle().fill(Theme.separator.swiftUI).frame(width: 1)
+                    HStack(spacing: 0) {
+                        SidebarView(model: model)
+                            .frame(width: 244)
+                        Rectangle().fill(Theme.separator.swiftUI).frame(width: 1)
+                    }
+                    .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 viewport
             }
+            .animation(.easeInOut(duration: 0.22), value: model.showSidebar)
             StatusBar(model: model)
         }
         .background(Theme.background.swiftUI)
@@ -302,7 +306,7 @@ struct TopBar: View {
                     IconButton(
                         symbol: "chevron.left",
                         disabled: !model.isReady,
-                        tooltip: L("Scène précédente (⌘[)", "Previous scene (⌘[)")
+                        tooltip: L("Scène précédente (⌘[ · ⇧-clic : transition 10× plus lente)", "Previous scene (⌘[ · ⇧-click: 10× slower transition)")
                     ) {
                         model.previousScene()
                     }
@@ -336,12 +340,12 @@ struct TopBar: View {
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                     .disabled(!model.isReady)
-                    .help(L("Choisir une scène du modèle", "Select a model scene"))
+                    .help(L("Choisir une scène du modèle (maintenir ⇧ pour une transition 10× plus lente)", "Select a model scene (hold ⇧ for a 10× slower transition)"))
 
                     IconButton(
                         symbol: "chevron.right",
                         disabled: !model.isReady,
-                        tooltip: L("Scène suivante (⌘])", "Next scene (⌘])")
+                        tooltip: L("Scène suivante (⌘] · ⇧-clic : transition 10× plus lente)", "Next scene (⌘] · ⇧-click: 10× slower transition)")
                     ) {
                         model.nextScene()
                     }
@@ -366,6 +370,13 @@ struct TopBar: View {
                     tooltip: L("Exporter l'image en PNG… (⇧⌘E)", "Export PNG image… (⇧⌘E)")
                 ) {
                     model.exportImage()
+                }
+                IconButton(
+                    symbol: "doc.richtext",
+                    disabled: !model.isReady,
+                    tooltip: L("Exporter la vue en PDF vectoriel… (⌥⌘E)", "Export view as vector PDF… (⌥⌘E)")
+                ) {
+                    model.exportVectorPDF()
                 }
             }
         }
@@ -736,6 +747,8 @@ struct LightingPopover: View {
                 pointLightControls
             }
 
+            ambientLightControl
+
             Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
 
             // 2. Ambient Occlusion (SSAO) + Importance slider
@@ -850,6 +863,24 @@ struct LightingPopover: View {
             )
             .tint(Theme.accent.swiftUI)
 
+            HStack {
+                Text(L("Puissance solaire", "Sun intensity"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                Spacer()
+                Text(Rendering.formatLightPercentage(model.sunIntensity))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.text.swiftUI)
+            }
+            Slider(
+                value: Binding(
+                    get: { Rendering.lightIntensityToSlider(model.sunIntensity, maxIntensity: 3.0) },
+                    set: { model.setSunIntensity(Rendering.sliderToLightIntensity($0, maxIntensity: 3.0)) }
+                ),
+                in: 0.0...1.0
+            )
+            .tint(Theme.accent.swiftUI)
+
             Toggle(isOn: Binding(
                 get: { model.shadowsEnabled },
                 set: { _ in model.toggleShadows() }
@@ -859,6 +890,41 @@ struct LightingPopover: View {
                     .foregroundStyle(Theme.text.swiftUI)
             }
             .toggleStyle(.checkbox)
+        }
+    }
+
+    private var ambientLightControl: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(L("Lumière ambiante", "Ambient light"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                Spacer()
+                if abs(model.ambientIntensity - Rendering.defaultAmbientIntensity) > 0.02 {
+                    Button {
+                        model.setAmbientIntensity(Rendering.defaultAmbientIntensity)
+                    } label: {
+                        Text("100 %")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(Theme.accent.swiftUI)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 4)
+                }
+                Text(Rendering.formatLightPercentage(model.ambientIntensity))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.text.swiftUI)
+            }
+            Slider(
+                value: Binding(
+                    get: { Rendering.lightIntensityToSlider(model.ambientIntensity, maxIntensity: 2.0) },
+                    set: { model.setAmbientIntensity(Rendering.sliderToLightIntensity($0, maxIntensity: 2.0)) }
+                ),
+                in: 0.0...1.0
+            )
+            .tint(Theme.accent.swiftUI)
+            .help(L("Lumière ambiante résiduelle lorsque les lumières sont à 0 % (courbe logarithmique)",
+                    "Residual ambient light when lights are at 0% (logarithmic curve)"))
         }
     }
 
@@ -956,22 +1022,24 @@ struct LightingPopover: View {
                 }
 
                 HStack {
-                    Text(L("Intensité", "Intensity"))
+                    Text(L("Puissance (log)", "Power (log)"))
                         .font(.system(size: 11.5))
                         .foregroundStyle(Theme.textDim.swiftUI)
                     Spacer()
-                    Text("\(Int((light.intensity * 100).rounded())) %")
+                    Text(Rendering.formatLightPercentage(light.intensity))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.text.swiftUI)
                 }
                 Slider(
                     value: Binding(
-                        get: { Double(light.intensity) },
-                        set: { model.updateSelectedPointLight(intensity: Float($0)) }
+                        get: { Rendering.lightIntensityToSlider(light.intensity, maxIntensity: 3.0) },
+                        set: { model.updateSelectedPointLight(intensity: Rendering.sliderToLightIntensity($0, maxIntensity: 3.0)) }
                     ),
-                    in: 0.0...3.0
+                    in: 0.0...1.0
                 )
                 .tint(Theme.accent.swiftUI)
+                .help(L("Puissance lumineuse à échelle logarithmique (réglage fin dans les basses valeurs, de 0 % à 300 %)",
+                        "Logarithmic light power (fine control in low values, from 0% to 300%)"))
 
                 Toggle(isOn: Binding(
                     get: { model.showsPointLightGizmo },
@@ -1429,6 +1497,8 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .help(L("Aller à la scène « \(name) » (⇧-clic : transition 10× plus lente)",
+                "Go to scene “\(name)” (⇧-click: 10× slower transition)"))
     }
 }
 

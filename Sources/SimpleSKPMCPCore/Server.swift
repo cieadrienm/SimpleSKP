@@ -114,6 +114,9 @@ public final class SimpleSKPMCPServer {
         case "simpleskp_rendering":
             return textResult(try call("POST", "/rendering", body: args))
         case "simpleskp_snapshot":
+            if (args["format"] as? String)?.lowercased() == "pdf" || args["path"] != nil {
+                return textResult(try call("POST", "/pdf", body: args))
+            }
             let response = try call("GET", "/snapshot.png")
             return imageResult(response, caption: "Snapshot of the SimpleSKP 3D viewport.")
         default:

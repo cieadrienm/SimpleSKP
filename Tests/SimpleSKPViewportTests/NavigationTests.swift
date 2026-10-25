@@ -151,7 +151,7 @@ final class NavigationTests: XCTestCase {
     func testKeysMoveByPhysicalPosition() {
         let (view, _) = presented()
         let speed = view.rig.speed
-        XCTAssertEqual(speed, simd_length(SIMD3<Float>(3, 3, 1)) / 8, accuracy: 1e-5, "model diagonal / 8 per second")
+        XCTAssertEqual(speed, simd_length(SIMD3<Float>(3, 3, 1)) / 32, accuracy: 1e-5, "model diagonal / 32 per second")
         var start = view.rig.pose.position
         let forward = view.rig.pose.forward
         view.keyDown(with: key(13, "w"))
@@ -192,12 +192,12 @@ final class NavigationTests: XCTestCase {
         big.boundsMax = SIMD3(160, 0, 0)
         let (small, _) = presented()
         let (large, _) = presented(big)
-        XCTAssertEqual(large.rig.speed, 20, accuracy: 1e-4, "160 m / 8")
-        XCTAssertEqual(small.rig.speed, 0.545, accuracy: 1e-3)
+        XCTAssertEqual(large.rig.speed, 5, accuracy: 1e-4, "160 m / 32")
+        XCTAssertEqual(small.rig.speed, 0.136, accuracy: 1e-3)
         big.boundsMax = SIMD3(1000, 0, 0)
-        XCTAssertEqual(presented(big).0.rig.speed, 50, accuracy: 1e-4, "capped")
+        XCTAssertEqual(presented(big).0.rig.speed, 12.5, accuracy: 1e-4, "capped")
         big.boundsMax = SIMD3(1, 0, 0)
-        XCTAssertEqual(presented(big).0.rig.speed, 0.5, accuracy: 1e-4, "floored")
+        XCTAssertEqual(presented(big).0.rig.speed, 0.125, accuracy: 1e-4, "floored")
     }
 
     func testWheelWhileLookingChangesTheSpeed() {

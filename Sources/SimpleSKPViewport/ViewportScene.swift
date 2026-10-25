@@ -33,9 +33,21 @@ public final class ViewportScene {
         didSet { updateSunDirection() }
     }
 
+    /// Sun directional light power multiplier (`0.0 ... 3.0`, default `1.0` = 100%).
+    public var sunIntensity: Float = Rendering.defaultSunIntensity {
+        didSet { updateLightingModeAndPointLights() }
+    }
+
+    /// Ambient light power multiplier (`0.0 ... 2.0`, default `1.0` = 100%).
+    /// Controls what remains when directional/point lights are set to `0 %`. Setting to `0` eliminates all residual ambient light.
+    public var ambientIntensity: Float = Rendering.defaultAmbientIntensity {
+        didSet { updateLightingModeAndPointLights() }
+    }
+
     public func resetSun() {
         sunAzimuthDegrees = Self.defaultSunAzimuthDegrees
         sunElevationDegrees = Self.defaultSunElevationDegrees
+        sunIntensity = Rendering.defaultSunIntensity
     }
 
     public var shadowsEnabled = true {
@@ -82,15 +94,25 @@ public final class ViewportScene {
 
     private func updateBackdrop() {
         scene.background.contents = Rendering.backdropImage(for: backdropStyle, customColor: customBackdropColor)
-        let isDark: Bool = switch backdropStyle {
-        case .studioDark: true
-        case .architecturalSky, .warmPaper: false
-        case .customColor:
-            (0.2126 * customBackdropColor.x + 0.7152 * customBackdropColor.y + 0.0722 * customBackdropColor.z) < 0.28
-        }
-        edgeMaterial.diffuse.contents = isDark
-            ? NSColor(srgbRed: 0.14, green: 0.16, blue: 0.20, alpha: 1)
-            : NSColor(srgbRed: 0.20, green: 0.22, blue: 0.26, alpha: 1)
+        updateEdgeMaterial()
+    }
+
+    /// Adapts the wireframe / edge material color to the active backdrop luminance and shading style so edges always remain contrasted.
+    private func updateEdgeMaterial() {
+        let rgb = Rendering.contrastingEdgeColor(
+            for: backdropStyle,
+            customColor: customBackdropColor,
+            shadingStyle: shadingStyle
+        )
+        let luma = 0.2126 * rgb.x + 0.7152 * rgb.y + 0.0722 * rgb.z
+        // SceneKit's HDR camera (exposureOffset ≈ -0.62) scales `.constant` material RGB by ~0.65, so boost light edges to render crisp white.
+        let hdrBoost: CGFloat = luma > 0.5 ? 1.48 : 1.0
+        edgeMaterial.diffuse.contents = NSColor(
+            srgbRed: CGFloat(rgb.x) * hdrBoost,
+            green: CGFloat(rgb.y) * hdrBoost,
+            blue: CGFloat(rgb.z) * hdrBoost,
+            alpha: 1.0
+        )
     }
 
     public var shadingStyle: ShadingStyle = .textured {
@@ -439,6 +461,7 @@ public final class ViewportScene {
         for node in edgeNodes {
             node.isHidden = !edgesVisible
         }
+        updateEdgeMaterial()
     }
 
     private func applyShadingStyle(to node: SCNNode, original: SCNMaterial) {
@@ -556,22 +579,25 @@ public final class ViewportScene {
 
     private func updateLightingModeAndPointLights() {
         let isSun = (lightingMode == .sun)
-        sun.light?.intensity = isSun ? 1050 : 0
-        sun.light?.castsShadow = isSun && shadowsEnabled
-        skyFill.light?.intensity = isSun ? 220 : 0
+        let sunGain = CGFloat(pow(Double(max(0, sunIntensity)), 1.25))
+        let ambientGain = CGFloat(pow(Double(max(0, ambientIntensity)), 1.25))
+
+        sun.light?.intensity = isSun ? (1050.0 * sunGain) : 0
+        sun.light?.castsShadow = isSun && shadowsEnabled && sunIntensity > 0.001
+        skyFill.light?.intensity = isSun ? (220.0 * ambientGain) : (45.0 * ambientGain)
 
         guard !isSun else {
-            scene.lightingEnvironment.intensity = 1.05
-            fill.light?.intensity = 140
+            scene.lightingEnvironment.intensity = 1.05 * ambientGain
+            fill.light?.intensity = 140.0 * ambientGain
             pointLightsRoot.isHidden = true
             pointLightsRoot.childNodes.forEach { $0.removeFromParentNode() }
             return
         }
         pointLightsRoot.isHidden = false
 
-        // Keep ambient low in point-light mode so the point light intensity slider controls nearly all illumination.
-        scene.lightingEnvironment.intensity = 0.07
-        fill.light?.intensity = 22
+        // Ambient light in point-light mode is directly controlled by `ambientIntensity` (0% = pitch black when lights are at 0%).
+        scene.lightingEnvironment.intensity = 0.28 * ambientGain
+        fill.light?.intensity = 65.0 * ambientGain
 
         let bounds = visibleBounds
         let size = bounds.max - bounds.min

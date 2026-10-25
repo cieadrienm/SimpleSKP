@@ -55,6 +55,7 @@ enum MainMenu {
         menu.add(L("Ouvrir…", "Open…"), #selector(NSDocumentController.openDocument(_:)), key: "o")
         menu.addItem(.separator())
         menu.add(L("Exporter l'image PNG…", "Export PNG Image…"), #selector(SKPDocument.exportImage(_:)), key: "e", modifiers: [.command, .shift])
+        menu.add(L("Exporter en PDF vectoriel…", "Export Vector PDF…"), #selector(SKPDocument.exportVectorPDF(_:)), key: "e", modifiers: [.command, .option])
         menu.add(L("Ouvrir dans SketchUp", "Open in SketchUp"), #selector(SKPDocument.openInSketchUp(_:)), key: "o", modifiers: [.command, .shift])
         menu.add(L("Afficher dans le Finder", "Show in Finder"), #selector(SKPDocument.revealInFinder(_:)))
         menu.addItem(.separator())
@@ -93,7 +94,11 @@ enum MainMenu {
         menu.add(L("Mode vol libre", "Free Fly Mode"), #selector(SKPDocument.toggleFreeFlight(_:)), key: "f", modifiers: [.command, .option])
         menu.addItem(.separator())
         menu.add(L("Scène précédente", "Previous Scene"), #selector(SKPDocument.previousScene(_:)), key: "[")
+        let prevSlow = menu.add(L("Scène précédente (transition lente ×10)", "Previous Scene (10× slow transition)"), #selector(SKPDocument.previousSceneSlow(_:)), key: "[", modifiers: [.command, .shift])
+        prevSlow.isAlternate = true
         menu.add(L("Scène suivante", "Next Scene"), #selector(SKPDocument.nextScene(_:)), key: "]")
+        let nextSlow = menu.add(L("Scène suivante (transition lente ×10)", "Next Scene (10× slow transition)"), #selector(SKPDocument.nextSceneSlow(_:)), key: "]", modifiers: [.command, .shift])
+        nextSlow.isAlternate = true
         // AppKit appends « Activer le mode plein écran » itself (SimpleText D14).
         return menu.asItem()
     }

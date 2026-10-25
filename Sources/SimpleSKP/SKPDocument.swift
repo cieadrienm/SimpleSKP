@@ -78,6 +78,7 @@ final class SKPDocument: NSDocument {
     @objc func revealInFinder(_ sender: Any?) { model.revealInFinder() }
     @objc func copyImage(_ sender: Any?) { model.copyImage() }
     @objc func exportImage(_ sender: Any?) { model.exportImage() }
+    @objc func exportVectorPDF(_ sender: Any?) { model.exportVectorPDF() }
     @objc func toggleSidebarPanel(_ sender: Any?) { model.toggleSidebar() }
     @objc func toggleEdges(_ sender: Any?) { model.toggleEdges() }
     @objc func toggleGrid(_ sender: Any?) { model.toggleGrid() }
@@ -90,6 +91,8 @@ final class SKPDocument: NSDocument {
     @objc func toggleFreeFlight(_ sender: Any?) { model.toggleFreeFlight() }
     @objc func previousScene(_ sender: Any?) { model.previousScene() }
     @objc func nextScene(_ sender: Any?) { model.nextScene() }
+    @objc func previousSceneSlow(_ sender: Any?) { model.previousScene(slow: true) }
+    @objc func nextSceneSlow(_ sender: Any?) { model.nextScene(slow: true) }
 
     @objc func selectShadingStyle(_ sender: NSMenuItem) {
         let styles = ShadingStyle.allCases
@@ -141,11 +144,11 @@ final class SKPDocument: NSDocument {
                 item.state = model.shadingStyle == styles[item.tag] ? .on : .off
             }
             return model.isReady
-        case #selector(previousScene(_:)), #selector(nextScene(_:)):
+        case #selector(previousScene(_:)), #selector(nextScene(_:)), #selector(previousSceneSlow(_:)), #selector(nextSceneSlow(_:)):
             return model.isReady && !(model.skp?.scenes.isEmpty ?? true)
         case #selector(resetView(_:)), #selector(zoomExtents(_:)):
             return model.isReady && !isEditingText && !model.isFreeFlying
-        case #selector(copyImage(_:)), #selector(exportImage(_:)), #selector(lookStandard(_:)):
+        case #selector(copyImage(_:)), #selector(exportImage(_:)), #selector(exportVectorPDF(_:)), #selector(lookStandard(_:)):
             return model.isReady
         default:
             return super.validateMenuItem(item)

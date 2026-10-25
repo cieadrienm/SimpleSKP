@@ -265,14 +265,18 @@ public final class ViewportView: SCNView {
     }
 
     /// Applies a model-space camera (metres, Z up, vertical FOV) under the rotated root; roll is dropped.
-    public func apply(camera model: SKPModel.Camera, animated: Bool) {
+    public func apply(camera model: SKPModel.Camera, animated: Bool, duration: Float = CameraRig.defaultGlideDuration) {
         // A projection change cannot be tweened: switch with the same framing (didSet, which also re-applies SSAO), then
         // glide from there. To parallel with the FOV still shown; to perspective with the new one.
         if !model.isPerspective { isPerspective = false }
         camera.fieldOfView = CGFloat(model.fovDegrees) // kept for a later switch to perspective
         isPerspective = model.isPerspective
         let scale = model.isPerspective ? nil : Double(model.orthoHeight / 2)
-        if animated { rig.glide(to: CameraRig.pose(model), orthographicScale: scale) } else { rig.set(CameraRig.pose(model), orthographicScale: scale) }
+        if animated {
+            rig.glide(to: CameraRig.pose(model), orthographicScale: scale, duration: duration)
+        } else {
+            rig.set(CameraRig.pose(model), orthographicScale: scale)
+        }
     }
 
     public var isPerspective: Bool = true {

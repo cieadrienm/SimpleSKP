@@ -3,6 +3,7 @@ import Observation
 import SceneKit
 import SimpleSKPCore
 import SimpleSKPViewport
+import SwiftUI
 import UniformTypeIdentifiers
 
 /// State of one open `.skp`: header first, then the loaded model and its scene. Owns the viewport so the
@@ -49,6 +50,8 @@ final class DocumentModel {
     var showsPointLightGizmo: Bool = true
     var sunAzimuthDegrees: Float = -135
     var sunElevationDegrees: Float = 45
+    var sunIntensity: Float = Rendering.defaultSunIntensity
+    var ambientIntensity: Float = Rendering.defaultAmbientIntensity
     var activeStandardView: StandardView? = nil
     var cameraPosition: SIMD3<Float> = .zero
     var cameraYaw: Float = 0
@@ -147,6 +150,8 @@ final class DocumentModel {
         scene.showsGrid = showsGrid
         scene.sunAzimuthDegrees = sunAzimuthDegrees
         scene.sunElevationDegrees = sunElevationDegrees
+        scene.sunIntensity = sunIntensity
+        scene.ambientIntensity = ambientIntensity
         scene.showsPointLightGizmo = showsPointLightGizmo
         if !scene.detectedSceneLights.isEmpty {
             pointLights = scene.detectedSceneLights
@@ -174,7 +179,11 @@ final class DocumentModel {
 
     // MARK: Actions
 
-    func selectScene(_ index: Int) {
+    static var isShiftPressed: Bool {
+        NSEvent.modifierFlags.contains(.shift)
+    }
+
+    func selectScene(_ index: Int, slow: Bool? = nil) {
         guard let skp, skp.scenes.indices.contains(index) else { return }
         selectedScene = index
         activeStandardView = nil
@@ -184,20 +193,22 @@ final class DocumentModel {
             updateVisibleSize()
         }
         if isReady, let camera = skp.scenes[index].camera {
-            viewport.apply(camera: camera, animated: true)
+            let useSlow = slow ?? Self.isShiftPressed
+            let duration = useSlow ? CameraRig.slowGlideDuration : CameraRig.defaultGlideDuration
+            viewport.apply(camera: camera, animated: true, duration: duration)
             isPerspective = camera.isPerspective
             syncCameraStateFromViewport()
         }
     }
 
-    func previousScene() {
+    func previousScene(slow: Bool? = nil) {
         guard let count = skp?.scenes.count, count > 0 else { return }
-        selectScene(((selectedScene ?? 0) - 1 + count) % count)
+        selectScene(((selectedScene ?? 0) - 1 + count) % count, slow: slow)
     }
 
-    func nextScene() {
+    func nextScene(slow: Bool? = nil) {
         guard let count = skp?.scenes.count, count > 0 else { return }
-        selectScene(((selectedScene ?? -1) + 1) % count)
+        selectScene(((selectedScene ?? -1) + 1) % count, slow: slow)
     }
 
     func toggleLayer(_ index: Int) {
@@ -537,10 +548,27 @@ final class DocumentModel {
         viewport.requestRedraw()
     }
 
+    func setSunIntensity(_ intensity: Float) {
+        let clamped = max(0.0, min(3.0, intensity))
+        sunIntensity = clamped
+        scene?.sunIntensity = clamped
+        viewport.requestRedraw()
+    }
+
+    func setAmbientIntensity(_ intensity: Float) {
+        let clamped = max(0.0, min(2.0, intensity))
+        ambientIntensity = clamped
+        scene?.ambientIntensity = clamped
+        viewport.requestRedraw()
+    }
+
     func resetSun() {
         sunAzimuthDegrees = -135
         sunElevationDegrees = 45
+        sunIntensity = Rendering.defaultSunIntensity
+        ambientIntensity = Rendering.defaultAmbientIntensity
         scene?.resetSun()
+        scene?.ambientIntensity = ambientIntensity
         viewport.requestRedraw()
     }
 
@@ -556,7 +584,9 @@ final class DocumentModel {
     }
 
     func toggleSidebar() {
-        showSidebar.toggle()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            showSidebar.toggle()
+        }
         Preferences.showSidebar = showSidebar
     }
 
@@ -579,6 +609,27 @@ final class DocumentModel {
         do {
             try png.write(to: url, options: .atomic)
             flash(L("Image PNG exportée", "PNG image exported"))
+        } catch {
+            NSApp.presentError(error)
+        }
+    }
+
+    func renderVectorPDF(pageSize: CGSize? = nil) -> Data? {
+        guard isReady else { return nil }
+        return VectorPDFExporter.renderPDF(from: viewport, visibleLayers: layerVisible, pageSize: pageSize)
+    }
+
+    func exportVectorPDF() {
+        guard isReady, let pdf = renderVectorPDF() else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        let baseName = info?.url.deletingPathExtension().lastPathComponent ?? "SimpleSKP"
+        panel.nameFieldStringValue = "\(baseName).pdf"
+        panel.title = L("Exporter la vue en PDF vectoriel", "Export View as Vector PDF")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try pdf.write(to: url, options: .atomic)
+            flash(L("PDF vectoriel exporté", "Vector PDF exported"))
         } catch {
             NSApp.presentError(error)
         }

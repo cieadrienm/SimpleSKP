@@ -15,6 +15,9 @@ let inertiaDamping: Float = 10
 /// (parented under the model root); a 60 Hz timer runs only while something moves (glide, inertia, held keys).
 @MainActor
 public final class CameraRig {
+    nonisolated public static let defaultGlideDuration: Float = 0.35
+    nonisolated public static let slowGlideDuration: Float = 3.5
+
     public struct Pose: Equatable, Sendable {
         public var position = SIMD3<Float>(0, 0, 0)
         public var yaw: Float = 0
@@ -70,8 +73,8 @@ public final class CameraRig {
 
     var isMoving: Bool { glide != nil || spin != .zero || !keys.intersection(Self.moveKeys).isEmpty }
 
-    /// Model diagonal / 8 per second, kept within 0.5–50 m/s.
-    func setSpeed(diagonal: Float) { baseSpeed = max(0.5, min(50, diagonal / 8)) }
+    /// Model diagonal / 32 per second (4× slower than the initial diagonal / 8), kept within 0.125–12.5 m/s.
+    func setSpeed(diagonal: Float) { baseSpeed = max(0.125, min(12.5, diagonal / 32)) }
 
     // MARK: Moves
 

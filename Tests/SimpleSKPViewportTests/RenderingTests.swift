@@ -192,4 +192,82 @@ final class RenderingTests: XCTestCase {
         XCTAssertEqual(sceneWithLight.detectedSceneLights[0].position.y, -3.0, accuracy: 0.15)
         XCTAssertEqual(sceneWithLight.detectedSceneLights[0].position.z, 4.5, accuracy: 0.15)
     }
+
+    func testAdaptiveWireframeAndEdgeContrastFollowsBackdropLuminance() {
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        scene.shadingStyle = .wireframe
+
+        // Dark studio backdrop -> bright contrasting edges
+        scene.backdropStyle = .studioDark
+        let darkEdge = Rendering.contrastingEdgeColor(for: .studioDark, customColor: scene.customBackdropColor, shadingStyle: .wireframe)
+        XCTAssertGreaterThan(darkEdge.x, 0.85, "bright silver-white edge on dark background")
+        XCTAssertLessThan(Rendering.backdropLuminance(for: .studioDark, customColor: scene.customBackdropColor), 0.30)
+
+        // Warm paper backdrop -> dark charcoal ink edges
+        scene.backdropStyle = .warmPaper
+        let paperEdge = Rendering.contrastingEdgeColor(for: .warmPaper, customColor: scene.customBackdropColor, shadingStyle: .wireframe)
+        XCTAssertLessThan(paperEdge.x, 0.20, "dark charcoal ink edge on light paper background")
+        XCTAssertGreaterThan(Rendering.backdropLuminance(for: .warmPaper, customColor: scene.customBackdropColor), 0.70)
+
+        // Custom black vs custom white
+        let customDarkEdge = Rendering.contrastingEdgeColor(for: .customColor, customColor: SIMD3<Float>(0.05, 0.05, 0.06), shadingStyle: .wireframe)
+        let customLightEdge = Rendering.contrastingEdgeColor(for: .customColor, customColor: SIMD3<Float>(0.95, 0.95, 0.94), shadingStyle: .wireframe)
+        XCTAssertGreaterThan(customDarkEdge.x, 0.85)
+        XCTAssertLessThan(customLightEdge.x, 0.20)
+    }
+
+    func testLogarithmicLightCurveAndAmbientLightControl() throws {
+        // Endpoints
+        XCTAssertEqual(Rendering.sliderToLightIntensity(0.0, maxIntensity: 3.0), 0.0, accuracy: 1e-6)
+        XCTAssertEqual(Rendering.sliderToLightIntensity(1.0, maxIntensity: 3.0), 3.0, accuracy: 1e-6)
+        XCTAssertEqual(Rendering.lightIntensityToSlider(0.0, maxIntensity: 3.0), 0.0, accuracy: 1e-6)
+        XCTAssertEqual(Rendering.lightIntensityToSlider(3.0, maxIntensity: 3.0), 1.0, accuracy: 1e-6)
+
+        // Logarithmic / power curve gives fine resolution in the low values:
+        // At 25% of slider travel, intensity is < 10% (0.10), giving much finer control in low values than linear (0.75).
+        let quarterSliderIntensity = Rendering.sliderToLightIntensity(0.25, maxIntensity: 3.0)
+        XCTAssertLessThan(quarterSliderIntensity, 0.12, "fine low-value precision")
+        XCTAssertGreaterThan(quarterSliderIntensity, 0.01)
+
+        // Round-trip
+        for target in [Float(0.02), 0.08, 0.25, 1.0, 2.4, 3.0] {
+            let t = Rendering.lightIntensityToSlider(target, maxIntensity: 3.0)
+            let roundTripped = Rendering.sliderToLightIntensity(t, maxIntensity: 3.0)
+            XCTAssertEqual(roundTripped, target, accuracy: 1e-4)
+        }
+
+        // Ambient light control: setting ambientIntensity = 0 and light intensity = 0 produces total darkness (0 illumination)
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        scene.lightingMode = .point
+        scene.pointLights[0].intensity = 0.0
+        scene.ambientIntensity = 0.0
+        XCTAssertEqual(Float(scene.scene.lightingEnvironment.intensity), 0.0, accuracy: 1e-6)
+        XCTAssertEqual(Float(scene.fill.light?.intensity ?? -1), 0.0, accuracy: 1e-6)
+        XCTAssertEqual(Float(scene.skyFill.light?.intensity ?? -1), 0.0, accuracy: 1e-6)
+
+        scene.ambientIntensity = 1.5
+        XCTAssertGreaterThan(Float(scene.scene.lightingEnvironment.intensity), 0.1)
+        XCTAssertGreaterThan(Float(scene.fill.light?.intensity ?? 0), 100)
+    }
+
+    func testVectorPDFExporterGeneratesValidVectorPDFInWireframeAndShadedModes() throws {
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        scene.showsGrid = true
+        view.present(scene)
+        view.apply(camera: scene.model.scenes[0].camera!, animated: false)
+
+        // 1. Shaded mode (.textured)
+        scene.shadingStyle = .textured
+        let shadedPDF = try XCTUnwrap(VectorPDFExporter.renderPDF(from: view))
+        XCTAssertGreaterThan(shadedPDF.count, 500)
+        XCTAssertEqual(String(decoding: shadedPDF.prefix(5), as: UTF8.self), "%PDF-")
+
+        // 2. Wireframe mode on dark studio background
+        scene.shadingStyle = .wireframe
+        scene.backdropStyle = .studioDark
+        let wireframePDF = try XCTUnwrap(VectorPDFExporter.renderPDF(from: view))
+        XCTAssertGreaterThan(wireframePDF.count, 500)
+        XCTAssertEqual(String(decoding: wireframePDF.prefix(5), as: UTF8.self), "%PDF-")
+    }
 }

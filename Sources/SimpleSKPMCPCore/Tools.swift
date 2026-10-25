@@ -73,6 +73,7 @@ public let simpleSKPToolDefinitions: [[String: Any]] = [
                 "index": ["type": "integer", "description": "0-based scene index"],
                 "name": ["type": "string", "description": "Scene name (case-insensitive)"],
                 "action": ["type": "string", "enum": ["next", "prev"], "description": "Step to next or previous scene"],
+                "slow": ["type": "boolean", "description": "True for a 10x slower camera transition (3.5 s instead of 0.35 s, equivalent to holding Shift)"],
             ],
         ],
     ],
@@ -92,7 +93,7 @@ public let simpleSKPToolDefinitions: [[String: Any]] = [
     ],
     [
         "name": "simpleskp_rendering",
-        "description": "Updates 3D rendering, lighting, sun, point light, SSAO, or backdrop settings in SimpleSKP.",
+        "description": "Updates 3D rendering, lighting, sun, point light, ambient light, SSAO, or backdrop settings in SimpleSKP.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -101,9 +102,11 @@ public let simpleSKPToolDefinitions: [[String: Any]] = [
                 "grid": ["type": "boolean", "description": "Show or hide ground grid and XYZ axes"],
                 "shadows": ["type": "boolean", "description": "Enable or disable sun cast shadows"],
                 "ssao": ["type": "number", "description": "Ambient occlusion strength (0.0..2.0, 0 disables)"],
+                "ambientIntensity": ["type": "number", "description": "Ambient light intensity (0.0..2.0, default 1.0; 0 = pitch black when lights are at 0%)"],
                 "lightingMode": ["type": "string", "enum": ["sun", "point"]],
                 "sunAzimuth": ["type": "number", "description": "Sun azimuth in degrees (-180..180)"],
                 "sunElevation": ["type": "number", "description": "Sun elevation in degrees (8..85)"],
+                "sunIntensity": ["type": "number", "description": "Sun directional light intensity (0.0..3.0, default 1.0)"],
                 "lightPosition": [
                     "type": "array",
                     "items": ["type": "number"],
@@ -122,7 +125,15 @@ public let simpleSKPToolDefinitions: [[String: Any]] = [
     ],
     [
         "name": "simpleskp_snapshot",
-        "description": "Captures the current 3D viewport of SimpleSKP as a PNG image so the model, camera framing, and lighting can be inspected visually.",
-        "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
+        "description": "Captures the current 3D viewport of SimpleSKP as a PNG image (default) or exports a 100% vector PDF when format='pdf'.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "format": ["type": "string", "enum": ["png", "pdf"], "description": "Output format: 'png' (inline image) or 'pdf' (vector PDF)"],
+                "path": ["type": "string", "description": "Optional file path where to write the vector PDF when format='pdf'"],
+                "width": ["type": "number", "description": "Optional page width in points for PDF export (default 1190 = A3 landscape)"],
+                "height": ["type": "number", "description": "Optional page height in points for PDF export (default 842 = A3 landscape)"],
+            ],
+        ],
     ],
 ]
