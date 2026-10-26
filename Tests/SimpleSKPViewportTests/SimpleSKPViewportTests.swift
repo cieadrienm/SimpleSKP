@@ -515,4 +515,48 @@ final class SimpleSKPViewportTests: XCTestCase {
             try png.write(to: URL(fileURLWithPath: out).appendingPathComponent("scene\(i)-\(s.name).png"))
         }
     }
+
+    func testPlanar2DCADModelFramesTopViewAndHitsHorizontalPlane() {
+        let edges = SKPModel.EdgeSet(
+            layer: 0,
+            positions: [
+                SIMD3(-10, -5, 0), SIMD3(10, -5, 0),
+                SIMD3(10, -5, 0), SIMD3(10, 5, 0),
+                SIMD3(10, 5, 0), SIMD3(-10, 5, 0),
+                SIMD3(-10, 5, 0), SIMD3(-10, -5, 0),
+            ]
+        )
+        let root = SKPModel.Definition(name: "", meshes: [], edges: [edges], children: [])
+        let model = SKPModel(
+            root: root,
+            definitions: [],
+            materials: [],
+            layers: [SKPModel.Layer(name: "0", isVisible: true)],
+            scenes: [],
+            camera: nil,
+            boundsMin: SIMD3(-10, -5, 0),
+            boundsMax: SIMD3(10, 5, 0),
+            fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/plan.dwg"), fileSize: 512, version: "AC1032", versionLabel: "AutoCAD 2018", thumbnailPNG: nil)
+        )
+        XCTAssertTrue(model.isPlanar2D)
+
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let scene = ViewportScene(model: model)
+        view.present(scene)
+
+        // Framed from .top: camera is directly above (0, 0, 0) in model space.
+        let pos = view.cameraNode.simdPosition
+        XCTAssertEqual(pos.x, 0, accuracy: 1e-4)
+        XCTAssertEqual(pos.y, 0, accuracy: 1e-4)
+        XCTAssertGreaterThan(pos.z, 5.0)
+
+        // Even with 0 triangle faces, hitting the viewport centre intersects the Z=0 CAD plan plane.
+        let hitPoint = view.hit(CGPoint(x: 400, y: 300))
+        XCTAssertNotNil(hitPoint)
+        if let hitPoint {
+            XCTAssertEqual(hitPoint.x, 0, accuracy: 1e-3)
+            XCTAssertEqual(hitPoint.y, 0, accuracy: 1e-3)
+            XCTAssertEqual(hitPoint.z, 0, accuracy: 1e-3)
+        }
+    }
 }

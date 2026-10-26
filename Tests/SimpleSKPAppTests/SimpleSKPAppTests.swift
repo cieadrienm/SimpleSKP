@@ -65,10 +65,17 @@ final class SimpleSKPAppTests: XCTestCase {
     func testDocumentControllerTypes() throws {
         let controller = try XCTUnwrap(NSDocumentController.shared as? DocumentController)
         XCTAssertEqual(try controller.typeForContents(of: URL(fileURLWithPath: "/tmp/Salle.SKP")), "com.sketchup.skp")
+        XCTAssertEqual(try controller.typeForContents(of: URL(fileURLWithPath: "/tmp/Plan.DWG")), "com.autodesk.dwg")
+        XCTAssertEqual(try controller.typeForContents(of: URL(fileURLWithPath: "/tmp/Coupe.dxf")), "com.autodesk.dxf")
         XCTAssertTrue(controller.documentClass(forType: "com.sketchup.skp") == SKPDocument.self)
+        XCTAssertTrue(controller.documentClass(forType: "com.autodesk.dwg") == SKPDocument.self)
+        XCTAssertTrue(controller.documentClass(forType: "com.autodesk.dxf") == SKPDocument.self)
         let panel = NSOpenPanel()
         controller.configurePanel(panel)
-        XCTAssertEqual(panel.allowedContentTypes.map(\.identifier), ["com.sketchup.skp"])
+        let allowed = panel.allowedContentTypes
+        XCTAssertTrue(allowed.contains { $0.identifier == "com.sketchup.skp" || $0.preferredFilenameExtension == "skp" })
+        XCTAssertTrue(allowed.contains { $0.identifier == "com.autodesk.dwg" || $0.preferredFilenameExtension == "dwg" })
+        XCTAssertTrue(allowed.contains { $0.identifier == "com.autodesk.dxf" || $0.preferredFilenameExtension == "dxf" })
     }
 
     func testDocumentModelWithCube() {

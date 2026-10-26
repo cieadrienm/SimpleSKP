@@ -223,7 +223,7 @@ public final class ViewportView: SCNView {
         if let camera = scene.model.camera {
             apply(camera: camera, animated: false)
         } else {
-            look(.iso, animated: false) // the never-placed camera has no meaningful direction to keep
+            look(scene.model.isPlanar2D ? .top : .iso, animated: false)
         }
     }
 
@@ -231,12 +231,12 @@ public final class ViewportView: SCNView {
         frame(rig.pose, animated: animated)
     }
 
-    /// Resets the view (`Z`): restores the model's initial camera, or frames `.iso`.
+    /// Resets the view (`Z`): restores the model's initial camera, or frames `.top` (2D CAD plan) / `.iso` (3D).
     public func resetView(animated: Bool) {
         if let camera = viewportScene?.model.camera {
             apply(camera: camera, animated: animated)
         } else {
-            look(.iso, animated: animated)
+            look((viewportScene?.model.isPlanar2D == true) ? .top : .iso, animated: animated)
         }
         onResetView?(isPerspective)
     }
@@ -603,9 +603,23 @@ public final class ViewportView: SCNView {
             direction = pose.forward
         }
         let to = from + direction * reach
-        return root.hitTestWithSegment(from: SCNVector3(from), to: SCNVector3(to),
-                                       options: [SCNHitTestOption.backFaceCulling.rawValue: false, SCNHitTestOption.categoryBitMask.rawValue: 1])
-            .first.map { worldToModel(SIMD3<Float>($0.worldCoordinates)) }
+        if let faceHit = root.hitTestWithSegment(
+            from: SCNVector3(from),
+            to: SCNVector3(to),
+            options: [SCNHitTestOption.backFaceCulling.rawValue: false, SCNHitTestOption.categoryBitMask.rawValue: 1]
+        ).first {
+            return worldToModel(SIMD3<Float>(faceHit.worldCoordinates))
+        }
+        // Pure-edge / 2D CAD plan fallback: intersect the ray with the model's mid-Z plane so zoom-to-cursor,
+        // double-click recentre and orbit pivot work seamlessly when there are no faces under the cursor.
+        if let model = viewportScene?.model, (model.stats.faces == 0 || model.isPlanar2D), abs(direction.z) > 1e-5 {
+            let planeZ = (bounds.min.z + bounds.max.z) * 0.5
+            let t = (planeZ - from.z) / direction.z
+            if t > 0, t <= reach {
+                return from + direction * t
+            }
+        }
+        return nil
     }
 
     private func modelToWorld(_ point: SIMD3<Float>) -> SIMD3<Float> {

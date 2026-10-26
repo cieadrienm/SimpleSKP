@@ -12,7 +12,15 @@ let package = Package(
         .executable(name: "simpleskp-mcp", targets: ["simpleskp-mcp"]),
     ],
     targets: [
-        .target(name: "SimpleSKPCore"),
+        .target(
+            name: "SimpleSKPCore",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+                    "-Xlinker", "-rpath", "-Xlinker", "/Applications/SketchUp.app/Contents/Frameworks",
+                ]),
+            ]
+        ),
         .target(name: "SimpleSKPViewport", dependencies: ["SimpleSKPCore"]),
         .executableTarget(name: "SimpleSKP", dependencies: ["SimpleSKPCore", "SimpleSKPViewport"]),
         .target(name: "SimpleSKPMCPCore"),

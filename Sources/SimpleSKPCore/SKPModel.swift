@@ -184,6 +184,20 @@ public struct SKPModel: Sendable {
     public var size: SIMD3<Float> { boundsMax - boundsMin }
     public var center: SIMD3<Float> { (boundsMin + boundsMax) / 2 }
 
+    /// True when the model is a 2D plan/section in the XY plane (e.g. a 2D AutoCAD plan or pure-wireframe drawing).
+    public var isPlanar2D: Bool {
+        let planarXY = max(size.x, size.y)
+        guard planarXY > 1e-4 else { return false }
+        if size.z <= planarXY * 0.01 && (fileInfo.isCAD || stats.faces == 0) {
+            return true
+        }
+        // AutoCAD 2D plans/sections overwhelmingly consist of edges (>96% edges vs faces), even when a few blocks carry Z elevations.
+        if fileInfo.isCAD && stats.edges > 0 && stats.faces < max(60, stats.edges / 25) {
+            return true
+        }
+        return false
+    }
+
     // MARK: - Automatic Layer Grouping at Import
 
     private static let layerTokenSeparators = CharacterSet(charactersIn: "-_/:| ")

@@ -14,7 +14,7 @@ final class SKPDocument: NSDocument {
     private var loadStarted = false
 
     override class var autosavesInPlace: Bool { false }
-    override class var readableTypes: [String] { [DocumentController.skpType] }
+    override class var readableTypes: [String] { [DocumentController.skpType, DocumentController.dwgType, DocumentController.dxfType] }
     override class var writableTypes: [String] { [] }
     override class func isNativeType(_ type: String) -> Bool { false }
     override var isDocumentEdited: Bool { false }

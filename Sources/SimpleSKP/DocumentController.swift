@@ -2,10 +2,25 @@ import AppKit
 import SimpleSKPCore
 import UniformTypeIdentifiers
 
-/// Opens `.skp` files only; no `defaultType`, so no untitled document can be made. `DocumentController()` made first becomes `NSDocumentController.shared`.
+/// Opens `.skp`, `.dwg`, and `.dxf` files; no `defaultType`, so no untitled document can be made. `DocumentController()` made first becomes `NSDocumentController.shared`.
 final class DocumentController: NSDocumentController {
     static let skpType = "com.sketchup.skp"
+    static let dwgType = "com.autodesk.dwg"
+    static let dxfType = "com.autodesk.dxf"
+    static let allowedExtensions: Set<String> = ["skp", "dwg", "dxf"]
+
     static let contentType = UTType(importedAs: skpType)
+    static let dwgContentType = UTType(importedAs: dwgType)
+    static let dxfContentType = UTType(importedAs: dxfType)
+    static let allowedContentTypes: [UTType] = {
+        var types: [UTType] = [contentType, dwgContentType, dxfContentType]
+        for ext in ["skp", "dwg", "dxf"] {
+            if let ut = UTType(filenameExtension: ext), !types.contains(ut) {
+                types.append(ut)
+            }
+        }
+        return types
+    }()
 
     /// Without an Info.plist (`swift run`, tests) AppKit knows no document class and disables « Ouvrir… ».
     override var documentClassNames: [String] { [NSStringFromClass(SKPDocument.self)] }
@@ -16,8 +31,12 @@ final class DocumentController: NSDocumentController {
 
     /// By extension: run from `swift run` there is no Info.plist to declare the type.
     override func typeForContents(of url: URL) throws -> String {
-        if url.pathExtension.lowercased() == "skp" { return Self.skpType }
-        return try super.typeForContents(of: url)
+        switch url.pathExtension.lowercased() {
+        case "skp": return Self.skpType
+        case "dwg": return Self.dwgType
+        case "dxf": return Self.dxfType
+        default: return try super.typeForContents(of: url)
+        }
     }
 
     override func beginOpenPanel(_ openPanel: NSOpenPanel, forTypes inTypes: [String]?, completionHandler: @escaping (Int) -> Void) {
@@ -34,7 +53,8 @@ final class DocumentController: NSDocumentController {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [Self.contentType]
-        panel.message = L("Choisissez un ou plusieurs fichiers SketchUp (.skp).", "Choose one or more SketchUp files (.skp).")
+        panel.allowedContentTypes = Self.allowedContentTypes
+        panel.message = L("Choisissez un ou plusieurs fichiers SketchUp (.skp) ou AutoCAD (.dwg, .dxf).",
+                          "Choose one or more SketchUp (.skp) or AutoCAD (.dwg, .dxf) files.")
     }
 }

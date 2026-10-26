@@ -145,6 +145,10 @@ final class DocumentModel {
     func present(_ scene: ViewportScene, seconds: Double) {
         setModel(scene.model)
         loadSeconds = seconds
+        // Ensure pure-edge CAD models remain visible even if edges were turned off in preferences.
+        if scene.model.stats.faces == 0, scene.model.stats.edges > 0 {
+            showsEdges = true
+        }
         if !showsEdges { scene.showsEdges = false }
         scene.shadowsEnabled = shadowsEnabled
         scene.shadingStyle = shadingStyle
@@ -168,6 +172,9 @@ final class DocumentModel {
         viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
         state = .ready(scene)
         viewport.present(scene)
+        if scene.model.camera == nil {
+            activeStandardView = scene.model.isPlanar2D ? .top : .iso
+        }
         updateVisibleSize()
         if scene.model.camera == nil, viewport.isPerspective != isPerspective {
             viewport.isPerspective = isPerspective

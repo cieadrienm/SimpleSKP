@@ -29,7 +29,7 @@ struct ContentView: View {
         .background(Theme.background.swiftUI)
         .preferredColorScheme(.dark)
         .dropDestination(for: URL.self) { urls, _ in
-            let files = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == "skp" }
+            let files = urls.filter { $0.isFileURL && DocumentController.allowedExtensions.contains($0.pathExtension.lowercased()) }
             for url in files {
                 NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
                     if let error { NSApp.presentError(error) }
@@ -115,7 +115,7 @@ struct TopBar: View {
                 }
                 IconButton(
                     symbol: "folder",
-                    tooltip: L("Ouvrir un fichier SketchUp… (⌘O)", "Open a SketchUp file… (⌘O)")
+                    tooltip: L("Ouvrir un fichier SketchUp ou AutoCAD… (⌘O)", "Open a SketchUp or AutoCAD file… (⌘O)")
                 ) {
                     NSDocumentController.shared.openDocument(nil)
                 }

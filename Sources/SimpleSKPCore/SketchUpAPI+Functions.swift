@@ -58,6 +58,9 @@ extension SketchUpAPI {
         let SUEntitiesGetGroups: List
         let SUEntitiesGetNumInstances: Count
         let SUEntitiesGetInstances: List
+        let SUEntitiesGetNumGuidePoints: Count?
+        let SUEntitiesGetGuidePoints: List?
+        let SUGuidePointGetPosition: (@convention(c) (Ref, UnsafeMutableRawPointer) -> Int32)?
         let SUDrawingElementGetHidden: GetBool
         let SUDrawingElementGetLayer: GetRef
         let SUDrawingElementGetMaterial: GetRef
@@ -143,6 +146,9 @@ extension SketchUpAPI {
             SUEntitiesGetGroups = try sym(handle, "SUEntitiesGetGroups")
             SUEntitiesGetNumInstances = try sym(handle, "SUEntitiesGetNumInstances")
             SUEntitiesGetInstances = try sym(handle, "SUEntitiesGetInstances")
+            SUEntitiesGetNumGuidePoints = symOpt(handle, "SUEntitiesGetNumGuidePoints")
+            SUEntitiesGetGuidePoints = symOpt(handle, "SUEntitiesGetGuidePoints")
+            SUGuidePointGetPosition = symOpt(handle, "SUGuidePointGetPosition")
             SUDrawingElementGetHidden = try sym(handle, "SUDrawingElementGetHidden")
             SUDrawingElementGetLayer = try sym(handle, "SUDrawingElementGetLayer")
             SUDrawingElementGetMaterial = try sym(handle, "SUDrawingElementGetMaterial")

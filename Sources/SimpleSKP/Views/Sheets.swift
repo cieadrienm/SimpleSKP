@@ -24,9 +24,9 @@ struct AboutView: View {
     private static var features: [(icon: String, title: String, subtitle: String)] {
         [
             ("cube.transparent",
-             L("Lecture directe .skp", "Direct .skp reading"),
-             L("Ouverture asynchrone avec vignette immédiate, SDK C SketchUp embarqué et fusion Metal par matériaux.",
-               "Asynchronous loading with instant thumbnail, embedded SketchUp C SDK, and Metal material merging.")),
+             L("Lecture directe .skp, .dwg & .dxf", "Direct .skp, .dwg & .dxf reading"),
+             L("Ouverture asynchrone SketchUp et AutoCAD, calibration métrique automatique, SDK C embarqué et fusion Metal par matériaux.",
+               "Asynchronous SketchUp and AutoCAD loading, automatic metric calibration, embedded C SDK, and Metal material merging.")),
             ("sun.max.trianglebadge.exclamationmark",
              L("Rendu architectural doux", "Soft architectural rendering"),
              L("Matériaux PBR, soleil orientable à cascades d'ombres, contre-jour céleste et styles Maquette / Rayons X.",
@@ -86,8 +86,8 @@ struct AboutView: View {
                         .help(L("Cliquer pour copier le numéro de version", "Click to copy version number"))
                     }
 
-                    Text(L("Visualiseur 3D natif et léger de fichiers SketchUp (.skp) pour macOS.",
-                           "Lightweight native 3D viewer for SketchUp (.skp) files on macOS."))
+                    Text(L("Visualiseur 3D natif et léger de fichiers SketchUp (.skp) et AutoCAD (.dwg, .dxf) pour macOS.",
+                           "Lightweight native 3D viewer for SketchUp (.skp) and AutoCAD (.dwg, .dxf) files on macOS."))
                         .font(.system(size: 12.5))
                         .foregroundStyle(Theme.textDim.swiftUI)
                         .fixedSize(horizontal: false, vertical: true)
@@ -467,12 +467,12 @@ struct HelpView: View {
     private func sectionContent(_ section: Section) -> some View {
         switch section {
         case .overview:
-            heading(L("Ouvrir et inspecter un modèle SketchUp", "Opening and inspecting a SketchUp model"))
-            paragraph(L("SimpleSKP ouvre directement les fichiers .skp en lecture seule. Dès l'ouverture, la vignette embarquée s'affiche pendant que la géométrie et les textures sont chargées en arrière-plan.",
-                        "SimpleSKP opens .skp files directly in read-only mode. As soon as a file opens, its embedded thumbnail appears while geometry and textures load in the background."))
+            heading(L("Ouvrir et inspecter un modèle SketchUp ou AutoCAD", "Opening and inspecting a SketchUp or AutoCAD model"))
+            paragraph(L("SimpleSKP ouvre directement les fichiers SketchUp (.skp) et AutoCAD (.dwg, .dxf) en lecture seule. Les plans et modèles CAD bénéficient d'une calibration métrique automatique, d'un recentrage des coordonnées géodésiques et d'un cadrage automatique en vue de dessus pour les plans 2D.",
+                        "SimpleSKP opens SketchUp (.skp) and AutoCAD (.dwg, .dxf) files directly in read-only mode. CAD plans and models feature automatic metric unit calibration, geodetic origin recentering, and automatic top-view framing for 2D plans."))
             step(1, L("Ouvrir un fichier", "Open a file"),
-                 L("Double-cliquer un fichier .skp dans le Finder, le glisser dans la fenêtre ou utiliser ⌘O.",
-                   "Double-click a .skp file in Finder, drag it into the window, or press ⌘O."))
+                 L("Double-cliquer un fichier .skp, .dwg ou .dxf dans le Finder, le glisser dans la fenêtre ou utiliser ⌘O.",
+                   "Double-click a .skp, .dwg, or .dxf file in Finder, drag it into the window, or press ⌘O."))
             step(2, L("Choisir l'angle et le style", "Choose angle and style"),
                  L("Utiliser la barre d'outils supérieure pour basculer entre les vues standard (Iso, Dessus, Face, Droite…), la projection (Perspective / Parallèle) et les styles de rendu (PBR, Blanc, Rayons X, Filaire).",
                    "Use the top toolbar to switch between standard views (Iso, Top, Front, Right…), projection (Perspective / Parallel), and shading styles (PBR, Clay, X-Ray, Wireframe)."))

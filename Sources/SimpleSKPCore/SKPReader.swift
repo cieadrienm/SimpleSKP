@@ -18,9 +18,22 @@ public enum SKPReader {
         isCancelled: @Sendable () -> Bool = { false }
     ) throws -> SKPModel {
         let fileInfo = try SKPFileInfo.read(url)
+        if fileInfo.isCAD {
+            return try CADReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
+        }
+        return try loadSkpFile(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
+    }
+
+    static func loadSkpFile(
+        _ url: URL,
+        fileInfo: SKPFileInfo,
+        progress: (@Sendable (Progress) -> Void)? = nil,
+        isCancelled: @Sendable () -> Bool = { false }
+    ) throws -> SKPModel {
         let f = try SketchUpAPI.functions()
         lock.lock()
         defer { lock.unlock() }
+        f.SUInitialize()
 
         progress?(Progress(phase: L("Lecture du fichier", "Reading file"), faces: 0))
         let start = Date()
@@ -326,6 +339,34 @@ public enum SKPReader {
                 def.edges[slot].positions.append(pb)
                 box.add(pa); box.add(pb)
                 stats.edges += 1
+            }
+
+            if def.meshes.isEmpty && def.edges.isEmpty,
+               let numGP = f.SUEntitiesGetNumGuidePoints,
+               let getGP = f.SUEntitiesGetGuidePoints,
+               let getPos = f.SUGuidePointGetPosition {
+                let gpoints = refs(numGP, getGP, entities)
+                if !gpoints.isEmpty {
+                    let strideStep = max(1, gpoints.count / 60_000)
+                    let tick: Float = 0.015
+                    var pos = SUPoint3D()
+                    for idx in Swift.stride(from: 0, to: gpoints.count, by: strideStep) {
+                        guard let gp = gpoints[idx], !bool(f.SUDrawingElementGetHidden, gp),
+                              getPos(gp, &pos) == 0 else { continue }
+                        let p = metres(pos)
+                        let lyr = layer(gp)
+                        let slot: Int
+                        if let existing = edgeSlots[lyr] { slot = existing } else {
+                            slot = def.edges.count
+                            edgeSlots[lyr] = slot
+                            def.edges.append(SKPModel.EdgeSet(layer: lyr, positions: []))
+                        }
+                        def.edges[slot].positions.append(p - SIMD3(tick, 0, 0))
+                        def.edges[slot].positions.append(p + SIMD3(tick, 0, 0))
+                        box.add(p)
+                        stats.edges += 1
+                    }
+                }
             }
 
             var matrix = [Double](repeating: 0, count: 16)

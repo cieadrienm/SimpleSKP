@@ -265,6 +265,239 @@ final class SimpleSKPCoreTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(multiGroups.count, 4)
         }
     }
+
+    // MARK: AutoCAD (.dwg / .dxf)
+
+    func testDWGAndDXFHeaderParsing() {
+        let dwgHeader = Data("AC1032\0\0\0\0\0\0".utf8)
+        let dwgInfo = SKPFileInfo.parse(header: dwgHeader, url: URL(fileURLWithPath: "/tmp/plan.dwg"), fileSize: 1024)
+        XCTAssertTrue(dwgInfo.isDWG)
+        XCTAssertFalse(dwgInfo.isDXF)
+        XCTAssertTrue(dwgInfo.isCAD)
+        XCTAssertEqual(dwgInfo.version, "AC1032")
+        XCTAssertEqual(dwgInfo.versionLabel, "AutoCAD 2018")
+
+        let dxfText = "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1027\n  0\nENDSEC\n"
+        let dxfInfo = SKPFileInfo.parse(header: Data(dxfText.utf8), url: URL(fileURLWithPath: "/tmp/coupe.dxf"), fileSize: 2048)
+        XCTAssertFalse(dxfInfo.isDWG)
+        XCTAssertTrue(dxfInfo.isDXF)
+        XCTAssertTrue(dxfInfo.isCAD)
+        XCTAssertEqual(dxfInfo.version, "AC1027")
+        XCTAssertEqual(dxfInfo.versionLabel, "AutoCAD DXF 2013")
+    }
+
+    func testNativeDXFParserLoads2DAnd3DEntities() throws {
+        let dxfContent = """
+          0
+        SECTION
+          2
+        HEADER
+          9
+        $ACADVER
+          1
+        AC1032
+          9
+        $INSUNITS
+         70
+        4
+          0
+        ENDSEC
+          0
+        SECTION
+          2
+        TABLES
+          0
+        TABLE
+          2
+        LAYER
+          0
+        LAYER
+          2
+        Murs
+         62
+        1
+         70
+        0
+          0
+        LAYER
+          2
+        Cotes_Cachees
+         62
+        -3
+         70
+        0
+          0
+        ENDTAB
+          0
+        ENDSEC
+          0
+        SECTION
+          2
+        BLOCKS
+          0
+        BLOCK
+          2
+        Colonne
+         10
+        0.0
+         20
+        0.0
+         30
+        0.0
+          0
+        CIRCLE
+          8
+        Murs
+         10
+        0.0
+         20
+        0.0
+         30
+        0.0
+         40
+        500.0
+          0
+        ENDBLK
+          0
+        ENDSEC
+          0
+        SECTION
+          2
+        ENTITIES
+          0
+        LINE
+          8
+        Murs
+         10
+        0.0
+         20
+        0.0
+         30
+        0.0
+         11
+        10000.0
+         21
+        0.0
+         31
+        0.0
+          0
+        LWPOLYLINE
+          8
+        Murs
+         70
+        1
+         10
+        0.0
+         20
+        0.0
+         10
+        10000.0
+         20
+        0.0
+         10
+        10000.0
+         20
+        8000.0
+         10
+        0.0
+         20
+        8000.0
+          0
+        3DFACE
+          8
+        Murs
+         10
+        0.0
+         20
+        0.0
+         30
+        0.0
+         11
+        2000.0
+         21
+        0.0
+         31
+        0.0
+         12
+        2000.0
+         22
+        2000.0
+         32
+        0.0
+         13
+        0.0
+         23
+        2000.0
+         33
+        0.0
+          0
+        INSERT
+          2
+        Colonne
+          8
+        Murs
+         10
+        5000.0
+         20
+        4000.0
+         30
+        0.0
+          0
+        ENDSEC
+          0
+        EOF
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("simpleskp-test-\(UUID().uuidString).dxf")
+        try dxfContent.write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let fileInfo = try SKPFileInfo.read(url)
+        let model = try DXFNativeParser.parse(url: url, fileInfo: fileInfo, progress: nil, isCancelled: { false })
+        XCTAssertTrue(model.fileInfo.isDXF)
+        XCTAssertTrue(model.isPlanar2D)
+        XCTAssertGreaterThan(model.stats.edges, 10)
+        XCTAssertEqual(model.stats.faces, 2)
+        XCTAssertEqual(model.stats.instances, 1)
+        // 10000 mm × 8000 mm converted to 10 m × 8 m
+        XCTAssertEqual(model.size.x, 10.0, accuracy: 0.05)
+        XCTAssertEqual(model.size.y, 8.0, accuracy: 0.05)
+        let hiddenLayer = model.layers.first { $0.name == "Cotes_Cachees" }
+        XCTAssertEqual(hiddenLayer?.isVisible, false)
+    }
+
+    func testRealAutoCADDWGFilesLoadAndCalibrate() throws {
+        guard CADReader.locatePlugin() != nil else { throw XCTSkip("DWGImporter.plugin not available") }
+        let userFiles = [
+            "/Users/adrien/Dropbox/AM-VW - Seine musicale/Plans/AUDITORIUM - KIT SON LIGHT 2026-V1.dwg",
+            "/Users/adrien/Dropbox/AM-VW - Seine musicale/Docs techniques/SOUCHE Plan de coupe longitudinale sans fosse.dwg",
+            "/Users/adrien/Downloads/Conception/Musee-Orsay_Plan 06-N2_masse-coupe_SDF.dwg",
+            "/Users/adrien/Downloads/Conception/2023 ODEON POUR PROD+TOURS LATERALES.dwg",
+            "/Users/adrien/Dropbox/MaisonCrest/ARCHI/4_3D/3D ATELIER/AMCB-Fabrique - Crest 3D.dwg",
+            "/Users/adrien/Dropbox/AMCB-HKN-Diff/TOUR 2019/0114-Poitiers/FICHES TECHNIQUES SALLE/plan DWG/Beaulieu 2016.dwg",
+            "/Users/adrien/Dropbox/MaisonCrest/ARCHI/4_3D/3D ATELIER/AMCB-Fabrique - Crest 3D-dwg/MAISON.dwg",
+            "/Users/adrien/Dropbox/AMCB-AIR-Diff/TOUR 2019/0224-GrandeSynthe/Docs lieu/4926-CH01-A- Plan de Charges.dwg",
+            "/Users/adrien/Dropbox/AMCB-AIR-Diff/TOUR 2019/0224-GrandeSynthe/Docs lieu/4926-0040-C-EQUIPEMENTS de scène.dwg",
+            "/Users/adrien/Dropbox/AMCB-MM-Diff/TOUR 2018/1106-Maubeuge/2D/AMCB-MM-MAUBEUGE-CB.dwg",
+            "/Users/adrien/Dropbox/AMCB-MM-Diff/TOUR 2018/1104-OloronSteMarie/2D/MM_oloron_V1.dwg",
+            "/Users/adrien/Dropbox/AMCB-AIR-Diff/Études 2019/0300 Bogota/Docs lieu/Teatro Mayor-PLANTA y CORTE.dwg",
+            "/Users/adrien/Dropbox/AMCB-FEM/TECH/Informatique/Synoptique Installation.dwg",
+            "/Users/adrien/Dropbox/AMCB-HKN-Diff/TOUR 2018/1017-Tremblay/plan theatre L Aragon 2012.dwg",
+            "/Users/adrien/Dropbox/AMCB-AIR-Diff/Études 2019/0300 Bogota/Docs lieu/Corte Teatro Estudio 249pax.dwg",
+        ].map(URL.init(fileURLWithPath:)).filter { FileManager.default.fileExists(atPath: $0.path) }
+
+        try XCTSkipUnless(!userFiles.isEmpty, "no sample DWG files on disk")
+        for url in userFiles {
+            let model = try SKPReader.load(url)
+            defer { if let dir = model.textureDirectory { try? FileManager.default.removeItem(at: dir) } }
+            XCTAssertTrue(model.fileInfo.isDWG, url.lastPathComponent)
+            XCTAssertGreaterThan(model.stats.edges + model.stats.faces, 0, url.lastPathComponent)
+            let maxSpan = max(model.size.x, max(model.size.y, model.size.z))
+            XCTAssertGreaterThan(maxSpan, 1.0, "calibrated metric span too small for \(url.lastPathComponent): \(model.size)")
+            XCTAssertLessThan(maxSpan, 2500.0, "calibrated metric span too large for \(url.lastPathComponent): \(model.size)")
+            let xyOffset = simd_length(SIMD2<Float>(model.center.x, model.center.y))
+            XCTAssertLessThan(xyOffset, maxSpan * 3.0, "geodetic offset not recentered for \(url.lastPathComponent): center=\(model.center)")
+        }
+    }
 }
 
 final class Box<T>: @unchecked Sendable {
