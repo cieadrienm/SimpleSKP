@@ -144,10 +144,19 @@ public final class ViewportScene: @unchecked Sendable {
     /// The faces and edges drawn under one set of layers; `node` is nil until the set is first visible.
     final class LayerSet {
         let layers: [Int]
+        /// Primary layer index in `model.layers`: prefers the most specific non-zero layer along the path, else `0`.
+        var primaryLayer: Int { layers.last(where: { $0 != 0 }) ?? (layers.first ?? 0) }
         /// Indices into `placements` whose definition has meshes or edges on this exact set.
         var placements: [Int] = []
         var node: SCNNode?
         init(layers: [Int]) { self.layers = layers }
+    }
+
+    private struct EdgeChunk {
+        var node: SCNNode
+        var buffer: MTLBuffer
+        var vertexCount: Int
+        var set: LayerSet
     }
 
     /// A definition placed in the flattened tree (-1 = the root): model-space transform, material its unpainted faces
@@ -177,7 +186,9 @@ public final class ViewportScene: @unchecked Sendable {
     private(set) var layerSets: [[Int]: LayerSet] = [:]
     private var setsByLayer: [Int: [LayerSet]] = [:]
     private var faceNodes: [(node: SCNNode, material: SCNMaterial)] = []
+    private var faceNodeSet: [ObjectIdentifier: LayerSet] = [:]
     private var edgeNodes: [SCNNode] = []
+    private var edgeChunks: [EdgeChunk] = []
     private var gridNode: SCNNode?
     private let pointLightsRoot = SCNNode()
     private var hiddenLayers = Set<Int>()
@@ -185,6 +196,8 @@ public final class ViewportScene: @unchecked Sendable {
     public private(set) var activePulseLayers: Set<Int> = []
     private var pulseTimer: Timer?
     private var pulseRestoreActions: [() -> Void] = []
+    public private(set) var hoveredLayers: Set<Int> = []
+    private var hoverRestoreActions: [() -> Void] = []
 
     public init(model: SKPModel) {
         self.model = model
@@ -271,23 +284,25 @@ public final class ViewportScene: @unchecked Sendable {
     /// Shows or hides everything on a layer, by index into `model.layers`: a layer set is shown iff all its layers are.
     /// Sets shown for the first time are built here (main thread, like any scene edit).
     public func setLayer(_ index: Int, visible: Bool) {
-        if Thread.isMainThread { MainActor.assumeIsolated { cancelLayerPulse() } }
+        if Thread.isMainThread { MainActor.assumeIsolated { clearHoverVisuals(); cancelLayerPulse() } }
         if visible { hiddenLayers.remove(index) } else { hiddenLayers.insert(index) }
         cachedVisibleBounds = nil
         let sets = setsByLayer[index] ?? []
         build(sets.filter { $0.node == nil && isVisible($0) })
         for set in sets { set.node?.isHidden = !isVisible(set) }
         updateShadowDistance()
+        if Thread.isMainThread { MainActor.assumeIsolated { applyHoverVisuals() } }
     }
 
     /// Applies a whole layer state at once (a scene change): only the sets visible in the end are built.
     public func setLayers(_ visible: [Bool]) {
-        if Thread.isMainThread { MainActor.assumeIsolated { cancelLayerPulse() } }
+        if Thread.isMainThread { MainActor.assumeIsolated { clearHoverVisuals(); cancelLayerPulse() } }
         hiddenLayers = Set(visible.indices.filter { !visible[$0] })
         cachedVisibleBounds = nil
         build(layerSets.values.filter { $0.node == nil && isVisible($0) })
         for set in layerSets.values { set.node?.isHidden = !isVisible(set) }
         updateShadowDistance()
+        if Thread.isMainThread { MainActor.assumeIsolated { applyHoverVisuals() } }
     }
 
     /// Cascades spread over what is shown. The distance counts from the eye, which the framing puts up to ~2 diagonals
@@ -367,12 +382,233 @@ public final class ViewportScene: @unchecked Sendable {
         return (lo, hi)
     }
 
+    /// Applies a subtle hover highlight ("légère surbrillance") on visible faces and edges belonging to `targetLayers`.
+    @MainActor
+    public func setHoveredLayers(_ targetLayers: Set<Int>) {
+        guard targetLayers != hoveredLayers else { return }
+        hoveredLayers = targetLayers
+        applyHoverVisuals()
+    }
+
+    @MainActor
+    private func clearHoverVisuals() {
+        let actions = hoverRestoreActions
+        hoverRestoreActions.removeAll()
+        for action in actions { action() }
+    }
+
+    @MainActor
+    private func applyHoverVisuals() {
+        clearHoverVisuals()
+        guard !hoveredLayers.isEmpty, activePulseLayers.isEmpty else { return }
+        let matching = matchingLayerSets(for: hoveredLayers).filter(isVisible)
+        guard !matching.isEmpty else { return }
+
+        let baseEdgeRGB = Rendering.contrastingEdgeColor(
+            for: backdropStyle,
+            customColor: customBackdropColor,
+            shadingStyle: shadingStyle
+        )
+        let baseLuma = 0.2126 * baseEdgeRGB.x + 0.7152 * baseEdgeRGB.y + 0.0722 * baseEdgeRGB.z
+        let startEdgeRGB = baseLuma > 0.5 ? baseEdgeRGB * 1.48 : baseEdgeRGB
+        let peakEdgeRGB: SIMD3<Float> = baseLuma > 0.5
+            ? SIMD3<Float>(1.55, 1.72, 1.98)
+            : SIMD3<Float>(0.10, 0.48, 1.25)
+        let hoverEdgeRGB = startEdgeRGB + (peakEdgeRGB - startEdgeRGB) * 0.42
+
+        let hoverEdgeMat = SCNMaterial()
+        hoverEdgeMat.lightingModel = .constant
+        hoverEdgeMat.diffuse.contents = NSColor(
+            srgbRed: CGFloat(hoverEdgeRGB.x),
+            green: CGFloat(hoverEdgeRGB.y),
+            blue: CGFloat(hoverEdgeRGB.z),
+            alpha: 1.0
+        )
+        hoverEdgeMat.readsFromDepthBuffer = true
+        hoverEdgeMat.writesToDepthBuffer = false
+        hoverEdgeMat.shaderModifiers = [.geometry: Self.edgeBias]
+
+        let faceEmission = NSColor(srgbRed: 0.16, green: 0.21, blue: 0.28, alpha: 1.0)
+        var restoreActions: [() -> Void] = []
+
+        for set in matching {
+            guard let node = set.node, !node.isHidden else { continue }
+            for child in node.childNodes {
+                guard let geom = child.geometry else { continue }
+                if child.categoryBitMask == Self.edgeCategory {
+                    guard !child.isHidden else { continue }
+                    let origMaterials = geom.materials
+                    let origOrder = child.renderingOrder
+                    restoreActions.append {
+                        geom.materials = origMaterials
+                        child.renderingOrder = origOrder
+                    }
+                    geom.materials = [hoverEdgeMat]
+                    child.renderingOrder = 2
+                } else if !child.isHidden, let baseMat = geom.firstMaterial {
+                    let origMaterials = geom.materials
+                    let hoverMat = baseMat.copy() as! SCNMaterial
+                    hoverMat.emission.contents = faceEmission
+                    restoreActions.append {
+                        geom.materials = origMaterials
+                    }
+                    geom.materials = [hoverMat]
+                }
+            }
+        }
+        hoverRestoreActions = restoreActions
+    }
+
+    /// Picks the closest visible layer under the cursor ray in model space (testing both triangle faces and `.line` edges).
+    public func pickLayer(
+        from: SIMD3<Float>,
+        direction: SIMD3<Float>,
+        right: SIMD3<Float>,
+        up: SIMD3<Float>,
+        reach: Float,
+        orthoTolerance: Float?,
+        tanHalfFOV: Float,
+        viewportHeight: Float,
+        screenRadiusPoints: Float = 7.0
+    ) -> Int? {
+        var bestFaceT: Float = .infinity
+        var bestFaceSet: LayerSet? = nil
+
+        if shadingStyle != .wireframe {
+            let to = from + direction * reach
+            let hits = modelRoot.hitTestWithSegment(
+                from: SCNVector3(from),
+                to: SCNVector3(to),
+                options: [
+                    SCNHitTestOption.backFaceCulling.rawValue: false,
+                    SCNHitTestOption.categoryBitMask.rawValue: 1,
+                ]
+            )
+            for hit in hits {
+                guard !hit.node.isHidden, hit.node.parent?.isHidden == false,
+                      let set = faceNodeSet[ObjectIdentifier(hit.node)], isVisible(set) else { continue }
+                let hitModel = modelRoot.simdConvertPosition(SIMD3<Float>(hit.worldCoordinates), from: nil)
+                let t = simd_dot(hitModel - from, direction)
+                if t >= 0, t < bestFaceT {
+                    bestFaceT = t
+                    bestFaceSet = set
+                    break
+                }
+            }
+        }
+
+        var bestEdgeSet: LayerSet? = nil
+        var bestEdgeScore: Float = .infinity
+
+        if showsEdges || shadingStyle == .wireframe {
+            let u: SIMD3<Float>
+            let rProj = right - direction * simd_dot(right, direction)
+            if simd_length_squared(rProj) > 1e-6 {
+                u = simd_normalize(rProj)
+            } else {
+                let fallback = abs(direction.z) < 0.9 ? SIMD3<Float>(0, 0, 1) : SIMD3<Float>(1, 0, 0)
+                u = simd_normalize(simd_cross(direction, fallback))
+            }
+            let v = simd_cross(direction, u)
+            let perspScale = (2.0 * tanHalfFOV / max(1.0, viewportHeight)) * screenRadiusPoints
+            let maxDepth = min(reach, bestFaceT < .infinity ? bestFaceT * 1.02 + 0.05 : reach)
+            let maxTol = orthoTolerance ?? (maxDepth * perspScale)
+
+            for chunk in edgeChunks {
+                guard !chunk.node.isHidden, chunk.set.node?.isHidden == false, isVisible(chunk.set),
+                      chunk.vertexCount >= 2, let geom = chunk.node.geometry else { continue }
+                let (bMinVec, bMaxVec) = geom.boundingBox
+                let bMin = SIMD3<Float>(bMinVec) - SIMD3<Float>(repeating: maxTol)
+                let bMax = SIMD3<Float>(bMaxVec) + SIMD3<Float>(repeating: maxTol)
+                guard Self.rayIntersectsAABB(origin: from, direction: direction, maxT: maxDepth + maxTol, min: bMin, max: bMax) else {
+                    continue
+                }
+
+                let ptr = chunk.buffer.contents().bindMemory(to: Float.self, capacity: chunk.vertexCount * 3)
+                let segCount = chunk.vertexCount / 2
+                for sIdx in 0..<segCount {
+                    let o0 = sIdx * 6
+                    let p0 = SIMD3<Float>(ptr[o0], ptr[o0 + 1], ptr[o0 + 2]) - from
+                    let p1 = SIMD3<Float>(ptr[o0 + 3], ptr[o0 + 4], ptr[o0 + 5]) - from
+
+                    let z0 = simd_dot(p0, direction)
+                    let z1 = simd_dot(p1, direction)
+                    let zMax = max(z0, z1)
+                    let zMin = min(z0, z1)
+                    if zMax < 0 || zMin > maxDepth { continue }
+
+                    let segTol = orthoTolerance ?? (max(zMax, 0.01) * perspScale)
+                    let x0 = simd_dot(p0, u), x1 = simd_dot(p1, u)
+                    if max(x0, x1) < -segTol || min(x0, x1) > segTol { continue }
+                    let y0 = simd_dot(p0, v), y1 = simd_dot(p1, v)
+                    if max(y0, y1) < -segTol || min(y0, y1) > segTol { continue }
+
+                    let dx = x1 - x0, dy = y1 - y0
+                    let lenSq = dx * dx + dy * dy
+                    let s: Float = lenSq > 1e-12 ? simd_clamp(-(x0 * dx + y0 * dy) / lenSq, 0.0, 1.0) : 0.0
+                    let cz = z0 + s * (z1 - z0)
+                    if cz < 0 || cz > maxDepth { continue }
+
+                    let tolAtZ = max(orthoTolerance ?? (max(cz, 0.01) * perspScale), 1e-5)
+                    let cx = x0 + s * dx, cy = y0 + s * dy
+                    let dist = sqrt(cx * cx + cy * cy)
+                    guard dist <= tolAtZ else { continue }
+                    guard cz <= bestFaceT + tolAtZ * 1.5 else { continue }
+
+                    let score = cz + (dist / tolAtZ) * (tolAtZ * 2.0)
+                    if score < bestEdgeScore {
+                        bestEdgeScore = score
+                        bestEdgeSet = chunk.set
+                    }
+                }
+            }
+        }
+
+        if let bestEdgeSet {
+            return bestEdgeSet.primaryLayer
+        }
+        return bestFaceSet?.primaryLayer
+    }
+
+    private static func rayIntersectsAABB(
+        origin: SIMD3<Float>,
+        direction: SIMD3<Float>,
+        maxT: Float,
+        min bMin: SIMD3<Float>,
+        max bMax: SIMD3<Float>
+    ) -> Bool {
+        var tMin: Float = 0.0
+        var tMax: Float = maxT
+        for axis in 0..<3 {
+            let o = origin[axis]
+            let d = direction[axis]
+            let lo = bMin[axis]
+            let hi = bMax[axis]
+            if abs(d) < 1e-7 {
+                if o < lo || o > hi { return false }
+            } else {
+                let invD = 1.0 / d
+                var t0 = (lo - o) * invD
+                var t1 = (hi - o) * invD
+                if t0 > t1 { swap(&t0, &t1) }
+                tMin = max(tMin, t0)
+                tMax = min(tMax, t1)
+                if tMin > tMax { return false }
+            }
+        }
+        return tMin <= tMax
+    }
+
     /// Triggers a brief brightness pulse on all visible faces and edges belonging to `targetLayers` so the user can visually locate them.
     @MainActor
     public func pulseLayers(_ targetLayers: Set<Int>, onUpdate: (@MainActor () -> Void)? = nil) {
+        clearHoverVisuals()
         cancelLayerPulse()
         let matching = matchingLayerSets(for: targetLayers).filter(isVisible)
-        guard !matching.isEmpty else { return }
+        guard !matching.isEmpty else {
+            applyHoverVisuals()
+            return
+        }
         let unbuilt = matching.filter { $0.node == nil }
         if !unbuilt.isEmpty {
             build(unbuilt)
@@ -415,7 +651,10 @@ public final class ViewportScene: @unchecked Sendable {
             }
         }
 
-        guard !restoreActions.isEmpty else { return }
+        guard !restoreActions.isEmpty else {
+            applyHoverVisuals()
+            return
+        }
         activePulseLayers = targetLayers
         pulseRestoreActions = restoreActions
 
@@ -479,6 +718,9 @@ public final class ViewportScene: @unchecked Sendable {
         pulseRestoreActions.removeAll()
         activePulseLayers.removeAll()
         for action in actions { action() }
+        if !hoveredLayers.isEmpty {
+            applyHoverVisuals()
+        }
     }
 
     // MARK: - Flattening
@@ -601,12 +843,14 @@ public final class ViewportScene: @unchecked Sendable {
             modelRoot.addChildNode(node)
         }
         for (chunk, data) in zip(chunks, merged) {
-            let child = SCNNode(geometry: geometry(chunk, data!))
+            let mergedData = data!
+            let child = SCNNode(geometry: geometry(chunk, mergedData))
             if let material = chunk.material {
                 let transparent = Self.isTransparentMaterial(material)
                 child.castsShadow = !transparent
                 child.renderingOrder = transparent ? 2 : 0
                 faceNodes.append((child, material))
+                faceNodeSet[ObjectIdentifier(child)] = chunk.set
                 if shadingStyle != .textured {
                     applyShadingStyle(to: child, original: material)
                 }
@@ -616,6 +860,7 @@ public final class ViewportScene: @unchecked Sendable {
                 child.renderingOrder = 1 // after opaque faces (0), before transparent glass (2)
                 child.isHidden = !(showsEdges || shadingStyle == .wireframe)
                 edgeNodes.append(child)
+                edgeChunks.append(EdgeChunk(node: child, buffer: mergedData.positions, vertexCount: chunk.vertices, set: chunk.set))
             }
             chunk.set.node!.addChildNode(child)
         }
@@ -627,7 +872,7 @@ public final class ViewportScene: @unchecked Sendable {
 
     private func applyShadingStyle() {
         if Thread.isMainThread {
-            MainActor.assumeIsolated { cancelLayerPulse() }
+            MainActor.assumeIsolated { clearHoverVisuals(); cancelLayerPulse() }
         }
         for (node, material) in faceNodes {
             applyShadingStyle(to: node, original: material)
@@ -637,6 +882,9 @@ public final class ViewportScene: @unchecked Sendable {
             node.isHidden = !edgesVisible
         }
         updateEdgeMaterial()
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { applyHoverVisuals() }
+        }
     }
 
     private func applyShadingStyle(to node: SCNNode, original: SCNMaterial) {

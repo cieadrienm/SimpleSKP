@@ -22,6 +22,12 @@ public final class ViewportView: SCNView {
     public var onPoseChange: ((Float, Float, Float) -> Void)?
     /// Optional override for `resetView(animated:)` so the document model can restore the active scene's camera.
     public var onResetView: ((Bool) -> Void)?
+    /// Called when the hovered layer under the mouse cursor changes (`nil` when over empty background).
+    public var onHoverLayer: ((Int?) -> Void)?
+    /// Called when the user clicks an object in the viewport to select its layer in the hierarchy.
+    public var onSelectLayer: ((Int) -> Void)?
+    /// Currently hovered layer index in `model.layers`, if any.
+    public private(set) var hoveredLayer: Int? = nil
 
     /// `true` when viewing a 2D AutoCAD plan: left-drag & trackpad scroll translate, wheel/pinch zoom, and `⌥`-drag rotates the 2D plan in-plane.
     public var is2DNavigationMode: Bool { rig.is2DMode }
@@ -29,6 +35,8 @@ public final class ViewportView: SCNView {
     private enum Drag { case orbit, pan, look, rotate2D }
     private var drag: Drag?
     private var lastPoint = CGPoint.zero
+    private var mouseDownPoint = CGPoint.zero
+    private var didDragDuringMouseDown = false
     private var zoomAnchor: SIMD3<Float>?
     private var lastWheel: TimeInterval = 0
     /// NSCursor.hide() calls not yet balanced by unhide(): 0 or 1, checked by the tests.
@@ -63,8 +71,8 @@ public final class ViewportView: SCNView {
             setNeedsDisplay(bounds)
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
-        // Free fly reads mouseMoved; .inVisibleRect follows resizes by itself.
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self))
+        // Free fly & hover highlight read mouseMoved; .inVisibleRect follows resizes by itself.
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
 
     public override var acceptsFirstResponder: Bool { true }
@@ -357,6 +365,8 @@ public final class ViewportView: SCNView {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
         lastPoint = point
+        mouseDownPoint = point
+        didDragDuringMouseDown = false
         if isFreeFlying { drag = nil; return }
         if event.clickCount == 2 { drag = nil; recentre(at: point); return }
         if is2DNavigationMode {
@@ -392,12 +402,39 @@ public final class ViewportView: SCNView {
     public override func otherMouseDragged(with event: NSEvent) { dragged(event) }
 
     public override func mouseMoved(with event: NSEvent) {
-        if isFreeFlying { mouseLook(dx: Float(event.deltaX), dy: Float(-event.deltaY)) }
+        if isFreeFlying {
+            mouseLook(dx: Float(event.deltaX), dy: Float(-event.deltaY))
+            return
+        }
+        guard drag == nil else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        updateHoveredLayer(at: point)
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        if hoveredLayer != nil {
+            hoveredLayer = nil
+            onHoverLayer?(nil)
+        }
+        super.mouseExited(with: event)
     }
 
     public override func mouseUp(with event: NSEvent) {
+        let wasSingleClick = !didDragDuringMouseDown
+            && event.clickCount == 1
+            && !isFreeFlying
+            && !event.modifierFlags.contains(.option)
+            && !event.modifierFlags.contains(.shift)
         if drag == .orbit || drag == .rotate2D { rig.release(time: event.timestamp) }
         drag = nil
+        if wasSingleClick {
+            let point = convert(event.locationInWindow, from: nil)
+            if let picked = pickLayer(at: point) {
+                hoveredLayer = picked
+                onHoverLayer?(picked)
+                onSelectLayer?(picked)
+            }
+        }
     }
 
     public override func rightMouseUp(with event: NSEvent) {
@@ -410,6 +447,9 @@ public final class ViewportView: SCNView {
 
     private func dragged(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if hypot(point.x - mouseDownPoint.x, point.y - mouseDownPoint.y) > 3.0 {
+            didDragDuringMouseDown = true
+        }
         let dx = Float(point.x - lastPoint.x), dy = Float(point.y - lastPoint.y)
         lastPoint = point
         if isFreeFlying || drag == .look {
@@ -451,7 +491,7 @@ public final class ViewportView: SCNView {
             } else if Self.twoFingerScrollZooms {
                 zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: event.phase == .began)
             } else {
-                pan(dx: -dx, dy: -dy)
+                pan(dx: dx, dy: dy)
             }
         } else if event.modifierFlags.contains(.option) {
             pan(dx: -dx, dy: -dy) // the model follows the fingers
@@ -682,6 +722,44 @@ public final class ViewportView: SCNView {
             }
         }
         return nil
+    }
+
+    /// Picks the layer index in `model.layers` of the visible face or edge under `point` in view coordinates.
+    public func pickLayer(at point: CGPoint, screenRadiusPoints: Float = 7.0) -> Int? {
+        guard let scene = viewportScene else { return nil }
+        let bounds = scene.visibleBounds
+        let pose = rig.pose
+        let reach = simd_distance(pose.position, (bounds.min + bounds.max) / 2) + simd_distance(bounds.min, bounds.max)
+        let viewHeight = Float(max(1, self.bounds.height))
+        let metresPerPoint = visibleHeight / viewHeight
+        var from = pose.position
+        var direction = ray(through: point)
+        let orthoTolerance: Float?
+        if camera.usesOrthographicProjection {
+            from += (pose.right * Float(point.x - self.bounds.midX) + pose.up * Float(point.y - self.bounds.midY)) * metresPerPoint
+            direction = pose.forward
+            orthoTolerance = metresPerPoint * screenRadiusPoints
+        } else {
+            orthoTolerance = nil
+        }
+        return scene.pickLayer(
+            from: from,
+            direction: direction,
+            right: pose.right,
+            up: pose.up,
+            reach: max(reach, 1.0),
+            orthoTolerance: orthoTolerance,
+            tanHalfFOV: tanHalfFOV,
+            viewportHeight: viewHeight,
+            screenRadiusPoints: screenRadiusPoints
+        )
+    }
+
+    func updateHoveredLayer(at point: CGPoint) {
+        let picked = pickLayer(at: point)
+        guard picked != hoveredLayer else { return }
+        hoveredLayer = picked
+        onHoverLayer?(picked)
     }
 
     private func modelToWorld(_ point: SIMD3<Float>) -> SIMD3<Float> {

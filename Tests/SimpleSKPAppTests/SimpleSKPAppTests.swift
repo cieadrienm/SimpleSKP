@@ -528,5 +528,22 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         XCTAssertEqual(targetAfterZoom.y, 0.5, accuracy: 0.05)
         XCTAssertEqual(targetAfterZoom.z, 0.5, accuracy: 0.05)
         scene.cancelLayerPulse()
+
+        // Hovering and clicking an object from the viewport updates hoveredLayerIndex, selects it in the hierarchy, and triggers scroll
+        model.setHoveredLayer(1)
+        XCTAssertEqual(model.hoveredLayerIndex, 1)
+        XCTAssertEqual(model.hoveredLayerName, skp.layers[1].name)
+        XCTAssertEqual(scene.hoveredLayers, [1])
+
+        let prevScrollTrigger = model.scrollToLayerTrigger
+        model.showSidebar = false
+        model.selectLayerFromViewport(1)
+        XCTAssertTrue(model.showSidebar, "clicking an object in the viewport opens the sidebar hierarchy")
+        XCTAssertEqual(model.selectedLayerIndex, 1)
+        XCTAssertEqual(model.scrollToLayerTrigger, prevScrollTrigger + 1)
+        scene.cancelLayerPulse()
+        model.setHoveredLayer(nil)
+        XCTAssertNil(model.hoveredLayerIndex)
+        XCTAssertTrue(scene.hoveredLayers.isEmpty)
     }
 }

@@ -504,14 +504,15 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(view.rig.pose.pitch, -.pi / 2, accuracy: 1e-5, "pitch stays top-down")
         XCTAssertGreaterThan(simd_distance(SIMD2(view.rig.pose.position.x, view.rig.pose.position.y), SIMD2(startPose.position.x, startPose.position.y)), 0.1, "left-drag pans in XY")
 
-        // 2. Two-finger trackpad scroll translates (pans) instead of 3D orbiting
+        // 2. Two-finger trackpad scroll translates (pans) in the natural direction (dx > 0 moves camera left so plan moves right)
         let beforeScroll = view.rig.pose
         view.scrollWheel(with: scroll(dx: 40, dy: 20, phase: 1))
         view.scrollWheel(with: scroll(dx: 40, dy: 20, phase: 2))
         view.scrollWheel(with: scroll(dx: 0, dy: 0, phase: 4))
         XCTAssertEqual(view.rig.pose.yaw, beforeScroll.yaw, accuracy: 1e-5, "trackpad scroll does not orbit in 2D mode")
         XCTAssertEqual(view.rig.pose.pitch, -.pi / 2, accuracy: 1e-5)
-        XCTAssertGreaterThan(simd_distance(SIMD2(view.rig.pose.position.x, view.rig.pose.position.y), SIMD2(beforeScroll.position.x, beforeScroll.position.y)), 0.05)
+        XCTAssertLessThan(view.rig.pose.position.x, beforeScroll.position.x, "scrolling right moves camera left so plan moves right")
+        XCTAssertGreaterThan(view.rig.pose.position.y, beforeScroll.position.y, "scrolling down (dy > 0 -> -dy < 0) moves camera up so plan moves down")
 
         // 3. Option (Alt) + left-drag rotates the 2D plan in-plane around Z while keeping pitch == -π/2
         let beforeAlt = view.rig.pose

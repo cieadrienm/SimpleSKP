@@ -38,6 +38,8 @@ final class DocumentModel {
     var expandedLayerGroups: Set<String> = []
     var selectedLayerIndex: Int? = nil
     var selectedLayerGroupID: String? = nil
+    var hoveredLayerIndex: Int? = nil
+    var scrollToLayerTrigger: Int = 0
     var showsEdges = Preferences.showsEdges
     var showsGrid = Preferences.showsGrid
     var isPerspective = Preferences.isPerspective
@@ -87,6 +89,12 @@ final class DocumentModel {
             self.activeStandardView = nil
             self.isPerspective = isPersp
             self.syncCameraStateFromViewport()
+        }
+        viewport.onHoverLayer = { [weak self] index in
+            self?.setHoveredLayer(index)
+        }
+        viewport.onSelectLayer = { [weak self] index in
+            self?.selectLayerFromViewport(index)
         }
     }
 
@@ -237,6 +245,25 @@ final class DocumentModel {
         viewport.requestRedraw()
     }
 
+    /// Updates the subtle hover highlight in the viewport and sidebar when the mouse moves over geometry.
+    func setHoveredLayer(_ index: Int?) {
+        let validIndex: Int?
+        if let index, let skp, skp.layers.indices.contains(index) {
+            validIndex = index
+        } else {
+            validIndex = nil
+        }
+        guard hoveredLayerIndex != validIndex else { return }
+        hoveredLayerIndex = validIndex
+        scene?.setHoveredLayers(validIndex.map { [$0] } ?? [])
+        viewport.requestRedraw()
+    }
+
+    var hoveredLayerName: String? {
+        guard let index = hoveredLayerIndex, let skp, skp.layers.indices.contains(index) else { return nil }
+        return skp.layers[index].name
+    }
+
     /// Selects a layer by index in the sidebar and triggers a brief brightness pulse on its geometry in the viewport.
     func selectLayer(_ index: Int) {
         guard let skp, skp.layers.indices.contains(index) else { return }
@@ -245,6 +272,28 @@ final class DocumentModel {
         scene?.pulseLayers([index]) { [weak self] in
             self?.viewport.requestRedraw()
         }
+    }
+
+    /// Clicking an object directly in the viewport: reveals and expands its group in the hierarchy, scrolls to it, and selects + pulses it.
+    func selectLayerFromViewport(_ index: Int) {
+        guard let skp, skp.layers.indices.contains(index) else { return }
+        if !showSidebar, skp.layers.count > 1 || !skp.scenes.isEmpty {
+            withAnimation(.spring(duration: 0.22, bounce: 0.0)) {
+                showSidebar = true
+            }
+            Preferences.showSidebar = true
+        }
+        if let group = skp.layerGroups.first(where: { !$0.isSingleLayer && $0.layerIndices.contains(index) }) {
+            expandedLayerGroups.insert(group.id)
+        }
+        if !layerFilter.isEmpty {
+            let q = layerFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !q.isEmpty, !skp.layers[index].name.localizedCaseInsensitiveContains(q) {
+                layerFilter = ""
+            }
+        }
+        selectLayer(index)
+        scrollToLayerTrigger &+= 1
     }
 
     /// Selects a layer group in the sidebar and triggers a brief brightness pulse on all visible layers in the group.

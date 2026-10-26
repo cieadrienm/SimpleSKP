@@ -1354,8 +1354,28 @@ private struct ViewportHUDOverlay: View {
 
             Spacer()
 
-            // Bottom-right orientation gizmo & quick camera pill
+            // Bottom-left hovered layer pill & Bottom-right orientation gizmo + quick camera pill
             HStack(alignment: .bottom) {
+                if let hoveredName = model.hoveredLayerName {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Theme.accent.swiftUI)
+                            .frame(width: 6.5, height: 6.5)
+                        Text(hoveredName)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(Theme.text.swiftUI)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule()
+                            .fill(Theme.panel.swiftUI.opacity(0.88))
+                            .overlay(Capsule().strokeBorder(Theme.accent.swiftUI.opacity(0.35), lineWidth: 1))
+                    )
+                    .shadow(color: .black.opacity(0.28), radius: 6, y: 2)
+                    .allowsHitTesting(false)
+                }
                 Spacer()
                 HStack(alignment: .center, spacing: 8) {
                     Button {
@@ -1495,9 +1515,10 @@ struct SidebarView: View {
     @Bindable var model: DocumentModel
 
     var body: some View {
-        ScrollView {
-            // Not lazy: in a LazyVStack the first layer row was laid out but not drawn (seen in --snapshot).
-            VStack(alignment: .leading, spacing: 3) {
+        ScrollViewReader { scrollProxy in
+            ScrollView {
+                // Not lazy: in a LazyVStack the first layer row was laid out but not drawn (seen in --snapshot).
+                VStack(alignment: .leading, spacing: 3) {
                 if let skp = model.skp {
                     if !skp.scenes.isEmpty {
                         SectionHeader(L("Scènes", "Scenes")) {
@@ -1621,13 +1642,18 @@ struct SidebarView: View {
                                     ),
                                     isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
                                     isSelected: model.selectedLayerIndex == index,
+                                    isHoveredFromViewport: model.hoveredLayerIndex == index,
                                     canSolo: skp.layers.count > 1,
                                     indented: false,
                                     onToggle: { model.toggleLayer(index) },
                                     onSelect: { model.selectLayer(index) },
                                     onZoom: { model.zoomToLayer(index) },
-                                    onSolo: { model.soloLayer(index) }
+                                    onSolo: { model.soloLayer(index) },
+                                    onHoverChange: { hovering in
+                                        model.setHoveredLayer(hovering ? index : (model.hoveredLayerIndex == index ? nil : model.hoveredLayerIndex))
+                                    }
                                 )
+                                .id("layer-row-\(index)")
                             } else {
                                 let isExpanded = !query.isEmpty || model.isLayerGroupExpanded(group.id)
                                 LayerGroupRow(
@@ -1637,6 +1663,7 @@ struct SidebarView: View {
                                     isPartiallyVisible: model.isLayerGroupPartiallyVisible(group),
                                     isExpanded: isExpanded,
                                     isSelected: model.selectedLayerGroupID == group.id,
+                                    isHoveredFromViewport: model.hoveredLayerIndex.map { group.layerIndices.contains($0) } ?? false,
                                     canSolo: skp.layers.count > group.layerIndices.count,
                                     onToggleExpand: {
                                         withAnimation(.easeInOut(duration: 0.14)) {
@@ -1667,13 +1694,18 @@ struct SidebarView: View {
                                                 ),
                                                 isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
                                                 isSelected: model.selectedLayerIndex == index,
+                                                isHoveredFromViewport: model.hoveredLayerIndex == index,
                                                 canSolo: skp.layers.count > 1,
                                                 indented: true,
                                                 onToggle: { model.toggleLayer(index) },
                                                 onSelect: { model.selectLayer(index) },
                                                 onZoom: { model.zoomToLayer(index) },
-                                                onSolo: { model.soloLayer(index) }
+                                                onSolo: { model.soloLayer(index) },
+                                                onHoverChange: { hovering in
+                                                    model.setHoveredLayer(hovering ? index : (model.hoveredLayerIndex == index ? nil : model.hoveredLayerIndex))
+                                                }
                                             )
+                                            .id("layer-row-\(index)")
                                         }
                                     }
                                     .padding(.leading, 14)
@@ -1694,6 +1726,14 @@ struct SidebarView: View {
                 }
             }
             .padding(10)
+            }
+            .onChange(of: model.scrollToLayerTrigger) { _, _ in
+                if let index = model.selectedLayerIndex {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        scrollProxy.scrollTo("layer-row-\(index)", anchor: .center)
+                    }
+                }
+            }
         }
         .background(Theme.panel.swiftUI)
     }
@@ -1742,6 +1782,7 @@ private struct LayerGroupRow: View {
     let isPartiallyVisible: Bool
     let isExpanded: Bool
     let isSelected: Bool
+    let isHoveredFromViewport: Bool
     let canSolo: Bool
     let onToggleExpand: () -> Void
     let onToggleVisibility: () -> Void
@@ -1848,10 +1889,10 @@ private struct LayerGroupRow: View {
         .padding(.horizontal, 3)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isSelected ? Theme.accent.swiftUI.opacity(0.14) : Color.white.opacity(hovering ? 0.055 : 0.025))
+                .fill(isSelected ? Theme.accent.swiftUI.opacity(0.14) : (isHoveredFromViewport ? Theme.accent.swiftUI.opacity(0.07) : Color.white.opacity(hovering ? 0.055 : 0.025)))
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
-                        .strokeBorder(isSelected ? Theme.accent.swiftUI.opacity(0.42) : Color.clear, lineWidth: 1)
+                        .strokeBorder(isSelected ? Theme.accent.swiftUI.opacity(0.42) : (isHoveredFromViewport ? Theme.accent.swiftUI.opacity(0.24) : Color.clear), lineWidth: 1)
                 )
         )
         .contentShape(Rectangle())
@@ -1876,12 +1917,14 @@ private struct LayerRow: View {
     let fullTooltip: String
     let isVisible: Bool
     let isSelected: Bool
+    let isHoveredFromViewport: Bool
     let canSolo: Bool
     let indented: Bool
     let onToggle: () -> Void
     let onSelect: () -> Void
     let onZoom: () -> Void
     let onSolo: () -> Void
+    let onHoverChange: (Bool) -> Void
 
     @State private var hovering = false
     @State private var lastClickTime: CFTimeInterval = 0
@@ -1942,14 +1985,17 @@ private struct LayerRow: View {
         .padding(.horizontal, 3)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isSelected ? Theme.accent.swiftUI.opacity(0.14) : Color.white.opacity(hovering ? 0.04 : 0.0))
+                .fill(isSelected ? Theme.accent.swiftUI.opacity(0.14) : (isHoveredFromViewport ? Theme.accent.swiftUI.opacity(0.08) : Color.white.opacity(hovering ? 0.04 : 0.0)))
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
-                        .strokeBorder(isSelected ? Theme.accent.swiftUI.opacity(0.38) : Color.clear, lineWidth: 1)
+                        .strokeBorder(isSelected ? Theme.accent.swiftUI.opacity(0.38) : (isHoveredFromViewport ? Theme.accent.swiftUI.opacity(0.28) : Color.clear), lineWidth: 1)
                 )
         )
         .contentShape(Rectangle())
-        .onHover { hovering = $0 }
+        .onHover { isHovering in
+            hovering = isHovering
+            onHoverChange(isHovering)
+        }
     }
 
     private func handleNameClick() {

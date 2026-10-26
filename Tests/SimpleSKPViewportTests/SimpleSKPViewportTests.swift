@@ -589,4 +589,52 @@ final class SimpleSKPViewportTests: XCTestCase {
         XCTAssertTrue(edges(scene, [0, 1])[0].geometry?.firstMaterial === origEdgeMat)
         XCTAssertTrue(faces(scene, [0, 1])[0].geometry?.firstMaterial === origFaceMat)
     }
+
+    @MainActor
+    func testHoverHighlightAndPickLayerForFacesAnd2DEdges() throws {
+        // 1. 2D pure-edge CAD plan with two layers: layer 1 at y = 0, layer 2 at y = 4
+        let edge1 = SKPModel.EdgeSet(layer: 1, positions: [SIMD3(-5, 0, 0), SIMD3(5, 0, 0)])
+        let edge2 = SKPModel.EdgeSet(layer: 2, positions: [SIMD3(-5, 4, 0), SIMD3(5, 4, 0)])
+        let cadModel = SKPModel(
+            root: SKPModel.Definition(name: "", meshes: [], edges: [edge1, edge2], children: []),
+            definitions: [],
+            materials: [],
+            layers: [
+                SKPModel.Layer(name: "0", isVisible: true),
+                SKPModel.Layer(name: "MURS", isVisible: true),
+                SKPModel.Layer(name: "COTES", isVisible: true),
+            ],
+            scenes: [],
+            camera: nil,
+            boundsMin: SIMD3(-5, -2, 0),
+            boundsMax: SIMD3(5, 6, 0),
+            fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/hover2d.dwg"), fileSize: 512, version: "AC1032", versionLabel: "AutoCAD 2018", thumbnailPNG: nil)
+        )
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let scene = ViewportScene(model: cadModel)
+        view.present(scene)
+
+        // Camera is framed from .top above (0, 2, 0). Let's project (0, 0, 0) and (0, 4, 0) to view points.
+        let orthoScale = Float(view.cameraNode.camera!.orthographicScale)
+        let yForLayer1 = CGFloat(300.0 + (-2.0 / orthoScale) * 300.0)
+        let yForLayer2 = CGFloat(300.0 + (2.0 / orthoScale) * 300.0)
+
+        XCTAssertEqual(view.pickLayer(at: CGPoint(x: 400, y: yForLayer1)), 1, "picks MURS edge at y = 0")
+        XCTAssertEqual(view.pickLayer(at: CGPoint(x: 400, y: yForLayer2)), 2, "picks COTES edge at y = 4")
+        XCTAssertNil(view.pickLayer(at: CGPoint(x: 400, y: 20)), "no edge far from lines")
+
+        // Hover highlight changes material and restores cleanly when cleared or pulsed
+        let origEdge1Mat = edges(scene, [1])[0].geometry?.firstMaterial
+        scene.setHoveredLayers([1])
+        XCTAssertEqual(scene.hoveredLayers, [1])
+        XCTAssertTrue(edges(scene, [1])[0].geometry?.firstMaterial !== origEdge1Mat, "hovered edge gets soft highlight material")
+
+        // Pulsing while hovered preserves original material when pulse finishes, then restores hover highlight
+        scene.pulseLayers([1])
+        scene.cancelLayerPulse()
+        XCTAssertTrue(edges(scene, [1])[0].geometry?.firstMaterial !== origEdge1Mat, "hover highlight restored after pulse")
+
+        scene.setHoveredLayers([])
+        XCTAssertTrue(edges(scene, [1])[0].geometry?.firstMaterial === origEdge1Mat, "original material restored when hover cleared")
+    }
 }
