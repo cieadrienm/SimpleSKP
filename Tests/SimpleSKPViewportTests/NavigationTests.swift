@@ -463,4 +463,63 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(simd_dot(view.rig.pose.position - pose.position, pose.forward), 0, accuracy: 1e-3, "no move along the view axis")
         XCTAssertGreaterThan(depth, 0)
     }
+
+    // MARK: 2D AutoCAD Navigation
+
+    func test2DCADNavigationPansOnDragAndScrollAndRotatesPlanOnlyWithOption() {
+        let edges = SKPModel.EdgeSet(
+            layer: 0,
+            positions: [
+                SIMD3(-10, -5, 0), SIMD3(10, -5, 0),
+                SIMD3(10, -5, 0), SIMD3(10, 5, 0),
+                SIMD3(10, 5, 0), SIMD3(-10, 5, 0),
+                SIMD3(-10, 5, 0), SIMD3(-10, -5, 0),
+            ]
+        )
+        let root = SKPModel.Definition(name: "", meshes: [], edges: [edges], children: [])
+        let model = SKPModel(
+            root: root,
+            definitions: [],
+            materials: [],
+            layers: [SKPModel.Layer(name: "0", isVisible: true)],
+            scenes: [],
+            camera: nil,
+            boundsMin: SIMD3(-10, -5, 0),
+            boundsMax: SIMD3(10, 5, 0),
+            fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/plan2d.dwg"), fileSize: 512, version: "AC1032", versionLabel: "AutoCAD 2018", thumbnailPNG: nil)
+        )
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view.present(ViewportScene(model: model))
+
+        XCTAssertTrue(view.is2DNavigationMode)
+        XCTAssertFalse(view.isPerspective, "2D CAD plan starts in parallel projection")
+        XCTAssertEqual(view.rig.pose.pitch, -.pi / 2, accuracy: 1e-5, "looking straight down")
+
+        // 1. Plain left-drag translates (pans) the 2D plan without rotating
+        let startPose = view.rig.pose
+        view.mouseDown(with: mouse(.leftMouseDown, CGPoint(x: 400, y: 300)))
+        view.mouseDragged(with: mouse(.leftMouseDragged, CGPoint(x: 460, y: 340), time: 0.016))
+        view.mouseUp(with: mouse(.leftMouseUp, CGPoint(x: 460, y: 340), time: 0.032))
+        XCTAssertEqual(view.rig.pose.yaw, startPose.yaw, accuracy: 1e-5, "left-drag does not rotate in 2D mode")
+        XCTAssertEqual(view.rig.pose.pitch, -.pi / 2, accuracy: 1e-5, "pitch stays top-down")
+        XCTAssertGreaterThan(simd_distance(SIMD2(view.rig.pose.position.x, view.rig.pose.position.y), SIMD2(startPose.position.x, startPose.position.y)), 0.1, "left-drag pans in XY")
+
+        // 2. Two-finger trackpad scroll translates (pans) instead of 3D orbiting
+        let beforeScroll = view.rig.pose
+        view.scrollWheel(with: scroll(dx: 40, dy: 20, phase: 1))
+        view.scrollWheel(with: scroll(dx: 40, dy: 20, phase: 2))
+        view.scrollWheel(with: scroll(dx: 0, dy: 0, phase: 4))
+        XCTAssertEqual(view.rig.pose.yaw, beforeScroll.yaw, accuracy: 1e-5, "trackpad scroll does not orbit in 2D mode")
+        XCTAssertEqual(view.rig.pose.pitch, -.pi / 2, accuracy: 1e-5)
+        XCTAssertGreaterThan(simd_distance(SIMD2(view.rig.pose.position.x, view.rig.pose.position.y), SIMD2(beforeScroll.position.x, beforeScroll.position.y)), 0.05)
+
+        // 3. Option (Alt) + left-drag rotates the 2D plan in-plane around Z while keeping pitch == -π/2
+        let beforeAlt = view.rig.pose
+        view.mouseDown(with: mouse(.leftMouseDown, CGPoint(x: 400, y: 300), flags: .option))
+        view.mouseDragged(with: mouse(.leftMouseDragged, CGPoint(x: 450, y: 380), time: 0.1, flags: .option))
+        view.mouseUp(with: mouse(.leftMouseUp, CGPoint(x: 450, y: 380), time: 0.2, flags: .option))
+        XCTAssertEqual(view.rig.pose.yaw - beforeAlt.yaw, -50 * 0.4 * .pi / 180, accuracy: 1e-4, "Option-drag rotates yaw in-plane")
+        XCTAssertEqual(view.rig.pose.pitch, -.pi / 2, accuracy: 1e-5, "vertical motion during Option-drag never tilts out of the 2D plane")
+        XCTAssertEqual(simd_distance(view.rig.pose.forward, SIMD3(0, 0, -1)), 0, accuracy: 1e-5)
+    }
 }

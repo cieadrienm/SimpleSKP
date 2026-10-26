@@ -9,7 +9,13 @@ public enum SKPReader {
         public var phase: String
         /// Faces converted so far.
         public var faces: Int
-        public init(phase: String, faces: Int) { self.phase = phase; self.faces = faces }
+        /// Estimated completion fraction (`0.0 ... 1.0`), or `nil` if indeterminate.
+        public var fraction: Double?
+        public init(phase: String, faces: Int, fraction: Double? = nil) {
+            self.phase = phase
+            self.faces = faces
+            self.fraction = fraction
+        }
     }
 
     public static func load(
@@ -35,7 +41,7 @@ public enum SKPReader {
         defer { lock.unlock() }
         f.SUInitialize()
 
-        progress?(Progress(phase: L("Lecture du fichier", "Reading file"), faces: 0))
+        progress?(Progress(phase: L("Lecture du fichier", "Reading file"), faces: 0, fraction: 0.08))
         let start = Date()
         var model: Ref = nil
         var status: Int32 = 0
@@ -50,6 +56,7 @@ public enum SKPReader {
 
         return try withoutActuallyEscaping(isCancelled) { isCancelled in
             let c = Converter(f: f, progress: progress, isCancelled: isCancelled)
+            progress?(Progress(phase: L("Lecture des matériaux et calques", "Reading materials and layers"), faces: 0, fraction: 0.20))
             c.readMaterials(model)
             c.readLayers(model)
             let root: SKPModel.Definition, box: Box
@@ -74,6 +81,7 @@ public enum SKPReader {
             }
             c.stats.definitions = c.definitions.count
             c.stats.loadSeconds = Date().timeIntervalSince(start)
+            progress?(Progress(phase: L("Construction de la scène", "Building scene"), faces: c.stats.faces, fraction: 0.88))
             return SKPModel(
                 root: root, definitions: c.definitions, materials: c.materials, layers: c.layers, scenes: scenes,
                 camera: c.ref(f.SUModelGetCamera, model).flatMap(c.camera),
@@ -273,7 +281,8 @@ public enum SKPReader {
             for face in refs(f.SUEntitiesGetNumFaces, f.SUEntitiesGetFaces, entities) where !bool(f.SUDrawingElementGetHidden, face) {
                 if stats.faces % 2000 == 0 {
                     if isCancelled() { throw SKPError.cancelled }
-                    progress?(Progress(phase: L("Conversion des faces", "Converting faces"), faces: stats.faces))
+                    let frac = 0.24 + 0.60 * (1.0 - 1.0 / (1.0 + Double(stats.faces) / 40_000.0))
+                    progress?(Progress(phase: L("Conversion des faces", "Converting faces"), faces: stats.faces, fraction: frac))
                 }
                 stats.faces += 1
                 var helper: Ref = nil

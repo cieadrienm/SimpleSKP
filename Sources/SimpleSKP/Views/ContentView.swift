@@ -58,11 +58,134 @@ struct ContentView: View {
             if let error = model.error {
                 FailureBanner(message: error.localizedDescription, openInSketchUp: model.sketchUpApp.map { _ in model.openInSketchUp })
             }
+            if case .loading(let progress) = model.state {
+                LoadingProgressOverlay(
+                    fileName: model.info?.url.lastPathComponent ?? L("Chargement…", "Loading…"),
+                    versionLabel: model.info?.versionLabel,
+                    progress: progress
+                )
+                .allowsHitTesting(false)
+            }
             if model.isReady {
                 ViewportHUDOverlay(model: model)
             }
         }
         .clipped()
+    }
+}
+
+/// Prominent loading overlay with a wide progress bar shown in the viewport while reading `.skp` / `.dwg` / `.dxf` files.
+private struct LoadingProgressOverlay: View {
+    let fileName: String
+    let versionLabel: String?
+    let progress: SKPReader.Progress?
+
+    @State private var pulse = false
+
+    private var fraction: Double {
+        min(max(progress?.fraction ?? 0.14, 0.06), 0.98)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            // Full-width top progress ribbon directly below TopBar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.08))
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Theme.accent.swiftUI.opacity(0.85), Theme.accent.swiftUI],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(24, geo.size.width * fraction))
+                        .animation(.easeOut(duration: 0.22), value: fraction)
+                }
+            }
+            .frame(height: 3.5)
+
+            // Centered prominent loading card
+            VStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Theme.accent.swiftUI)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(fileName)
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(Theme.text.swiftUI)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        HStack(spacing: 6) {
+                            Text(progress?.phase ?? L("Ouverture du modèle…", "Opening model…"))
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Theme.textDim.swiftUI)
+                            if let faces = progress?.faces, faces > 0 {
+                                Text("· " + Format.count(faces, L("face", "face")))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(Theme.textFaint.swiftUI)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Text("\(Int((fraction * 100).rounded())) %")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Theme.accent.swiftUI)
+                }
+
+                // Wide high-contrast progress bar
+                GeometryReader { barGeo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.10))
+                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Theme.accent.swiftUI.opacity(pulse ? 0.82 : 1.0),
+                                        Theme.accent.swiftUI,
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: max(18, barGeo.size.width * fraction))
+                            .shadow(color: Theme.accent.swiftUI.opacity(0.55), radius: 6, y: 0)
+                            .animation(.easeOut(duration: 0.22), value: fraction)
+                    }
+                }
+                .frame(height: 8)
+
+                if let versionLabel {
+                    HStack {
+                        Chip(text: versionLabel)
+                        Spacer()
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 15)
+            .frame(width: 380)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Theme.panel.swiftUI.opacity(0.94))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(Theme.accent.swiftUI.opacity(0.32), lineWidth: 1)
+                    )
+            )
+            .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
     }
 }
 
@@ -157,72 +280,74 @@ struct TopBar: View {
                     model.zoomExtents()
                 }
 
-                HStack(spacing: 1) {
-                    ForEach(Self.primaryViews, id: \.view) { item in
-                        ToolbarPillButton(
-                            title: item.label,
-                            active: model.activeStandardView == item.view,
-                            disabled: !model.isReady,
-                            tooltip: "\(item.label) (\(item.shortcut))"
-                        ) {
-                            model.look(item.view)
-                        }
-                    }
-                    Menu {
-                        ForEach(Self.extraViews, id: \.view) { item in
-                            Button("\(item.label) (\(item.shortcut))") {
+                if !model.isCAD {
+                    HStack(spacing: 1) {
+                        ForEach(Self.primaryViews, id: \.view) { item in
+                            ToolbarPillButton(
+                                title: item.label,
+                                active: model.activeStandardView == item.view,
+                                disabled: !model.isReady,
+                                tooltip: "\(item.label) (\(item.shortcut))"
+                            ) {
                                 model.look(item.view)
                             }
                         }
-                    } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Theme.textDim.swiftUI)
-                            .frame(width: 18, height: 22)
-                            .contentShape(Rectangle())
+                        Menu {
+                            ForEach(Self.extraViews, id: \.view) { item in
+                                Button("\(item.label) (\(item.shortcut))") {
+                                    model.look(item.view)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Theme.textDim.swiftUI)
+                                .frame(width: 18, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .disabled(!model.isReady)
+                        .help(L("Autres vues standard : Arrière (⌘5), Gauche (⌘6), Dessous (⌘7)",
+                                "More standard views: Back (⌘5), Left (⌘6), Bottom (⌘7)"))
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .disabled(!model.isReady)
-                    .help(L("Autres vues standard : Arrière (⌘5), Gauche (⌘6), Dessous (⌘7)",
-                            "More standard views: Back (⌘5), Left (⌘6), Bottom (⌘7)"))
-                }
-                .padding(2)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)))
+                    .padding(2)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)))
 
-                ToolbarPillButton(
-                    title: model.isPerspective ? L("Persp.", "Persp.") : L("Parallèle", "Parallel"),
-                    symbol: model.isPerspective ? "view.3d" : "square.grid.2x2",
-                    active: !model.isPerspective,
-                    disabled: !model.isReady,
-                    tooltip: L("Basculer Perspective / Projection parallèle (⌥⌘P)", "Toggle Perspective / Parallel projection (⌥⌘P)")
-                ) {
-                    model.togglePerspective()
-                }
+                    ToolbarPillButton(
+                        title: model.isPerspective ? L("Persp.", "Persp.") : L("Parallèle", "Parallel"),
+                        symbol: model.isPerspective ? "view.3d" : "square.grid.2x2",
+                        active: !model.isPerspective,
+                        disabled: !model.isReady,
+                        tooltip: L("Basculer Perspective / Projection parallèle (⌥⌘P)", "Toggle Perspective / Parallel projection (⌥⌘P)")
+                    ) {
+                        model.togglePerspective()
+                    }
 
-                ToolbarPillButton(
-                    title: L("Vol libre", "Free Fly"),
-                    symbol: "airplane",
-                    active: model.isFreeFlying,
-                    disabled: !model.isReady,
-                    tooltip: L("Mode vol libre à la souris et au clavier (⌥⌘F, Échap pour quitter)",
-                               "Free fly mode with mouse and keyboard (⌥⌘F, Esc to exit)")
-                ) {
-                    model.toggleFreeFlight()
-                }
+                    ToolbarPillButton(
+                        title: L("Vol libre", "Free Fly"),
+                        symbol: "airplane",
+                        active: model.isFreeFlying,
+                        disabled: !model.isReady,
+                        tooltip: L("Mode vol libre à la souris et au clavier (⌥⌘F, Échap pour quitter)",
+                                   "Free fly mode with mouse and keyboard (⌥⌘F, Esc to exit)")
+                    ) {
+                        model.toggleFreeFlight()
+                    }
 
-                IconButton(
-                    symbol: "camera.aperture",
-                    active: showCameraPopover || abs(model.cameraFOV - 35) > 0.5 || abs(model.cameraExposure - (-0.62)) > 0.05,
-                    disabled: !model.isReady,
-                    tooltip: L("Réglages fins de la caméra : angle d'ouverture (FOV / focale mm), position XYZ, orientation et exposition",
-                               "Fine camera settings: field of view (FOV / focal length mm), XYZ position, orientation and exposure")
-                ) {
-                    showCameraPopover.toggle()
-                }
-                .popover(isPresented: $showCameraPopover, arrowEdge: .bottom) {
-                    CameraPopover(model: model)
+                    IconButton(
+                        symbol: "camera.aperture",
+                        active: showCameraPopover || abs(model.cameraFOV - 35) > 0.5 || abs(model.cameraExposure - (-0.62)) > 0.05,
+                        disabled: !model.isReady,
+                        tooltip: L("Réglages fins de la caméra : angle d'ouverture (FOV / focale mm), position XYZ, orientation et exposition",
+                                   "Fine camera settings: field of view (FOV / focal length mm), XYZ position, orientation and exposure")
+                    ) {
+                        showCameraPopover.toggle()
+                    }
+                    .popover(isPresented: $showCameraPopover, arrowEdge: .bottom) {
+                        CameraPopover(model: model)
+                    }
                 }
             }
 
@@ -230,21 +355,23 @@ struct TopBar: View {
 
             // 3. Shading, Edges, Sun & Grid
             HStack(spacing: 3) {
-                HStack(spacing: 1) {
-                    ForEach(Self.shadingStyles, id: \.style) { item in
-                        ToolbarPillButton(
-                            title: item.label,
-                            symbol: item.symbol,
-                            active: model.shadingStyle == item.style,
-                            disabled: !model.isReady,
-                            tooltip: item.help
-                        ) {
-                            model.setShadingStyle(item.style)
+                if !model.isCAD {
+                    HStack(spacing: 1) {
+                        ForEach(Self.shadingStyles, id: \.style) { item in
+                            ToolbarPillButton(
+                                title: item.label,
+                                symbol: item.symbol,
+                                active: model.shadingStyle == item.style,
+                                disabled: !model.isReady,
+                                tooltip: item.help
+                            ) {
+                                model.setShadingStyle(item.style)
+                            }
                         }
                     }
+                    .padding(2)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)))
                 }
-                .padding(2)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.05)))
 
                 IconButton(
                     symbol: "square.3.layers.3d.down.right",
@@ -255,36 +382,38 @@ struct TopBar: View {
                     model.toggleEdges()
                 }
 
-                ToolbarPillButton(
-                    title: model.lightingMode == .sun ? L("Soleil", "Sun") : L("Ponctuel", "Point"),
-                    symbol: model.lightingMode == .sun ? (model.shadowsEnabled ? "sun.max.fill" : "sun.max") : "lightbulb.fill",
-                    active: model.lightingMode == .point,
-                    disabled: !model.isReady,
-                    tooltip: L("Basculer entre éclairage Soleil et éclairage Ponctuel", "Switch between Sun lighting and Point lighting")
-                ) {
-                    model.setLightingMode(model.lightingMode == .sun ? .point : .sun)
-                }
+                if !model.isCAD {
+                    ToolbarPillButton(
+                        title: model.lightingMode == .sun ? L("Soleil", "Sun") : L("Ponctuel", "Point"),
+                        symbol: model.lightingMode == .sun ? (model.shadowsEnabled ? "sun.max.fill" : "sun.max") : "lightbulb.fill",
+                        active: model.lightingMode == .point,
+                        disabled: !model.isReady,
+                        tooltip: L("Basculer entre éclairage Soleil et éclairage Ponctuel", "Switch between Sun lighting and Point lighting")
+                    ) {
+                        model.setLightingMode(model.lightingMode == .sun ? .point : .sun)
+                    }
 
-                IconButton(
-                    symbol: model.shadowsEnabled ? "shadow" : "sun.min",
-                    active: model.shadowsEnabled,
-                    disabled: !model.isReady,
-                    tooltip: L("Activer ou couper les ombres portées (⌥⌘O)", "Toggle cast shadows (⌥⌘O)")
-                ) {
-                    model.toggleShadows()
-                }
+                    IconButton(
+                        symbol: model.shadowsEnabled ? "shadow" : "sun.min",
+                        active: model.shadowsEnabled,
+                        disabled: !model.isReady,
+                        tooltip: L("Activer ou couper les ombres portées (⌥⌘O)", "Toggle cast shadows (⌥⌘O)")
+                    ) {
+                        model.toggleShadows()
+                    }
 
-                IconButton(
-                    symbol: "slider.horizontal.below.sun.max",
-                    active: showLightingPopover || model.ambientOcclusionEnabled || model.lightingMode == .point || model.backdropStyle == .customColor,
-                    disabled: !model.isReady,
-                    tooltip: L("Réglages d'éclairage (Soleil / Ponctuel), importance SSAO et couleur de fond",
-                               "Lighting settings (Sun / Point), SSAO strength and background color")
-                ) {
-                    showLightingPopover.toggle()
-                }
-                .popover(isPresented: $showLightingPopover, arrowEdge: .bottom) {
-                    LightingPopover(model: model)
+                    IconButton(
+                        symbol: "slider.horizontal.below.sun.max",
+                        active: showLightingPopover || model.ambientOcclusionEnabled || model.lightingMode == .point || model.backdropStyle == .customColor,
+                        disabled: !model.isReady,
+                        tooltip: L("Réglages d'éclairage (Soleil / Ponctuel), importance SSAO et couleur de fond",
+                                   "Lighting settings (Sun / Point), SSAO strength and background color")
+                    ) {
+                        showLightingPopover.toggle()
+                    }
+                    .popover(isPresented: $showLightingPopover, arrowEdge: .bottom) {
+                        LightingPopover(model: model)
+                    }
                 }
 
                 IconButton(
@@ -1486,11 +1615,17 @@ struct SidebarView: View {
                             if group.isSingleLayer, let index = matchingIndices.first {
                                 LayerRow(
                                     name: skp.layers[index].name,
-                                    fullTooltip: skp.layers[index].name,
+                                    fullTooltip: L(
+                                        "\(skp.layers[index].name) — Clic : repérer · Double-clic : zoomer dessus",
+                                        "\(skp.layers[index].name) — Click: highlight · Double-click: zoom to layer"
+                                    ),
                                     isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
+                                    isSelected: model.selectedLayerIndex == index,
                                     canSolo: skp.layers.count > 1,
                                     indented: false,
                                     onToggle: { model.toggleLayer(index) },
+                                    onSelect: { model.selectLayer(index) },
+                                    onZoom: { model.zoomToLayer(index) },
                                     onSolo: { model.soloLayer(index) }
                                 )
                             } else {
@@ -1501,6 +1636,7 @@ struct SidebarView: View {
                                     isVisible: model.isLayerGroupVisible(group),
                                     isPartiallyVisible: model.isLayerGroupPartiallyVisible(group),
                                     isExpanded: isExpanded,
+                                    isSelected: model.selectedLayerGroupID == group.id,
                                     canSolo: skp.layers.count > group.layerIndices.count,
                                     onToggleExpand: {
                                         withAnimation(.easeInOut(duration: 0.14)) {
@@ -1509,6 +1645,12 @@ struct SidebarView: View {
                                     },
                                     onToggleVisibility: {
                                         model.toggleLayerGroup(group)
+                                    },
+                                    onSelect: {
+                                        model.selectLayerGroup(group)
+                                    },
+                                    onZoom: {
+                                        model.zoomToLayerGroup(group)
                                     },
                                     onSolo: {
                                         model.soloLayerGroup(group)
@@ -1519,21 +1661,27 @@ struct SidebarView: View {
                                         ForEach(matchingIndices, id: \.self) { index in
                                             LayerRow(
                                                 name: group.memberLabels[index] ?? skp.layers[index].name,
-                                                fullTooltip: skp.layers[index].name,
+                                                fullTooltip: L(
+                                                    "\(skp.layers[index].name) — Clic : repérer · Double-clic : zoomer dessus",
+                                                    "\(skp.layers[index].name) — Click: highlight · Double-click: zoom to layer"
+                                                ),
                                                 isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
+                                                isSelected: model.selectedLayerIndex == index,
                                                 canSolo: skp.layers.count > 1,
                                                 indented: true,
                                                 onToggle: { model.toggleLayer(index) },
+                                                onSelect: { model.selectLayer(index) },
+                                                onZoom: { model.zoomToLayer(index) },
                                                 onSolo: { model.soloLayer(index) }
                                             )
                                         }
                                     }
-                                    .padding(.leading, 12)
+                                    .padding(.leading, 14)
                                     .overlay(alignment: .leading) {
                                         Rectangle()
                                             .fill(Color.white.opacity(0.08))
                                             .frame(width: 1)
-                                            .padding(.leading, 6)
+                                            .padding(.leading, 11)
                                             .padding(.vertical, 2)
                                     }
                                 }
@@ -1593,34 +1741,49 @@ private struct LayerGroupRow: View {
     let isVisible: Bool
     let isPartiallyVisible: Bool
     let isExpanded: Bool
+    let isSelected: Bool
     let canSolo: Bool
     let onToggleExpand: () -> Void
     let onToggleVisibility: () -> Void
+    let onSelect: () -> Void
+    let onZoom: () -> Void
     let onSolo: () -> Void
 
     @State private var hovering = false
+    @State private var chevronHovering = false
+    @State private var lastClickTime: CFTimeInterval = 0
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 3) {
+            // Generous 24×24 pt disclosure button so expanding/collapsing groups is effortless
             Button(action: onToggleExpand) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Theme.textDim.swiftUI)
-                    .frame(width: 12, height: 14)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.white.opacity(chevronHovering ? 0.12 : 0.0))
+                        .frame(width: 22, height: 22)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(chevronHovering ? Theme.text.swiftUI : Theme.textDim.swiftUI)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onHover { chevronHovering = $0 }
             .help(isExpanded
                 ? L("Replier le groupe « \(group.name) »", "Collapse group “\(group.name)”")
                 : L("Déplier le groupe « \(group.name) »", "Expand group “\(group.name)”"))
 
+            // Dedicated checkbox button: only clicking the checkbox toggles visibility
             Button(action: onToggleVisibility) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 3.5)
                         .fill(isVisible ? Theme.accent.swiftUI : Color.white.opacity(0.08))
-                        .frame(width: 13.5, height: 13.5)
+                        .frame(width: 14, height: 14)
                         .overlay(
                             RoundedRectangle(cornerRadius: 3.5)
-                                .strokeBorder(isVisible ? Theme.accent.swiftUI : Color.white.opacity(0.26), lineWidth: 1)
+                                .strokeBorder(isVisible ? Theme.accent.swiftUI : Color.white.opacity(0.28), lineWidth: 1)
                         )
                     if isPartiallyVisible {
                         Image(systemName: "minus")
@@ -1632,25 +1795,33 @@ private struct LayerGroupRow: View {
                             .foregroundStyle(Color.white)
                     }
                 }
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help(L("Activer ou désactiver tous les calques du groupe « \(group.name) »",
                     "Enable or disable all layers in group “\(group.name)”"))
 
-            Button(action: onToggleExpand) {
-                HStack(spacing: 4) {
+            // Clicking the group name selects & pulses it; double-clicking zooms onto it in the viewport
+            Button(action: handleNameClick) {
+                HStack(spacing: 5) {
                     Image(systemName: isExpanded ? "folder.fill" : "folder")
                         .font(.system(size: 10.5))
                         .foregroundStyle(isVisible ? Theme.accent.swiftUI : Theme.textFaint.swiftUI)
                     Text(group.name)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI)
+                        .foregroundStyle(isSelected ? Theme.accent.swiftUI : (isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI))
                         .lineLimit(1)
+                    Spacer(minLength: 0)
                 }
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-
-            Spacer(minLength: 0)
+            .help(L(
+                "Groupe « \(group.name) » — Clic : repérer · Double-clic : zoomer dessus",
+                "Group “\(group.name)” — Click: highlight · Double-click: zoom to group"
+            ))
 
             if canSolo && hovering {
                 Button(action: onSolo) {
@@ -1673,14 +1844,30 @@ private struct LayerGroupRow: View {
                 .padding(.vertical, 1)
                 .background(RoundedRectangle(cornerRadius: 3.5).fill(Color.white.opacity(0.05)))
         }
-        .padding(.vertical, 2.5)
-        .padding(.horizontal, 4)
+        .padding(.vertical, 1)
+        .padding(.horizontal, 3)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(Color.white.opacity(hovering ? 0.055 : 0.025))
+                .fill(isSelected ? Theme.accent.swiftUI.opacity(0.14) : Color.white.opacity(hovering ? 0.055 : 0.025))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(isSelected ? Theme.accent.swiftUI.opacity(0.42) : Color.clear, lineWidth: 1)
+                )
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+    }
+
+    private func handleNameClick() {
+        let now = CACurrentMediaTime()
+        let eventClicks = NSApp.currentEvent?.clickCount ?? 1
+        if eventClicks >= 2 || (now - lastClickTime) <= min(NSEvent.doubleClickInterval, 0.38) {
+            lastClickTime = 0
+            onZoom()
+        } else {
+            lastClickTime = now
+            onSelect()
+        }
     }
 }
 
@@ -1688,25 +1875,55 @@ private struct LayerRow: View {
     let name: String
     let fullTooltip: String
     let isVisible: Bool
+    let isSelected: Bool
     let canSolo: Bool
     let indented: Bool
     let onToggle: () -> Void
+    let onSelect: () -> Void
+    let onZoom: () -> Void
     let onSolo: () -> Void
 
     @State private var hovering = false
+    @State private var lastClickTime: CFTimeInterval = 0
 
     var body: some View {
         HStack(spacing: 4) {
-            Toggle(isOn: Binding(get: { isVisible }, set: { _ in onToggle() })) {
-                Text(name)
-                    .font(.system(size: indented ? 11.5 : 12))
-                    .foregroundStyle(isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI)
-                    .lineLimit(1)
+            // Dedicated checkbox button: only clicking the checkbox toggles visibility
+            Button(action: onToggle) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 3.5)
+                        .fill(isVisible ? Theme.accent.swiftUI : Color.white.opacity(0.08))
+                        .frame(width: 13.5, height: 13.5)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3.5)
+                                .strokeBorder(isVisible ? Theme.accent.swiftUI : Color.white.opacity(0.28), lineWidth: 1)
+                        )
+                    if isVisible {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(Color.white)
+                    }
+                }
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
             }
-            .toggleStyle(.checkbox)
-            .help(fullTooltip)
+            .buttonStyle(.plain)
+            .help(L("Afficher ou masquer ce calque", "Show or hide this layer"))
 
-            Spacer(minLength: 0)
+            // Clicking the layer name selects & pulses it; double-clicking zooms onto it in the viewport
+            Button(action: handleNameClick) {
+                HStack(spacing: 4) {
+                    Text(name)
+                        .font(.system(size: indented ? 11.5 : 12, weight: isSelected ? .semibold : .regular))
+                        .foregroundStyle(isSelected ? Theme.accent.swiftUI : (isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 2.5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(fullTooltip)
 
             if canSolo && hovering {
                 Button(action: onSolo) {
@@ -1721,10 +1938,30 @@ private struct LayerRow: View {
                 .help(L("Isoler ce calque (ou réafficher tous les calques)", "Solo this layer (or restore all layers)"))
             }
         }
-        .padding(.vertical, 1.5)
-        .padding(.horizontal, 2)
+        .padding(.vertical, 0.5)
+        .padding(.horizontal, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isSelected ? Theme.accent.swiftUI.opacity(0.14) : Color.white.opacity(hovering ? 0.04 : 0.0))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(isSelected ? Theme.accent.swiftUI.opacity(0.38) : Color.clear, lineWidth: 1)
+                )
+        )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+    }
+
+    private func handleNameClick() {
+        let now = CACurrentMediaTime()
+        let eventClicks = NSApp.currentEvent?.clickCount ?? 1
+        if eventClicks >= 2 || (now - lastClickTime) <= min(NSEvent.doubleClickInterval, 0.38) {
+            lastClickTime = 0
+            onZoom()
+        } else {
+            lastClickTime = now
+            onSelect()
+        }
     }
 }
 

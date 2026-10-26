@@ -18,7 +18,7 @@ public enum CADReader {
         if isCancelled() { throw SKPError.cancelled }
 
         let start = Date()
-        progress?(SKPReader.Progress(phase: L("Conversion AutoCAD…", "Converting AutoCAD…"), faces: 0))
+        progress?(SKPReader.Progress(phase: L("Conversion AutoCAD…", "Converting AutoCAD…"), faces: 0, fraction: 0.12))
 
         let forceNativeDXF = getenv("SIMPLESKP_FORCE_NATIVE_DXF") != nil
         if !forceNativeDXF, let plugin = locatePlugin() {
@@ -253,7 +253,10 @@ public enum CADReader {
             guard ok, FileManager.default.fileExists(atPath: tempSKP.path) else {
                 throw SKPError.unreadable(url)
             }
-            return try SKPReader.loadSkpFile(tempSKP, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
+            return try SKPReader.loadSkpFile(tempSKP, fileInfo: fileInfo, progress: { p in
+                let mapped = p.fraction.map { 0.35 + $0 * 0.50 } ?? 0.50
+                progress?(SKPReader.Progress(phase: p.phase, faces: p.faces, fraction: mapped))
+            }, isCancelled: isCancelled)
         }
 
         // Pass 1: Model Units (0)
@@ -274,6 +277,7 @@ public enum CADReader {
             }
         }
 
+        progress?(SKPReader.Progress(phase: L("Calibrage des unités…", "Calibrating units…"), faces: model.stats.faces, fraction: 0.90))
         return normalizeCADModel(model)
     }
 
@@ -530,7 +534,11 @@ enum DXFNativeParser {
 
         func parseEntities(into geo: inout RawGeometry, stopAtEndBlk: Bool) throws {
             while let (code, val) = readPair() {
-                if pairIndex % 25_000 == 0, isCancelled() { throw SKPError.cancelled }
+                if pairIndex % 25_000 == 0 {
+                    if isCancelled() { throw SKPError.cancelled }
+                    let frac = totalPairs > 0 ? min(0.86, 0.15 + 0.70 * Double(pairIndex) / Double(totalPairs)) : 0.5
+                    progress?(SKPReader.Progress(phase: L("Lecture des entités DXF…", "Reading DXF entities…"), faces: 0, fraction: frac))
+                }
                 guard code == 0 else { continue }
                 let entity = val.uppercased()
                 if entity == "ENDSEC" || (stopAtEndBlk && entity == "ENDBLK") {

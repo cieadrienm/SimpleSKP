@@ -7,7 +7,7 @@ import SimpleSKPCore
 /// on its path is visible, so all faces sharing a layer set (the layers along their path) and a resolved material are
 /// merged into one geometry in model space, and all edges of a layer set into one `.line` geometry — a few hundred draw
 /// calls instead of one per instance. A layer set is built the first time all its layers are visible.
-public final class ViewportScene {
+public final class ViewportScene: @unchecked Sendable {
     public let model: SKPModel
     public let scene: SCNScene
     /// The Z-up → Y-up node: everything from `SKPModel` (positions, transforms, camera) lives under it verbatim.
@@ -182,6 +182,9 @@ public final class ViewportScene {
     private let pointLightsRoot = SCNNode()
     private var hiddenLayers = Set<Int>()
     private var cachedVisibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
+    public private(set) var activePulseLayers: Set<Int> = []
+    private var pulseTimer: Timer?
+    private var pulseRestoreActions: [() -> Void] = []
 
     public init(model: SKPModel) {
         self.model = model
@@ -268,6 +271,7 @@ public final class ViewportScene {
     /// Shows or hides everything on a layer, by index into `model.layers`: a layer set is shown iff all its layers are.
     /// Sets shown for the first time are built here (main thread, like any scene edit).
     public func setLayer(_ index: Int, visible: Bool) {
+        if Thread.isMainThread { MainActor.assumeIsolated { cancelLayerPulse() } }
         if visible { hiddenLayers.remove(index) } else { hiddenLayers.insert(index) }
         cachedVisibleBounds = nil
         let sets = setsByLayer[index] ?? []
@@ -278,6 +282,7 @@ public final class ViewportScene {
 
     /// Applies a whole layer state at once (a scene change): only the sets visible in the end are built.
     public func setLayers(_ visible: [Bool]) {
+        if Thread.isMainThread { MainActor.assumeIsolated { cancelLayerPulse() } }
         hiddenLayers = Set(visible.indices.filter { !visible[$0] })
         cachedVisibleBounds = nil
         build(layerSets.values.filter { $0.node == nil && isVisible($0) })
@@ -318,6 +323,163 @@ public final class ViewportScene {
     }
 
     private func isVisible(_ set: LayerSet) -> Bool { set.layers.allSatisfy { !hiddenLayers.contains($0) } }
+
+    /// Layer sets whose geometry belongs to `targetLayers`.
+    /// Since SketchUp/CAD instances placed on layer `L != 0` often contain geometry on `Layer0` (`set.layers == [0, L]`),
+    /// selecting a non-zero layer matches any set containing it, while selecting `Layer0` (`[0]`) matches pure `[0]` sets.
+    func matchingLayerSets(for targetLayers: Set<Int>) -> [LayerSet] {
+        guard !targetLayers.isEmpty else { return [] }
+        let nonZeroTargets = targetLayers.subtracting([0])
+        if nonZeroTargets.isEmpty {
+            let pureZero = layerSets.values.filter { $0.layers == [0] }
+            if !pureZero.isEmpty { return Array(pureZero) }
+            return layerSets.values.filter { $0.layers.contains(0) }
+        }
+        return layerSets.values.filter { set in
+            if !nonZeroTargets.isDisjoint(with: set.layers) { return true }
+            if targetLayers.contains(0) && set.layers == [0] { return true }
+            return false
+        }
+    }
+
+    /// Bounding box in model space (metres, Z up) of all geometry belonging to `targetLayers`.
+    /// Builds matching layer sets if they have not been built yet so zooming to a layer works immediately.
+    public func bounds(forLayers targetLayers: Set<Int>) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        let matching = matchingLayerSets(for: targetLayers)
+        guard !matching.isEmpty else { return nil }
+        let unbuilt = matching.filter { $0.node == nil }
+        if !unbuilt.isEmpty {
+            build(unbuilt)
+            for set in unbuilt { set.node?.isHidden = !isVisible(set) }
+        }
+        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        let visibleMatching = matching.filter { $0.node?.isHidden == false }
+        let setsToMeasure = visibleMatching.isEmpty ? matching : visibleMatching
+        for set in setsToMeasure {
+            guard let node = set.node else { continue }
+            for child in node.childNodes where child.geometry != nil {
+                let (a, b) = child.geometry!.boundingBox
+                lo = simd_min(lo, SIMD3(a))
+                hi = simd_max(hi, SIMD3(b))
+            }
+        }
+        guard lo.x <= hi.x else { return nil }
+        return (lo, hi)
+    }
+
+    /// Triggers a brief brightness pulse on all visible faces and edges belonging to `targetLayers` so the user can visually locate them.
+    @MainActor
+    public func pulseLayers(_ targetLayers: Set<Int>, onUpdate: (@MainActor () -> Void)? = nil) {
+        cancelLayerPulse()
+        let matching = matchingLayerSets(for: targetLayers).filter(isVisible)
+        guard !matching.isEmpty else { return }
+        let unbuilt = matching.filter { $0.node == nil }
+        if !unbuilt.isEmpty {
+            build(unbuilt)
+            for set in unbuilt { set.node?.isHidden = !isVisible(set) }
+        }
+
+        let pulseEdgeMat = SCNMaterial()
+        pulseEdgeMat.lightingModel = .constant
+        pulseEdgeMat.readsFromDepthBuffer = false
+        pulseEdgeMat.writesToDepthBuffer = false
+
+        var pulseFaceMaterials: [SCNMaterial] = []
+        var restoreActions: [() -> Void] = []
+
+        for set in matching {
+            guard let node = set.node, !node.isHidden else { continue }
+            for child in node.childNodes {
+                guard let geom = child.geometry else { continue }
+                if child.categoryBitMask == Self.edgeCategory {
+                    let origMaterials = geom.materials
+                    let origOrder = child.renderingOrder
+                    let origHidden = child.isHidden
+                    restoreActions.append {
+                        geom.materials = origMaterials
+                        child.renderingOrder = origOrder
+                        child.isHidden = origHidden
+                    }
+                    geom.materials = [pulseEdgeMat]
+                    child.renderingOrder = 3
+                    child.isHidden = false
+                } else if let baseMat = geom.firstMaterial {
+                    let origMaterials = geom.materials
+                    let pulseMat = baseMat.copy() as! SCNMaterial
+                    restoreActions.append {
+                        geom.materials = origMaterials
+                    }
+                    geom.materials = [pulseMat]
+                    pulseFaceMaterials.append(pulseMat)
+                }
+            }
+        }
+
+        guard !restoreActions.isEmpty else { return }
+        activePulseLayers = targetLayers
+        pulseRestoreActions = restoreActions
+
+        let baseEdgeRGB = Rendering.contrastingEdgeColor(
+            for: backdropStyle,
+            customColor: customBackdropColor,
+            shadingStyle: shadingStyle
+        )
+        let baseLuma = 0.2126 * baseEdgeRGB.x + 0.7152 * baseEdgeRGB.y + 0.0722 * baseEdgeRGB.z
+        // Dark backdrop -> bright HDR white-cyan flash; light backdrop -> vivid luminous azure flash
+        let peakEdgeRGB: SIMD3<Float> = baseLuma > 0.5
+            ? SIMD3<Float>(1.85, 1.92, 2.05)
+            : SIMD3<Float>(0.06, 0.52, 1.45)
+        let startEdgeRGB = baseLuma > 0.5 ? baseEdgeRGB * 1.48 : baseEdgeRGB
+
+        func applyEnvelope(_ env: Float) {
+            let t = simd_clamp(env, 0, 1)
+            let rgb = startEdgeRGB + (peakEdgeRGB - startEdgeRGB) * t
+            pulseEdgeMat.diffuse.contents = NSColor(
+                srgbRed: CGFloat(rgb.x),
+                green: CGFloat(rgb.y),
+                blue: CGFloat(rgb.z),
+                alpha: 1.0
+            )
+            let em = CGFloat(t * 0.78)
+            let emissionColor = NSColor(srgbRed: em * 0.92, green: em * 0.96, blue: em * 1.05, alpha: 1.0)
+            for faceMat in pulseFaceMaterials {
+                faceMat.emission.contents = emissionColor
+            }
+        }
+
+        applyEnvelope(1.0)
+        onUpdate?()
+
+        let startTime = CACurrentMediaTime()
+        let duration: CFTimeInterval = 0.55
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            MainActor.assumeIsolated {
+                let elapsed = CACurrentMediaTime() - startTime
+                if elapsed >= duration {
+                    self.cancelLayerPulse()
+                    onUpdate?()
+                } else {
+                    let progress = Float(elapsed / duration)
+                    let env = pow(1.0 - progress, 1.75)
+                    applyEnvelope(env)
+                    onUpdate?()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pulseTimer = timer
+    }
+
+    @MainActor
+    public func cancelLayerPulse() {
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+        let actions = pulseRestoreActions
+        pulseRestoreActions.removeAll()
+        activePulseLayers.removeAll()
+        for action in actions { action() }
+    }
 
     // MARK: - Flattening
 
@@ -464,6 +626,9 @@ public final class ViewportScene {
     }
 
     private func applyShadingStyle() {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { cancelLayerPulse() }
+        }
         for (node, material) in faceNodes {
             applyShadingStyle(to: node, original: material)
         }

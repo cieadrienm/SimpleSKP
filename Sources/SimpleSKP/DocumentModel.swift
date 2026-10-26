@@ -36,6 +36,8 @@ final class DocumentModel {
     var layerVisible: [Bool] = []
     var layerFilter: String = ""
     var expandedLayerGroups: Set<String> = []
+    var selectedLayerIndex: Int? = nil
+    var selectedLayerGroupID: String? = nil
     var showsEdges = Preferences.showsEdges
     var showsGrid = Preferences.showsGrid
     var isPerspective = Preferences.isPerspective
@@ -126,6 +128,12 @@ final class DocumentModel {
 
     var isReady: Bool { scene != nil }
 
+    /// `true` when the open document is an AutoCAD `.dwg` or `.dxf` file.
+    var isCAD: Bool { skp?.fileInfo.isCAD == true || info?.isCAD == true }
+
+    /// `true` when the open document is a 2D AutoCAD plan.
+    var is2DCAD: Bool { isCAD && (skp?.isPlanar2D ?? true) }
+
     var error: Error? {
         if case .failed(let error) = state { return error }
         return nil
@@ -145,11 +153,11 @@ final class DocumentModel {
     func present(_ scene: ViewportScene, seconds: Double) {
         setModel(scene.model)
         loadSeconds = seconds
-        // Ensure pure-edge CAD models remain visible even if edges were turned off in preferences.
-        if scene.model.stats.faces == 0, scene.model.stats.edges > 0 {
+        // AutoCAD files (and pure-edge models) always display edges on load.
+        if scene.model.fileInfo.isCAD || (scene.model.stats.faces == 0 && scene.model.stats.edges > 0) {
             showsEdges = true
         }
-        if !showsEdges { scene.showsEdges = false }
+        scene.showsEdges = showsEdges
         scene.shadowsEnabled = shadowsEnabled
         scene.shadingStyle = shadingStyle
         scene.customBackdropColor = customBackdropColor
@@ -176,7 +184,7 @@ final class DocumentModel {
             activeStandardView = scene.model.isPlanar2D ? .top : .iso
         }
         updateVisibleSize()
-        if scene.model.camera == nil, viewport.isPerspective != isPerspective {
+        if scene.model.camera == nil, !viewport.is2DNavigationMode, viewport.isPerspective != isPerspective {
             viewport.isPerspective = isPerspective
         }
         isPerspective = viewport.isPerspective
@@ -226,6 +234,53 @@ final class DocumentModel {
         layerVisible[index].toggle()
         scene?.setLayer(index, visible: layerVisible[index])
         updateVisibleSize()
+        viewport.requestRedraw()
+    }
+
+    /// Selects a layer by index in the sidebar and triggers a brief brightness pulse on its geometry in the viewport.
+    func selectLayer(_ index: Int) {
+        guard let skp, skp.layers.indices.contains(index) else { return }
+        selectedLayerIndex = index
+        selectedLayerGroupID = nil
+        scene?.pulseLayers([index]) { [weak self] in
+            self?.viewport.requestRedraw()
+        }
+    }
+
+    /// Selects a layer group in the sidebar and triggers a brief brightness pulse on all visible layers in the group.
+    func selectLayerGroup(_ group: SKPModel.LayerGroup) {
+        selectedLayerGroupID = group.id
+        selectedLayerIndex = nil
+        scene?.pulseLayers(Set(group.layerIndices)) { [weak self] in
+            self?.viewport.requestRedraw()
+        }
+    }
+
+    /// Double-clicking a layer name in the sidebar: ensures it is visible, pulses it, and smoothly glides the camera to frame its geometry.
+    func zoomToLayer(_ index: Int, animated: Bool = true) {
+        guard let skp, skp.layers.indices.contains(index) else { return }
+        if layerVisible.indices.contains(index), !layerVisible[index] {
+            layerVisible[index] = true
+            scene?.setLayer(index, visible: true)
+            updateVisibleSize()
+        }
+        selectLayer(index)
+        guard let bounds = scene?.bounds(forLayers: [index]) else { return }
+        activeStandardView = nil
+        viewport.frameBounds(min: bounds.min, max: bounds.max, animated: animated)
+        syncCameraStateFromViewport()
+    }
+
+    /// Double-clicking a layer group name in the sidebar: ensures its layers are visible, pulses them, and smoothly glides the camera to frame the group.
+    func zoomToLayerGroup(_ group: SKPModel.LayerGroup, animated: Bool = true) {
+        if !isLayerGroupVisible(group) {
+            setLayerGroup(group, visible: true)
+        }
+        selectLayerGroup(group)
+        guard let bounds = scene?.bounds(forLayers: Set(group.layerIndices)) else { return }
+        activeStandardView = nil
+        viewport.frameBounds(min: bounds.min, max: bounds.max, animated: animated)
+        syncCameraStateFromViewport()
     }
 
     func setAllLayers(visible: Bool) {
@@ -233,6 +288,7 @@ final class DocumentModel {
         layerVisible = Array(repeating: visible, count: layerVisible.count)
         scene?.setLayers(layerVisible)
         updateVisibleSize()
+        viewport.requestRedraw()
     }
 
     /// Isolates a single layer (`Solo`), or restores all layers if it was already the only visible one.
@@ -245,6 +301,7 @@ final class DocumentModel {
             layerVisible = layerVisible.indices.map { $0 == index }
             scene?.setLayers(layerVisible)
             updateVisibleSize()
+            viewport.requestRedraw()
         }
     }
 
@@ -274,6 +331,7 @@ final class DocumentModel {
         guard changed else { return }
         scene?.setLayers(layerVisible)
         updateVisibleSize()
+        viewport.requestRedraw()
     }
 
     func toggleLayerGroup(_ group: SKPModel.LayerGroup) {
@@ -291,6 +349,7 @@ final class DocumentModel {
             layerVisible = layerVisible.indices.map { memberSet.contains($0) }
             scene?.setLayers(layerVisible)
             updateVisibleSize()
+            viewport.requestRedraw()
         }
     }
 

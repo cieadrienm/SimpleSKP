@@ -559,4 +559,34 @@ final class SimpleSKPViewportTests: XCTestCase {
             XCTAssertEqual(hitPoint.z, 0, accuracy: 1e-3)
         }
     }
+
+    func testLayerBoundsAndBrightnessPulse() throws {
+        var model = SyntheticModel.cube()
+        model.layers[1].isVisible = true
+        let scene = ViewportScene(model: model)
+
+        // Layer 0 has the root cube (0..1) and instance A (2..3, 0..1, 0..1)
+        let bounds0 = try XCTUnwrap(scene.bounds(forLayers: [0]))
+        XCTAssertEqual(bounds0.min, SIMD3(0, 0, 0))
+        XCTAssertEqual(bounds0.max, SIMD3(3, 1, 1))
+
+        // Layer 1 ("Cotes") has instance B at (0..1, 2..3, 0..1)
+        let bounds1 = try XCTUnwrap(scene.bounds(forLayers: [1]))
+        XCTAssertEqual(bounds1.min, SIMD3(0, 2, 0))
+        XCTAssertEqual(bounds1.max, SIMD3(1, 3, 1))
+
+        // Trigger brightness pulse on Layer 1
+        let origEdgeMat = edges(scene, [0, 1])[0].geometry?.firstMaterial
+        let origFaceMat = faces(scene, [0, 1])[0].geometry?.firstMaterial
+        scene.pulseLayers([1])
+        XCTAssertEqual(scene.activePulseLayers, [1])
+        XCTAssertTrue(edges(scene, [0, 1])[0].geometry?.firstMaterial !== origEdgeMat, "pulsing edge uses highlight material")
+        XCTAssertTrue(faces(scene, [0, 1])[0].geometry?.firstMaterial !== origFaceMat, "pulsing face uses highlight material with emission")
+
+        // Cancelling or finishing the pulse restores the exact original materials
+        scene.cancelLayerPulse()
+        XCTAssertTrue(scene.activePulseLayers.isEmpty)
+        XCTAssertTrue(edges(scene, [0, 1])[0].geometry?.firstMaterial === origEdgeMat)
+        XCTAssertTrue(faces(scene, [0, 1])[0].geometry?.firstMaterial === origFaceMat)
+    }
 }

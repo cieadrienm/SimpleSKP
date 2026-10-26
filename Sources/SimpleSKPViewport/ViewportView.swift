@@ -23,7 +23,10 @@ public final class ViewportView: SCNView {
     /// Optional override for `resetView(animated:)` so the document model can restore the active scene's camera.
     public var onResetView: ((Bool) -> Void)?
 
-    private enum Drag { case orbit, pan, look }
+    /// `true` when viewing a 2D AutoCAD plan: left-drag & trackpad scroll translate, wheel/pinch zoom, and `⌥`-drag rotates the 2D plan in-plane.
+    public var is2DNavigationMode: Bool { rig.is2DMode }
+
+    private enum Drag { case orbit, pan, look, rotate2D }
     private var drag: Drag?
     private var lastPoint = CGPoint.zero
     private var zoomAnchor: SIMD3<Float>?
@@ -219,6 +222,12 @@ public final class ViewportView: SCNView {
         scene.fill.removeFromParentNode()
         cameraNode.addChildNode(scene.fill)
         pointOfView = cameraNode
+        let is2DCAD = scene.model.fileInfo.isCAD && scene.model.isPlanar2D
+        rig.is2DMode = is2DCAD
+        if is2DCAD {
+            if isFreeFlying { isFreeFlying = false }
+            isPerspective = false
+        }
         rig.setSpeed(diagonal: simd_distance(scene.model.boundsMin, scene.model.boundsMax))
         if let camera = scene.model.camera {
             apply(camera: camera, animated: false)
@@ -229,6 +238,32 @@ public final class ViewportView: SCNView {
 
     public func zoomExtents(animated: Bool) {
         frame(rig.pose, animated: animated)
+    }
+
+    /// Frames a specific model-space bounding box (e.g. a layer or layer group), keeping the current viewing direction.
+    public func frameBounds(
+        min boundsMin: SIMD3<Float>,
+        max boundsMax: SIMD3<Float>,
+        animated: Bool,
+        duration: Float = CameraRig.defaultGlideDuration
+    ) {
+        let centre = (boundsMin + boundsMax) / 2
+        let radius = max(simd_length(boundsMax - boundsMin) / 2, 0.25)
+        let aspect = Float(max(1, self.bounds.width) / max(1, self.bounds.height))
+        let vfov = Float(camera.fieldOfView) * .pi / 180
+        let hfov = 2 * atan(tan(vfov / 2) * aspect)
+        var pose = rig.pose
+        if is2DNavigationMode {
+            pose.pitch = -.pi / 2
+        }
+        pose.distance = radius / sin(min(vfov, hfov) / 2) * 1.15
+        pose.position = centre - pose.forward * pose.distance
+        let scale = camera.usesOrthographicProjection ? Double(radius * 1.15 / min(1, aspect)) : nil
+        if animated {
+            rig.glide(to: pose, orthographicScale: scale, duration: duration)
+        } else {
+            rig.set(pose, orthographicScale: scale)
+        }
     }
 
     /// Resets the view (`Z`): restores the model's initial camera, or frames `.top` (2D CAD plan) / `.iso` (3D).
@@ -324,13 +359,23 @@ public final class ViewportView: SCNView {
         lastPoint = point
         if isFreeFlying { drag = nil; return }
         if event.clickCount == 2 { drag = nil; recentre(at: point); return }
-        drag = event.modifierFlags.contains(.shift) ? .pan : .orbit
+        if is2DNavigationMode {
+            drag = event.modifierFlags.contains(.option) ? .rotate2D : .pan
+        } else {
+            drag = event.modifierFlags.contains(.shift) ? .pan : .orbit
+        }
         beginPivot(at: point)
     }
 
     public override func rightMouseDown(with event: NSEvent) { // no super: it would pop a context menu
         rig.stop()
         window?.makeFirstResponder(self)
+        if is2DNavigationMode {
+            lastPoint = convert(event.locationInWindow, from: nil)
+            drag = event.modifierFlags.contains(.option) ? .rotate2D : .pan
+            beginPivot(at: lastPoint)
+            return
+        }
         drag = .look
         captureCursor(centre: false)
     }
@@ -351,11 +396,12 @@ public final class ViewportView: SCNView {
     }
 
     public override func mouseUp(with event: NSEvent) {
-        if drag == .orbit { rig.release(time: event.timestamp) }
+        if drag == .orbit || drag == .rotate2D { rig.release(time: event.timestamp) }
         drag = nil
     }
 
     public override func rightMouseUp(with event: NSEvent) {
+        if drag == .rotate2D { rig.release(time: event.timestamp) }
         drag = nil
         if !isFreeFlying { releaseCursor() }
     }
@@ -370,6 +416,8 @@ public final class ViewportView: SCNView {
             mouseLook(dx: Float(event.deltaX), dy: Float(-event.deltaY)) // the captured cursor does not move: deltas only
         } else if drag == .orbit {
             orbit(dx: dx, dy: dy, time: event.timestamp)
+        } else if drag == .rotate2D {
+            rotatePlan2D(dx: dx, dy: dy, time: event.timestamp)
         } else if drag == .pan {
             pan(dx: dx, dy: dy)
         }
@@ -397,7 +445,15 @@ public final class ViewportView: SCNView {
         // The end carries no motion: orbiting by zero would zero the spin before it can coast.
         if event.phase == .ended || event.phase == .cancelled { rig.release(time: event.timestamp); return }
         let dx = Float(event.scrollingDeltaX), dy = Float(-event.scrollingDeltaY)
-        if event.modifierFlags.contains(.option) {
+        if is2DNavigationMode {
+            if event.modifierFlags.contains(.option) {
+                rotatePlan2D(dx: dx, dy: dy, time: event.timestamp)
+            } else if Self.twoFingerScrollZooms {
+                zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: event.phase == .began)
+            } else {
+                pan(dx: -dx, dy: -dy)
+            }
+        } else if event.modifierFlags.contains(.option) {
             pan(dx: -dx, dy: -dy) // the model follows the fingers
         } else if Self.twoFingerScrollZooms {
             zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: event.phase == .began)
@@ -519,6 +575,12 @@ public final class ViewportView: SCNView {
     func orbit(dx: Float, dy: Float, time: TimeInterval? = nil) {
         let rate = orbitDegreesPerPoint * .pi / 180
         rig.orbit(yaw: -dx * rate, pitch: dy * rate, time: time)
+    }
+
+    /// In-plane rotation of the 2D plan around the Z axis (`⌥`-drag in 2D CAD mode).
+    func rotatePlan2D(dx: Float, dy: Float, time: TimeInterval? = nil) {
+        let rate = orbitDegreesPerPoint * .pi / 180
+        rig.orbit(yaw: -dx * rate, pitch: 0, time: time)
     }
 
     /// Mouse right turns right, mouse up looks up; the eye stays.

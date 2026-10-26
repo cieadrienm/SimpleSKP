@@ -489,4 +489,44 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         let jsonData = try JSONSerialization.data(withJSONObject: stateDict)
         XCTAssertGreaterThan(jsonData.count, 100)
     }
+
+    func testSelectAndZoomToLayerAndAutoCADMode() {
+        var skp = SyntheticModel.cube()
+        skp.fileInfo = SKPFileInfo(
+            url: URL(fileURLWithPath: "/tmp/theatre_plan.dwg"),
+            fileSize: 1024,
+            version: "AC1032",
+            versionLabel: "AutoCAD 2018",
+            thumbnailPNG: nil
+        )
+        let model = DocumentModel()
+        model.showsEdges = false // simulate edges disabled before loading CAD
+        let scene = ViewportScene(model: skp)
+        model.present(scene, seconds: 0.1)
+
+        // AutoCAD mode automatically enables edges and sets isCAD = true
+        XCTAssertTrue(model.isCAD)
+        XCTAssertTrue(model.showsEdges)
+        XCTAssertTrue(scene.showsEdges)
+
+        // Selecting a visible layer triggers the brightness pulse
+        model.selectLayer(0)
+        XCTAssertEqual(model.selectedLayerIndex, 0)
+        XCTAssertEqual(scene.activePulseLayers, [0])
+
+        // Hide layer 1 ("Décor" at X = 1.5..2.5), then double-click / zoomToLayer(1): it reveals it, pulses it, and glides to frame it
+        model.toggleLayer(1)
+        XCTAssertFalse(model.layerVisible[1])
+        model.zoomToLayer(1, animated: true)
+        XCTAssertTrue(model.layerVisible[1], "zoomToLayer reveals a hidden layer")
+        XCTAssertEqual(model.selectedLayerIndex, 1)
+        XCTAssertTrue(model.viewport.rig.isMoving, "camera glides to frame the layer")
+        model.viewport.rig.step(dt: 1.0)
+        XCTAssertFalse(model.viewport.rig.isMoving)
+        let targetAfterZoom = model.viewport.cameraPose.target
+        XCTAssertEqual(targetAfterZoom.x, 2.0, accuracy: 0.05)
+        XCTAssertEqual(targetAfterZoom.y, 0.5, accuracy: 0.05)
+        XCTAssertEqual(targetAfterZoom.z, 0.5, accuracy: 0.05)
+        scene.cancelLayerPulse()
+    }
 }

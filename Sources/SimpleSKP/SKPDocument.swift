@@ -50,6 +50,15 @@ final class SKPDocument: NSDocument {
                     Self.removeTextures(of: skp)
                     return
                 }
+                DispatchQueue.main.async {
+                    if case .loading = model.state {
+                        model.state = .loading(SKPReader.Progress(
+                            phase: L("Assemblage de la géométrie GPU…", "Assembling GPU geometry…"),
+                            faces: skp.stats.faces,
+                            fraction: 0.94
+                        ))
+                    }
+                }
                 let scene = ViewportScene(model: skp)
                 DispatchQueue.main.async {
                     guard !cancelled.withLock({ $0 }) else { return Self.removeTextures(of: skp) }

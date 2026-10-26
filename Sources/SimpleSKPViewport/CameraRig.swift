@@ -58,6 +58,8 @@ public final class CameraRig {
 
     var keys: Set<UInt16> = [] { didSet { startTicking() } }
     var fast = false
+    /// When `true` (2D CAD plan), orbit is restricted to in-plane rotation around Z (`pitch = -π/2`) and keyboard arrows pan in the 2D plane.
+    public var is2DMode = false
     /// Metres per second of the movement keys: from the model's size, times what the wheel chose while looking.
     var baseSpeed: Float = 1
     var speedScale: Float = 1
@@ -82,15 +84,16 @@ public final class CameraRig {
     /// current pitch when a standard view or file camera put it beyond (straight down).
     func orbit(yaw: Float, pitch: Float, time: TimeInterval? = nil) {
         let centre = pivot ?? pose.target
+        let effectivePitch: Float = is2DMode ? 0 : pitch
         var next = pose
         next.yaw += yaw
-        next.pitch = clampedPitch(pose.pitch + pitch)
+        next.pitch = is2DMode ? (-.pi / 2) : clampedPitch(pose.pitch + effectivePitch)
         next.position = centre + next.basis * pose.basis.transpose * (pose.position - centre)
         pose = next
         guard let time else { return }
         // Synthetic events share one timestamp: count them a frame apart. Coalesced events closer than 1/120 s cannot fling.
         let dt = Float(lastOrbitTime.map { time - $0 } ?? 0)
-        spin = SIMD2(yaw, pitch) / (dt > 0 ? max(dt, 1 / 120) : 1 / 60)
+        spin = SIMD2(yaw, effectivePitch) / (dt > 0 ? max(dt, 1 / 120) : 1 / 60)
         lastOrbitTime = time
     }
 
@@ -179,8 +182,10 @@ public final class CameraRig {
             func axis(_ plus: Set<UInt16>, _ minus: Set<UInt16>) -> Float {
                 (held.isDisjoint(with: plus) ? 0 : 1) - (held.isDisjoint(with: minus) ? 0 : 1)
             }
-            let move = pose.forward * axis(Self.forwardKeys, Self.backKeys) + pose.right * axis(Self.rightKeys, Self.leftKeys)
-                + SIMD3(0, 0, 1) * axis(Self.upKeys, Self.downKeys)
+            let forwardAxis = is2DMode ? pose.up : pose.forward
+            let verticalAxis = is2DMode ? SIMD3<Float>.zero : SIMD3<Float>(0, 0, 1)
+            let move = forwardAxis * axis(Self.forwardKeys, Self.backKeys) + pose.right * axis(Self.rightKeys, Self.leftKeys)
+                + verticalAxis * axis(Self.upKeys, Self.downKeys)
             if simd_length(move) > 0 { pose.position += simd_normalize(move) * speed * dt }
         }
     }
