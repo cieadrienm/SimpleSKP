@@ -40,10 +40,13 @@ public struct SKPModel: Sendable {
         public var isVisible: Bool
         /// Optional native SketchUp tag folder name (`SULayerGetParentLayerFolder`), if any.
         public var folder: String?
-        public init(name: String, isVisible: Bool, folder: String? = nil) {
+        /// Optional layer display color (`SULayerGetMaterial` or AutoCAD ACI/TrueColor), sRGB `0…1`.
+        public var color: SIMD4<Float>?
+        public init(name: String, isVisible: Bool, folder: String? = nil, color: SIMD4<Float>? = nil) {
             self.name = name
             self.isVisible = isVisible
             self.folder = folder
+            self.color = color
         }
     }
 
@@ -83,11 +86,17 @@ public struct SKPModel: Sendable {
         }
     }
 
-    /// Visible (non-soft) edges of a definition on one layer, as point pairs (segment i = positions[2i], positions[2i+1]).
+    /// Visible (non-soft) edges of a definition on one layer (and optional material), as point pairs (segment i = positions[2i], positions[2i+1]).
     public struct EdgeSet: Sendable {
         public var layer: Int
+        /// Optional index into `SKPModel.materials` when an edge carries its own material/color (e.g. AutoCAD entity color).
+        public var material: Int?
         public var positions: [SIMD3<Float>]
-        public init(layer: Int, positions: [SIMD3<Float>]) { self.layer = layer; self.positions = positions }
+        public init(layer: Int, material: Int? = nil, positions: [SIMD3<Float>]) {
+            self.layer = layer
+            self.material = material
+            self.positions = positions
+        }
     }
 
     /// A placed group or component. Groups get their own, never shared, entry in `definitions`.

@@ -39,6 +39,8 @@ public final class ViewportView: SCNView {
     private var didDragDuringMouseDown = false
     private var zoomAnchor: SIMD3<Float>?
     private var lastWheel: TimeInterval = 0
+    private var allowScrollMomentum = false
+    private var mouseMovedMonitor: Any?
     /// NSCursor.hide() calls not yet balanced by unhide(): 0 or 1, checked by the tests.
     private(set) var cursorHides = 0
 
@@ -71,8 +73,11 @@ public final class ViewportView: SCNView {
             setNeedsDisplay(bounds)
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
-        // Free fly & hover highlight read mouseMoved; .inVisibleRect follows resizes by itself.
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+        rig.onZoomInertiaStep = { [unowned self] stepRatio, point in
+            zoom(ratio: stepRatio, at: point, newGesture: false)
+        }
+        // Free fly & hover highlight read mouseMoved; .activeAlways works even before clicking the viewport.
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
 
     public override var acceptsFirstResponder: Bool { true }
@@ -284,10 +289,10 @@ public final class ViewportView: SCNView {
         onResetView?(isPerspective)
     }
 
-    /// Zooms in (`ratio < 1`) or out (`ratio > 1`) around the centre of the viewport.
+    /// Zooms in (`ratio < 1`) or out (`ratio > 1`) around the centre of the viewport with smooth easing.
     public func zoomStep(ratio: Float) {
         rig.stop()
-        zoom(ratio: ratio, at: CGPoint(x: bounds.midX, y: bounds.midY), newGesture: true)
+        smoothZoom(ratio: ratio, at: CGPoint(x: bounds.midX, y: bounds.midY), newGesture: true)
     }
 
     /// Frames the whole model from a standard direction.
@@ -361,6 +366,7 @@ public final class ViewportView: SCNView {
     // MARK: - Mouse (handlers stay short over testable methods)
 
     public override func mouseDown(with event: NSEvent) {
+        allowScrollMomentum = false
         rig.stop()
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
@@ -378,6 +384,7 @@ public final class ViewportView: SCNView {
     }
 
     public override func rightMouseDown(with event: NSEvent) { // no super: it would pop a context menu
+        allowScrollMomentum = false
         rig.stop()
         window?.makeFirstResponder(self)
         if is2DNavigationMode {
@@ -391,6 +398,7 @@ public final class ViewportView: SCNView {
     }
 
     public override func otherMouseDown(with event: NSEvent) {
+        allowScrollMomentum = false
         rig.stop()
         lastPoint = convert(event.locationInWindow, from: nil)
         drag = .pan
@@ -425,7 +433,11 @@ public final class ViewportView: SCNView {
             && !isFreeFlying
             && !event.modifierFlags.contains(.option)
             && !event.modifierFlags.contains(.shift)
-        if drag == .orbit || drag == .rotate2D { rig.release(time: event.timestamp) }
+        if drag == .orbit || drag == .rotate2D {
+            rig.release(time: event.timestamp)
+        } else if drag == .pan {
+            rig.releasePan(time: event.timestamp)
+        }
         drag = nil
         if wasSingleClick {
             let point = convert(event.locationInWindow, from: nil)
@@ -438,12 +450,19 @@ public final class ViewportView: SCNView {
     }
 
     public override func rightMouseUp(with event: NSEvent) {
-        if drag == .rotate2D { rig.release(time: event.timestamp) }
+        if drag == .rotate2D {
+            rig.release(time: event.timestamp)
+        } else if drag == .pan {
+            rig.releasePan(time: event.timestamp)
+        }
         drag = nil
         if !isFreeFlying { releaseCursor() }
     }
 
-    public override func otherMouseUp(with event: NSEvent) { drag = nil }
+    public override func otherMouseUp(with event: NSEvent) {
+        if drag == .pan { rig.releasePan(time: event.timestamp) }
+        drag = nil
+    }
 
     private func dragged(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -459,50 +478,83 @@ public final class ViewportView: SCNView {
         } else if drag == .rotate2D {
             rotatePlan2D(dx: dx, dy: dy, time: event.timestamp)
         } else if drag == .pan {
-            pan(dx: dx, dy: dy)
+            pan(dx: dx, dy: dy, time: event.timestamp)
         }
     }
 
     public override func scrollWheel(with event: NSEvent) {
-        if !event.momentumPhase.isEmpty { return } // the rig's own inertia continues a two-finger orbit
-        let gesture = event.hasPreciseScrollingDeltas && !event.phase.isEmpty
-        // One wheel notch ≈ 10 %; precise deltas are in points, ~10 per notch.
-        let notches = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 10 : event.scrollingDeltaY
+        let notches = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 14 : event.scrollingDeltaY
         if drag == .look {
             rig.speedScale = min(16, max(1.0 / 16, rig.speedScale * Float(pow(1.25, notches))))
             return
         }
         let point = convert(event.locationInWindow, from: nil)
-        guard gesture else {
-            // A wheel has no phases: a burst of notches less than 150 ms apart is one gesture (one hit test on huge models).
-            let newGesture = event.timestamp - lastWheel > 0.15
-            lastWheel = event.timestamp
-            if newGesture { rig.stop() }
-            zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: newGesture)
+
+        // Trackpad momentum phase: allowed for 2D pan, ⌥-pan, and two-finger scroll zoom so scrolling glides naturally.
+        if !event.momentumPhase.isEmpty {
+            guard allowScrollMomentum else { return }
+            if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                allowScrollMomentum = false
+                return
+            }
+            let dx = Float(event.scrollingDeltaX), dy = Float(-event.scrollingDeltaY)
+            if Self.twoFingerScrollZooms {
+                zoom(ratio: Float(pow(0.92, notches)), at: point, newGesture: false)
+            } else if is2DNavigationMode {
+                pan(dx: dx * 0.80, dy: dy * 0.80)
+            } else if event.modifierFlags.contains(.option) {
+                pan(dx: -dx * 0.80, dy: -dy * 0.80)
+            }
             return
         }
+
+        let gesture = event.hasPreciseScrollingDeltas && !event.phase.isEmpty
+        guard gesture else {
+            // Discrete mouse wheel: burst of notches less than 180 ms apart is one gesture, smoothed at 60–120 Hz.
+            allowScrollMomentum = false
+            let newGesture = event.timestamp - lastWheel > 0.18
+            lastWheel = event.timestamp
+            if newGesture { rig.stop() }
+            smoothZoom(ratio: Float(pow(0.92, notches)), at: point, newGesture: newGesture)
+            return
+        }
+
+        let option = event.modifierFlags.contains(.option)
+        let isOrbitOrRotateGesture = (is2DNavigationMode && option)
+            || (!is2DNavigationMode && !option && !Self.twoFingerScrollZooms)
+        allowScrollMomentum = !isOrbitOrRotateGesture
+
         if event.phase == .began { rig.stop(); beginPivot(at: point) }
-        // The end carries no motion: orbiting by zero would zero the spin before it can coast.
-        if event.phase == .ended || event.phase == .cancelled { rig.release(time: event.timestamp); return }
+        // The end carries no motion: orbiting/panning by zero would zero the velocity before it can coast.
+        if event.phase == .ended || event.phase == .cancelled {
+            if isOrbitOrRotateGesture {
+                rig.release(time: event.timestamp)
+            } else if !Self.twoFingerScrollZooms {
+                rig.releasePan(time: event.timestamp)
+            }
+            return
+        }
+
         let dx = Float(event.scrollingDeltaX), dy = Float(-event.scrollingDeltaY)
         if is2DNavigationMode {
-            if event.modifierFlags.contains(.option) {
+            if option {
                 rotatePlan2D(dx: dx, dy: dy, time: event.timestamp)
             } else if Self.twoFingerScrollZooms {
-                zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: event.phase == .began)
+                smoothZoom(ratio: Float(pow(0.92, notches)), at: point, newGesture: event.phase == .began)
             } else {
-                pan(dx: dx, dy: dy)
+                pan(dx: dx * 0.82, dy: dy * 0.82, time: event.timestamp)
             }
-        } else if event.modifierFlags.contains(.option) {
-            pan(dx: -dx, dy: -dy) // the model follows the fingers
+        } else if option {
+            pan(dx: -dx * 0.82, dy: -dy * 0.82, time: event.timestamp) // the model follows the fingers
         } else if Self.twoFingerScrollZooms {
-            zoom(ratio: Float(pow(0.9, notches)), at: point, newGesture: event.phase == .began)
+            smoothZoom(ratio: Float(pow(0.92, notches)), at: point, newGesture: event.phase == .began)
         } else {
             orbit(dx: dx, dy: dy, time: event.timestamp)
         }
     }
 
     public override func magnify(with event: NSEvent) {
+        allowScrollMomentum = false
         if event.phase == .began { rig.stop() }
         zoom(ratio: Float(1 / max(0.1, 1 + event.magnification)), at: convert(event.locationInWindow, from: nil),
              newGesture: event.phase == .began)
@@ -510,6 +562,7 @@ public final class ViewportView: SCNView {
 
     /// Two-finger rotation: yaw around the point under the fingers, never roll; the model turns with the fingers.
     public override func rotate(with event: NSEvent) {
+        allowScrollMomentum = false
         if event.phase == .began { rig.stop(); beginPivot(at: convert(event.locationInWindow, from: nil)) }
         rig.orbit(yaw: -event.rotation * .pi / 180, pitch: 0)
     }
@@ -517,6 +570,7 @@ public final class ViewportView: SCNView {
     // MARK: - Keyboard
 
     public override func keyDown(with event: NSEvent) {
+        allowScrollMomentum = false
         rig.stop()
         if event.keyCode == 53, isFreeFlying { isFreeFlying = false; return } // Esc
         if press(event) { return }
@@ -570,6 +624,7 @@ public final class ViewportView: SCNView {
 
     public override func viewWillMove(toWindow newWindow: NSWindow?) {
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        removeMouseMovedMonitor()
         releaseInput()
         super.viewWillMove(toWindow: newWindow)
     }
@@ -577,13 +632,40 @@ public final class ViewportView: SCNView {
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard let window else { return }
+        window.acceptsMouseMovedEvents = true
         NotificationCenter.default.addObserver(self, selector: #selector(windowResignedKey), name: NSWindow.didResignKeyNotification, object: window)
+        installMouseMovedMonitor()
+    }
+
+    private func installMouseMovedMonitor() {
+        guard mouseMovedMonitor == nil else { return }
+        mouseMovedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            guard let self, let window = self.window, event.window === window, !self.isFreeFlying, self.drag == nil else {
+                return event
+            }
+            let point = self.convert(event.locationInWindow, from: nil)
+            if self.bounds.contains(point) {
+                self.updateHoveredLayer(at: point)
+            } else if self.hoveredLayer != nil {
+                self.hoveredLayer = nil
+                self.onHoverLayer?(nil)
+            }
+            return event
+        }
+    }
+
+    private func removeMouseMovedMonitor() {
+        if let monitor = mouseMovedMonitor {
+            NSEvent.removeMonitor(monitor)
+            mouseMovedMonitor = nil
+        }
     }
 
     @objc private func windowResignedKey(_ note: Notification) { releaseInput() }
 
     func releaseInput() {
         drag = nil
+        allowScrollMomentum = false
         isFreeFlying = false
         rig.keys = []
         releaseCursor()
@@ -630,9 +712,20 @@ public final class ViewportView: SCNView {
     }
 
     /// The model follows the cursor about 1:1 at the pivot's depth.
-    func pan(dx: Float, dy: Float) {
+    func pan(dx: Float, dy: Float, time: TimeInterval? = nil) {
         let metresPerPoint = visibleHeight / Float(max(1, bounds.height))
-        rig.pose.position -= (rig.pose.right * dx + rig.pose.up * dy) * metresPerPoint
+        let delta = -(rig.pose.right * dx + rig.pose.up * dy) * metresPerPoint
+        rig.pose.position += delta
+        rig.recordPan(delta: delta, time: time)
+    }
+
+    /// Applies an immediate 40 % zoom step so motion starts with zero latency, and glides the remaining 60 % smoothly at 60–120 Hz.
+    func smoothZoom(ratio: Float, at point: CGPoint, newGesture: Bool = true) {
+        guard ratio.isFinite, ratio > 0.05, ratio < 20.0 else { return }
+        let immediate = pow(ratio, 0.40)
+        let deferred = pow(ratio, 0.60)
+        zoom(ratio: immediate, at: point, newGesture: newGesture)
+        rig.addZoomInertia(ratio: deferred, at: point)
     }
 
     /// ratio < 1 zooms in (distance or ortho height multiplied by ratio), towards `point`.
@@ -725,7 +818,7 @@ public final class ViewportView: SCNView {
     }
 
     /// Picks the layer index in `model.layers` of the visible face or edge under `point` in view coordinates.
-    public func pickLayer(at point: CGPoint, screenRadiusPoints: Float = 7.0) -> Int? {
+    public func pickLayer(at point: CGPoint, screenRadiusPoints: Float = 12.0) -> Int? {
         guard let scene = viewportScene else { return nil }
         let bounds = scene.visibleBounds
         let pose = rig.pose

@@ -463,6 +463,12 @@ final class SimpleSKPCoreTests: XCTestCase {
         XCTAssertEqual(model.size.y, 8.0, accuracy: 0.05)
         let hiddenLayer = model.layers.first { $0.name == "Cotes_Cachees" }
         XCTAssertEqual(hiddenLayer?.isVisible, false)
+        // ACI 3 (green) on negative layer color -3 -> green component is 1.0
+        XCTAssertEqual(hiddenLayer?.color?.y ?? 0, 1.0, accuracy: 0.01)
+        // ACI 1 (red) on Murs layer -> red component is 1.0
+        let mursLayer = model.layers.first { $0.name == "Murs" }
+        XCTAssertEqual(mursLayer?.color?.x ?? 0, 1.0, accuracy: 0.01)
+        XCTAssertEqual(mursLayer?.color?.y ?? 1, 0.0, accuracy: 0.01)
     }
 
     func testRealAutoCADDWGFilesLoadAndCalibrate() throws {

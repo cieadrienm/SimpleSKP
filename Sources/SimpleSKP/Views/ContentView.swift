@@ -414,6 +414,17 @@ struct TopBar: View {
                     .popover(isPresented: $showLightingPopover, arrowEdge: .bottom) {
                         LightingPopover(model: model)
                     }
+                } else {
+                    ToolbarPillButton(
+                        title: model.backdropStyle == .warmPaper ? L("Papier clair", "Light Paper") : L("Fond sombre", "Dark Canvas"),
+                        symbol: model.backdropStyle == .warmPaper ? "doc.plaintext" : "moon.stars",
+                        active: model.backdropStyle == .warmPaper,
+                        disabled: !model.isReady,
+                        tooltip: L("Basculer le fond AutoCAD entre Studio sombre et Papier clair (couleurs de tracé adaptées automatiquement)",
+                                   "Toggle AutoCAD background between Dark Studio and Light Paper (line colors adapt automatically)")
+                    ) {
+                        model.setBackdropStyle(model.backdropStyle == .warmPaper ? .studioDark : .warmPaper)
+                    }
                 }
 
                 IconButton(
@@ -1357,12 +1368,14 @@ private struct ViewportHUDOverlay: View {
             // Bottom-left hovered layer pill & Bottom-right orientation gizmo + quick camera pill
             HStack(alignment: .bottom) {
                 if let hoveredName = model.hoveredLayerName {
+                    let dotColor = model.hoveredLayerColor ?? Theme.accent.swiftUI
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(Theme.accent.swiftUI)
-                            .frame(width: 6.5, height: 6.5)
+                            .fill(dotColor)
+                            .frame(width: 7.5, height: 7.5)
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 0.5))
                         Text(hoveredName)
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(Theme.text.swiftUI)
                             .lineLimit(1)
                     }
@@ -1370,10 +1383,10 @@ private struct ViewportHUDOverlay: View {
                     .padding(.vertical, 5)
                     .background(
                         Capsule()
-                            .fill(Theme.panel.swiftUI.opacity(0.88))
-                            .overlay(Capsule().strokeBorder(Theme.accent.swiftUI.opacity(0.35), lineWidth: 1))
+                            .fill(Theme.panel.swiftUI.opacity(0.92))
+                            .overlay(Capsule().strokeBorder(dotColor.opacity(0.55), lineWidth: 1))
                     )
-                    .shadow(color: .black.opacity(0.28), radius: 6, y: 2)
+                    .shadow(color: .black.opacity(0.32), radius: 6, y: 2)
                     .allowsHitTesting(false)
                 }
                 Spacer()
@@ -1640,6 +1653,7 @@ struct SidebarView: View {
                                         "\(skp.layers[index].name) — Clic : repérer · Double-clic : zoomer dessus",
                                         "\(skp.layers[index].name) — Click: highlight · Double-click: zoom to layer"
                                     ),
+                                    layerColor: model.layerDisplayColor(index),
                                     isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
                                     isSelected: model.selectedLayerIndex == index,
                                     isHoveredFromViewport: model.hoveredLayerIndex == index,
@@ -1692,6 +1706,7 @@ struct SidebarView: View {
                                                     "\(skp.layers[index].name) — Clic : repérer · Double-clic : zoomer dessus",
                                                     "\(skp.layers[index].name) — Click: highlight · Double-click: zoom to layer"
                                                 ),
+                                                layerColor: model.layerDisplayColor(index),
                                                 isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
                                                 isSelected: model.selectedLayerIndex == index,
                                                 isHoveredFromViewport: model.hoveredLayerIndex == index,
@@ -1915,6 +1930,7 @@ private struct LayerGroupRow: View {
 private struct LayerRow: View {
     let name: String
     let fullTooltip: String
+    let layerColor: Color?
     let isVisible: Bool
     let isSelected: Bool
     let isHoveredFromViewport: Bool
@@ -1955,7 +1971,16 @@ private struct LayerRow: View {
 
             // Clicking the layer name selects & pulses it; double-clicking zooms onto it in the viewport
             Button(action: handleNameClick) {
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
+                    if let layerColor {
+                        Circle()
+                            .fill(layerColor.opacity(isVisible ? 1.0 : 0.45))
+                            .frame(width: 7.5, height: 7.5)
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.5)
+                            )
+                    }
                     Text(name)
                         .font(.system(size: indented ? 11.5 : 12, weight: isSelected ? .semibold : .regular))
                         .foregroundStyle(isSelected ? Theme.accent.swiftUI : (isVisible ? Theme.text.swiftUI : Theme.textDim.swiftUI))

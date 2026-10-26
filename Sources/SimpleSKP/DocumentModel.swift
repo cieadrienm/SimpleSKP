@@ -161,9 +161,12 @@ final class DocumentModel {
     func present(_ scene: ViewportScene, seconds: Double) {
         setModel(scene.model)
         loadSeconds = seconds
-        // AutoCAD files (and pure-edge models) always display edges on load.
+        // AutoCAD files (and pure-edge models) always display edges on load and default to a dark studio canvas for crisp CAD line contrast.
         if scene.model.fileInfo.isCAD || (scene.model.stats.faces == 0 && scene.model.stats.edges > 0) {
             showsEdges = true
+        }
+        if scene.model.fileInfo.isCAD, backdropStyle == .architecturalSky {
+            backdropStyle = .studioDark
         }
         scene.showsEdges = showsEdges
         scene.shadowsEnabled = shadowsEnabled
@@ -262,6 +265,18 @@ final class DocumentModel {
     var hoveredLayerName: String? {
         guard let index = hoveredLayerIndex, let skp, skp.layers.indices.contains(index) else { return nil }
         return skp.layers[index].name
+    }
+
+    /// Contrast-adapted UI swatch color for a layer when the layer carries an explicit CAD/SketchUp color.
+    func layerDisplayColor(_ index: Int) -> Color? {
+        guard let skp, skp.layers.indices.contains(index), let raw = skp.layers[index].color else { return nil }
+        let luma = Rendering.backdropLuminance(for: backdropStyle, customColor: customBackdropColor)
+        let rgb = Rendering.adaptedCADColor(SIMD3<Float>(raw.x, raw.y, raw.z), backdropLuminance: luma)
+        return Color(.sRGB, red: Double(rgb.x), green: Double(rgb.y), blue: Double(rgb.z), opacity: 1.0)
+    }
+
+    var hoveredLayerColor: Color? {
+        hoveredLayerIndex.flatMap(layerDisplayColor)
     }
 
     /// Selects a layer by index in the sidebar and triggers a brief brightness pulse on its geometry in the viewport.

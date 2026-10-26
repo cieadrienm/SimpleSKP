@@ -522,5 +522,14 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(view.rig.pose.yaw - beforeAlt.yaw, -50 * 0.4 * .pi / 180, accuracy: 1e-4, "Option-drag rotates yaw in-plane")
         XCTAssertEqual(view.rig.pose.pitch, -.pi / 2, accuracy: 1e-5, "vertical motion during Option-drag never tilts out of the 2D plane")
         XCTAssertEqual(simd_distance(view.rig.pose.forward, SIMD3(0, 0, -1)), 0, accuracy: 1e-5)
+
+        // 4. Smooth zoom inertia glides smoothly over subsequent frames
+        let scaleBeforeZoom = view.orthographicScale
+        view.zoomStep(ratio: 0.75)
+        let scaleImmediate = view.orthographicScale
+        XCTAssertLessThan(scaleImmediate, scaleBeforeZoom, "Immediate 40% zoom step starts on frame 0")
+        XCTAssertTrue(view.rig.isMoving, "Remaining 60% zoom glides via CameraRig inertia")
+        for _ in 0..<45 { view.rig.step(dt: 1.0 / 60.0) }
+        XCTAssertEqual(view.orthographicScale, scaleBeforeZoom * 0.75, accuracy: scaleBeforeZoom * 0.01, "Smooth zoom converges to exact target scale")
     }
 }

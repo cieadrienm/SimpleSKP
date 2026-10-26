@@ -349,4 +349,59 @@ final class RenderingTests: XCTestCase {
         XCTAssertLessThan(shadowedCenter.redComponent, unshadowedCenter.redComponent * 0.45,
                           "Point light must cast a clear shadow on the floor below the occluder when shadowsEnabled is true (unshadowed=\(unshadowedCenter.redComponent), shadowed=\(shadowedCenter.redComponent))")
     }
+
+    func testCADLayerAndEntityColorAdaptationAndHoverHighlight() throws {
+        // 1. Contrast adaptation of AutoCAD ACI 7 (White/Black) and chromatic colors
+        let aci7White = SIMD3<Float>(1, 1, 1)
+        let onDark = Rendering.adaptedCADColor(aci7White, backdropLuminance: 0.08)
+        let onLight = Rendering.adaptedCADColor(aci7White, backdropLuminance: 0.90)
+        XCTAssertGreaterThan(onDark.x, 0.88, "ACI 7 renders crisp white on dark CAD canvas")
+        XCTAssertLessThan(onLight.x, 0.20, "ACI 7 renders dark charcoal ink on light paper")
+
+        let darkBlue = SIMD3<Float>(0.0, 0.0, 0.5)
+        let liftedBlue = Rendering.adaptedCADColor(darkBlue, backdropLuminance: 0.08)
+        XCTAssertGreaterThan(liftedBlue.z, 0.65, "Dark blue CAD layer is lifted for legibility on dark canvas")
+
+        // 2. Per-layer colored CAD edges & high-contrast hover highlight in ViewportScene
+        let redEdges = SKPModel.EdgeSet(layer: 0, positions: [SIMD3(-5, 0, 0), SIMD3(5, 0, 0)])
+        let yellowEdges = SKPModel.EdgeSet(layer: 1, positions: [SIMD3(-5, 2, 0), SIMD3(5, 2, 0)])
+        let cadModel = SKPModel(
+            root: SKPModel.Definition(name: "", meshes: [], edges: [redEdges, yellowEdges], children: []),
+            definitions: [],
+            materials: [],
+            layers: [
+                SKPModel.Layer(name: "AXES_ROUGES", isVisible: true, color: SIMD4(1, 0, 0, 1)),
+                SKPModel.Layer(name: "COTES_JAUNES", isVisible: true, color: SIMD4(1, 1, 0, 1)),
+            ],
+            scenes: [],
+            camera: nil,
+            boundsMin: SIMD3(-5, 0, 0),
+            boundsMax: SIMD3(5, 2, 0),
+            fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/coupe.dwg"), fileSize: 512, version: "AC1032", versionLabel: "AutoCAD 2018", thumbnailPNG: nil)
+        )
+        let scene = ViewportScene(model: cadModel)
+        scene.backdropStyle = .studioDark
+        let redNode = try XCTUnwrap(scene.layerSets[[0]]?.node?.childNodes.first)
+        let yellowNode = try XCTUnwrap(scene.layerSets[[1]]?.node?.childNodes.first)
+        let baseRedMat = try XCTUnwrap(redNode.geometry?.firstMaterial)
+        let baseYellowMat = try XCTUnwrap(yellowNode.geometry?.firstMaterial)
+        XCTAssertFalse(baseRedMat === baseYellowMat, "Distinct CAD layer colors receive distinct edge materials")
+
+        // Hovering layer 0 (red) applies the luminous amber-gold hover material with depth-test bypass
+        scene.setHoveredLayers([0])
+        let hoveredRedMat = try XCTUnwrap(redNode.geometry?.firstMaterial)
+        XCTAssertFalse(hoveredRedMat === baseRedMat)
+        XCTAssertFalse(hoveredRedMat.readsFromDepthBuffer, "Hovered edges draw on top of overlapping lines")
+        XCTAssertEqual(redNode.renderingOrder, 4)
+
+        // Hovering layer 1 (yellow) switches to luminous sky-cyan so yellow CAD lines still pop on hover
+        scene.setHoveredLayers([1])
+        let hoveredYellowMat = try XCTUnwrap(yellowNode.geometry?.firstMaterial)
+        let cyanColor = try XCTUnwrap((hoveredYellowMat.diffuse.contents as? NSColor)?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(cyanColor.blueComponent, cyanColor.redComponent + 0.5, "Yellow CAD layer uses contrasting sky-cyan hover highlight")
+
+        scene.setHoveredLayers([])
+        XCTAssertTrue(redNode.geometry?.firstMaterial === baseRedMat)
+        XCTAssertTrue(yellowNode.geometry?.firstMaterial === baseYellowMat)
+    }
 }

@@ -246,10 +246,19 @@ public enum SKPReader {
                     let raw = string(getFolderName, folderRef).trimmingCharacters(in: .whitespacesAndNewlines)
                     if !raw.isEmpty { folderName = raw }
                 }
+                var layerColor: SIMD4<Float>? = nil
+                if let getLayerMat = f.SULayerGetMaterial,
+                   let matRef = ref(getLayerMat, l) {
+                    var c = SUColor()
+                    if f.SUMaterialGetColor(matRef, &c) == 0 {
+                        layerColor = SIMD4(Float(c.r), Float(c.g), Float(c.b), Float(c.a)) / 255.0
+                    }
+                }
                 layers.append(SKPModel.Layer(
                     name: string(f.SULayerGetName, l),
                     isVisible: bool(f.SULayerGetVisibility, l, default: true),
-                    folder: folderName
+                    folder: folderName,
+                    color: layerColor
                 ))
             }
             // Unknown layers map to index 0, so it must exist.
@@ -330,18 +339,18 @@ public enum SKPReader {
                 stats.triangles += triangles
             }
 
-            var edgeSlots: [Int: Int] = [:]
+            var edgeSlots: [BatchKey: Int] = [:]
             var a = SUPoint3D(), b = SUPoint3D()
             for edge in refs({ f.SUEntitiesGetNumEdges($0, false, $1) }, { f.SUEntitiesGetEdges($0, false, $1, $2, $3) }, entities)
             where !bool(f.SUDrawingElementGetHidden, edge) && !bool(f.SUEdgeGetSoft, edge) {
                 guard let start = ref(f.SUEdgeGetStartVertex, edge), let end = ref(f.SUEdgeGetEndVertex, edge),
                       f.SUVertexGetPosition(start, &a) == 0, f.SUVertexGetPosition(end, &b) == 0 else { continue }
-                let layer = layer(edge)
+                let edgeKey = BatchKey(material: material(edge), layer: layer(edge))
                 let slot: Int
-                if let existing = edgeSlots[layer] { slot = existing } else {
+                if let existing = edgeSlots[edgeKey] { slot = existing } else {
                     slot = def.edges.count
-                    edgeSlots[layer] = slot
-                    def.edges.append(SKPModel.EdgeSet(layer: layer, positions: []))
+                    edgeSlots[edgeKey] = slot
+                    def.edges.append(SKPModel.EdgeSet(layer: edgeKey.layer, material: edgeKey.material, positions: []))
                 }
                 let pa = metres(a), pb = metres(b)
                 def.edges[slot].positions.append(pa)
@@ -363,12 +372,12 @@ public enum SKPReader {
                         guard let gp = gpoints[idx], !bool(f.SUDrawingElementGetHidden, gp),
                               getPos(gp, &pos) == 0 else { continue }
                         let p = metres(pos)
-                        let lyr = layer(gp)
+                        let edgeKey = BatchKey(material: material(gp), layer: layer(gp))
                         let slot: Int
-                        if let existing = edgeSlots[lyr] { slot = existing } else {
+                        if let existing = edgeSlots[edgeKey] { slot = existing } else {
                             slot = def.edges.count
-                            edgeSlots[lyr] = slot
-                            def.edges.append(SKPModel.EdgeSet(layer: lyr, positions: []))
+                            edgeSlots[edgeKey] = slot
+                            def.edges.append(SKPModel.EdgeSet(layer: edgeKey.layer, material: edgeKey.material, positions: []))
                         }
                         def.edges[slot].positions.append(p - SIMD3(tick, 0, 0))
                         def.edges[slot].positions.append(p + SIMD3(tick, 0, 0))

@@ -99,10 +99,11 @@ public final class ViewportScene: @unchecked Sendable {
 
     /// Adapts the wireframe / edge material color to the active backdrop luminance and shading style so edges always remain contrasted.
     private func updateEdgeMaterial() {
+        let effectiveShading: ShadingStyle = (model.fileInfo.isCAD || model.stats.faces == 0) ? .wireframe : shadingStyle
         let rgb = Rendering.contrastingEdgeColor(
             for: backdropStyle,
             customColor: customBackdropColor,
-            shadingStyle: shadingStyle
+            shadingStyle: effectiveShading
         )
         let luma = 0.2126 * rgb.x + 0.7152 * rgb.y + 0.0722 * rgb.z
         // SceneKit's HDR camera (exposureOffset ≈ -0.62) scales `.constant` material RGB by ~0.65, so boost light edges to render crisp white.
@@ -111,6 +112,22 @@ public final class ViewportScene: @unchecked Sendable {
             srgbRed: CGFloat(rgb.x) * hdrBoost,
             green: CGFloat(rgb.y) * hdrBoost,
             blue: CGFloat(rgb.z) * hdrBoost,
+            alpha: 1.0
+        )
+        let bgLuma = Rendering.backdropLuminance(for: backdropStyle, customColor: customBackdropColor)
+        for (_, entry) in cadEdgeMaterials {
+            Self.applyCADEdgeColor(entry.rawRGB, backdropLuminance: bgLuma, to: entry.material)
+        }
+    }
+
+    private static func applyCADEdgeColor(_ rawRGB: SIMD3<Float>, backdropLuminance: Float, to material: SCNMaterial) {
+        let adapted = Rendering.adaptedCADColor(rawRGB, backdropLuminance: backdropLuminance)
+        let lineLuma = 0.2126 * adapted.x + 0.7152 * adapted.y + 0.0722 * adapted.z
+        let hdrBoost: CGFloat = backdropLuminance < 0.54 ? 1.42 : (lineLuma > 0.5 ? 1.25 : 1.0)
+        material.diffuse.contents = NSColor(
+            srgbRed: CGFloat(adapted.x) * hdrBoost,
+            green: CGFloat(adapted.y) * hdrBoost,
+            blue: CGFloat(adapted.z) * hdrBoost,
             alpha: 1.0
         )
     }
@@ -157,6 +174,8 @@ public final class ViewportScene: @unchecked Sendable {
         var buffer: MTLBuffer
         var vertexCount: Int
         var set: LayerSet
+        var boundsMin: SIMD3<Float>
+        var boundsMax: SIMD3<Float>
     }
 
     /// A definition placed in the flattened tree (-1 = the root): model-space transform, material its unpainted faces
@@ -182,6 +201,7 @@ public final class ViewportScene: @unchecked Sendable {
         return m
     }()
     private let edgeMaterial = SCNMaterial()
+    private var cadEdgeMaterials: [UInt32: (rawRGB: SIMD3<Float>, material: SCNMaterial)] = [:]
     private var placements: [Placement] = []
     private(set) var layerSets: [[Int]: LayerSet] = [:]
     private var setsByLayer: [Int: [LayerSet]] = [:]
@@ -207,10 +227,10 @@ public final class ViewportScene: @unchecked Sendable {
         scene.lightingEnvironment.intensity = 1.05
 
         edgeMaterial.lightingModel = .constant
-        edgeMaterial.diffuse.contents = NSColor(srgbRed: 0.20, green: 0.22, blue: 0.26, alpha: 1) // crisp graphite: alpha-blended lines vanish behind HDR faces
         edgeMaterial.readsFromDepthBuffer = true
         edgeMaterial.writesToDepthBuffer = false
         edgeMaterial.shaderModifiers = [.geometry: Self.edgeBias]
+        updateEdgeMaterial()
 
         let start = CFAbsoluteTimeGetCurrent()
         hiddenLayers = Set(model.layers.indices.filter { !model.layers[$0].isVisible })
@@ -404,17 +424,35 @@ public final class ViewportScene: @unchecked Sendable {
         let matching = matchingLayerSets(for: hoveredLayers).filter(isVisible)
         guard !matching.isEmpty else { return }
 
-        let baseEdgeRGB = Rendering.contrastingEdgeColor(
-            for: backdropStyle,
-            customColor: customBackdropColor,
-            shadingStyle: shadingStyle
-        )
-        let baseLuma = 0.2126 * baseEdgeRGB.x + 0.7152 * baseEdgeRGB.y + 0.0722 * baseEdgeRGB.z
-        let startEdgeRGB = baseLuma > 0.5 ? baseEdgeRGB * 1.48 : baseEdgeRGB
-        let peakEdgeRGB: SIMD3<Float> = baseLuma > 0.5
-            ? SIMD3<Float>(1.55, 1.72, 1.98)
-            : SIMD3<Float>(0.10, 0.48, 1.25)
-        let hoverEdgeRGB = startEdgeRGB + (peakEdgeRGB - startEdgeRGB) * 0.42
+        let bgLuma = Rendering.backdropLuminance(for: backdropStyle, customColor: customBackdropColor)
+        let isDarkBackdrop = bgLuma < 0.54
+
+        // Check if the hovered layer's own CAD color is already warm yellow/orange/amber; if so, highlight in luminous cyan instead of amber-gold.
+        var layerIsWarmYellow = false
+        if let firstLayer = hoveredLayers.first,
+           model.layers.indices.contains(firstLayer),
+           let lc = model.layers[firstLayer].color {
+            let adapted = Rendering.adaptedCADColor(SIMD3(lc.x, lc.y, lc.z), backdropLuminance: bgLuma)
+            if adapted.x > 0.72 && adapted.y > 0.45 && adapted.z < 0.35 {
+                layerIsWarmYellow = true
+            }
+        }
+
+        // Non-clipping HDR highlight: at least one channel is low so tone-mapping after camera exposureOffset (-0.62) preserves a vivid hue.
+        let hoverEdgeRGB: SIMD3<Float>
+        let faceEmission: NSColor
+        if isDarkBackdrop {
+            if layerIsWarmYellow {
+                hoverEdgeRGB = SIMD3<Float>(0.12, 1.48, 1.95) // Luminous sky-cyan
+                faceEmission = NSColor(srgbRed: 0.08, green: 0.34, blue: 0.48, alpha: 1.0)
+            } else {
+                hoverEdgeRGB = SIMD3<Float>(1.85, 1.18, 0.12) // Luminous amber-gold
+                faceEmission = NSColor(srgbRed: 0.44, green: 0.28, blue: 0.05, alpha: 1.0)
+            }
+        } else {
+            hoverEdgeRGB = SIMD3<Float>(0.05, 0.46, 1.42) // Electric azure on light paper
+            faceEmission = NSColor(srgbRed: 0.06, green: 0.24, blue: 0.52, alpha: 1.0)
+        }
 
         let hoverEdgeMat = SCNMaterial()
         hoverEdgeMat.lightingModel = .constant
@@ -424,11 +462,10 @@ public final class ViewportScene: @unchecked Sendable {
             blue: CGFloat(hoverEdgeRGB.z),
             alpha: 1.0
         )
-        hoverEdgeMat.readsFromDepthBuffer = true
+        hoverEdgeMat.readsFromDepthBuffer = false
         hoverEdgeMat.writesToDepthBuffer = false
         hoverEdgeMat.shaderModifiers = [.geometry: Self.edgeBias]
 
-        let faceEmission = NSColor(srgbRed: 0.16, green: 0.21, blue: 0.28, alpha: 1.0)
         var restoreActions: [() -> Void] = []
 
         for set in matching {
@@ -444,7 +481,7 @@ public final class ViewportScene: @unchecked Sendable {
                         child.renderingOrder = origOrder
                     }
                     geom.materials = [hoverEdgeMat]
-                    child.renderingOrder = 2
+                    child.renderingOrder = 4
                 } else if !child.isHidden, let baseMat = geom.firstMaterial {
                     let origMaterials = geom.materials
                     let hoverMat = baseMat.copy() as! SCNMaterial
@@ -469,7 +506,7 @@ public final class ViewportScene: @unchecked Sendable {
         orthoTolerance: Float?,
         tanHalfFOV: Float,
         viewportHeight: Float,
-        screenRadiusPoints: Float = 7.0
+        screenRadiusPoints: Float = 12.0
     ) -> Int? {
         var bestFaceT: Float = .infinity
         var bestFaceSet: LayerSet? = nil
@@ -516,10 +553,9 @@ public final class ViewportScene: @unchecked Sendable {
 
             for chunk in edgeChunks {
                 guard !chunk.node.isHidden, chunk.set.node?.isHidden == false, isVisible(chunk.set),
-                      chunk.vertexCount >= 2, let geom = chunk.node.geometry else { continue }
-                let (bMinVec, bMaxVec) = geom.boundingBox
-                let bMin = SIMD3<Float>(bMinVec) - SIMD3<Float>(repeating: maxTol)
-                let bMax = SIMD3<Float>(bMaxVec) + SIMD3<Float>(repeating: maxTol)
+                      chunk.vertexCount >= 2 else { continue }
+                let bMin = chunk.boundsMin - SIMD3<Float>(repeating: maxTol)
+                let bMax = chunk.boundsMax + SIMD3<Float>(repeating: maxTol)
                 guard Self.rayIntersectsAABB(origin: from, direction: direction, maxT: maxDepth + maxTol, min: bMin, max: bMax) else {
                     continue
                 }
@@ -766,6 +802,7 @@ public final class ViewportScene: @unchecked Sendable {
     private struct Chunk {
         var set: LayerSet
         var material: SCNMaterial?
+        var edgeMaterial: SCNMaterial? = nil
         var textured = false
         var pieces: [Piece] = []
         var vertices = 0
@@ -779,14 +816,54 @@ public final class ViewportScene: @unchecked Sendable {
     /// cascades and hit tests cheap, for a few more draw calls.
     static var chunkLimit = 250_000
 
+    /// Resolves the raw sRGB color (`0…1`) for an edge set in a CAD model (`model.fileInfo.isCAD`), checking:
+    /// 1) edge-specific material (`edgeSet.material`), 2) enclosing instance material (`placement.material`),
+    /// 3) the edge's own non-zero layer color (`edgeSet.layer`), 4) the path's primary layer color (`set.primaryLayer`).
+    private func resolvedCADEdgeRGB(edgeSet: SKPModel.EdgeSet, placement: Placement, set: LayerSet) -> SIMD3<Float> {
+        if let matIdx = edgeSet.material ?? placement.material, model.materials.indices.contains(matIdx) {
+            let c = model.materials[matIdx].color
+            return SIMD3<Float>(c.x, c.y, c.z)
+        }
+        let effectiveLayer = (edgeSet.layer != 0) ? edgeSet.layer : set.primaryLayer
+        if model.layers.indices.contains(effectiveLayer), let lc = model.layers[effectiveLayer].color {
+            return SIMD3<Float>(lc.x, lc.y, lc.z)
+        }
+        if model.layers.indices.contains(edgeSet.layer), let lc = model.layers[edgeSet.layer].color {
+            return SIMD3<Float>(lc.x, lc.y, lc.z)
+        }
+        return SIMD3<Float>(1, 1, 1)
+    }
+
+    private func cadEdgeMaterial(for rawRGB: SIMD3<Float>) -> SCNMaterial {
+        let r8 = UInt32(simd_clamp(rawRGB.x * 255.0, 0, 255).rounded())
+        let g8 = UInt32(simd_clamp(rawRGB.y * 255.0, 0, 255).rounded())
+        let b8 = UInt32(simd_clamp(rawRGB.z * 255.0, 0, 255).rounded())
+        let key = (r8 << 16) | (g8 << 8) | b8
+        if let cached = cadEdgeMaterials[key] {
+            return cached.material
+        }
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.readsFromDepthBuffer = true
+        mat.writesToDepthBuffer = false
+        mat.shaderModifiers = [.geometry: Self.edgeBias]
+        let bgLuma = Rendering.backdropLuminance(for: backdropStyle, customColor: customBackdropColor)
+        Self.applyCADEdgeColor(rawRGB, backdropLuminance: bgLuma, to: mat)
+        cadEdgeMaterials[key] = (rawRGB, mat)
+        return mat
+    }
+
     /// Builds the nodes of `sets`: grouping (serial: materials are resolved and cached), merging (parallel), nodes (serial).
     private func build(_ sets: [LayerSet]) {
         guard !sets.isEmpty else { return }
+        let useCADEdgeColors = model.fileInfo.isCAD
         var chunks: [Chunk] = []
         for set in sets {
             var groups: [ObjectIdentifier: [(piece: Piece, key: UInt32, size: Int, vertices: Int)]] = [:]
             var groupMaterial: [ObjectIdentifier: SCNMaterial] = [:]
             var edges: [(piece: Piece, key: UInt32, size: Int, vertices: Int)] = []
+            var cadEdgeGroups: [ObjectIdentifier: [(piece: Piece, key: UInt32, size: Int, vertices: Int)]] = [:]
+            var cadEdgeGroupMaterial: [ObjectIdentifier: SCNMaterial] = [:]
             for p in set.placements {
                 let placement = placements[p], definition = definition(placement.definition)
                 for (i, mesh) in definition.meshes.enumerated() where Self.adding(mesh.layer, to: placement.layers) == set.layers {
@@ -798,17 +875,26 @@ public final class ViewportScene: @unchecked Sendable {
                 }
                 for (i, edgeSet) in definition.edges.enumerated()
                 where !edgeSet.positions.isEmpty && Self.adding(edgeSet.layer, to: placement.layers) == set.layers {
-                    edges.append((Piece(placement: p, item: i), spatialKey(edgeSet.positions.first ?? .zero, placement.transform),
-                                  edgeSet.positions.count / 2, edgeSet.positions.count))
+                    let item = (Piece(placement: p, item: i), spatialKey(edgeSet.positions.first ?? .zero, placement.transform),
+                                edgeSet.positions.count / 2, edgeSet.positions.count)
+                    if useCADEdgeColors {
+                        let rawRGB = resolvedCADEdgeRGB(edgeSet: edgeSet, placement: placement, set: set)
+                        let edgeMat = cadEdgeMaterial(for: rawRGB)
+                        let id = ObjectIdentifier(edgeMat)
+                        cadEdgeGroupMaterial[id] = edgeMat
+                        cadEdgeGroups[id, default: []].append(item)
+                    } else {
+                        edges.append(item)
+                    }
                 }
             }
-            func split(_ items: [(piece: Piece, key: UInt32, size: Int, vertices: Int)], _ material: SCNMaterial?) {
+            func split(_ items: [(piece: Piece, key: UInt32, size: Int, vertices: Int)], _ material: SCNMaterial?, edgeMaterial: SCNMaterial? = nil) {
                 let textured = material?.diffuse.contents is NSImage
-                var chunk = Chunk(set: set, material: material, textured: textured)
+                var chunk = Chunk(set: set, material: material, edgeMaterial: edgeMaterial, textured: textured)
                 for item in items.sorted(by: { $0.key < $1.key }) {
                     if chunk.indices > 0, chunk.indices + item.size * 3 > Self.chunkLimit * 3 {
                         chunks.append(chunk)
-                        chunk = Chunk(set: set, material: material, textured: textured)
+                        chunk = Chunk(set: set, material: material, edgeMaterial: edgeMaterial, textured: textured)
                     }
                     chunk.pieces.append(item.piece)
                     chunk.vertices += item.vertices
@@ -817,7 +903,11 @@ public final class ViewportScene: @unchecked Sendable {
                 if !chunk.pieces.isEmpty { chunks.append(chunk) }
             }
             for (id, items) in groups { split(items, groupMaterial[id]) }
-            split(edges, nil)
+            if useCADEdgeColors {
+                for (id, items) in cadEdgeGroups { split(items, nil, edgeMaterial: cadEdgeGroupMaterial[id]) }
+            } else {
+                split(edges, nil)
+            }
         }
 
         if ProcessInfo.processInfo.environment["SIMPLESKP_TIMING"] == "1" {
@@ -860,7 +950,14 @@ public final class ViewportScene: @unchecked Sendable {
                 child.renderingOrder = 1 // after opaque faces (0), before transparent glass (2)
                 child.isHidden = !(showsEdges || shadingStyle == .wireframe)
                 edgeNodes.append(child)
-                edgeChunks.append(EdgeChunk(node: child, buffer: mergedData.positions, vertexCount: chunk.vertices, set: chunk.set))
+                edgeChunks.append(EdgeChunk(
+                    node: child,
+                    buffer: mergedData.positions,
+                    vertexCount: chunk.vertices,
+                    set: chunk.set,
+                    boundsMin: mergedData.boundsMin,
+                    boundsMax: mergedData.boundsMax
+                ))
             }
             chunk.set.node!.addChildNode(child)
         }
@@ -1235,6 +1332,8 @@ public final class ViewportScene: @unchecked Sendable {
     /// A merged geometry's buffers, one per source (nil: absent); face indices stay `Data`.
     private struct Merged {
         var positions: MTLBuffer, normals: MTLBuffer?, uvs: MTLBuffer?, indices: Data?
+        var boundsMin: SIMD3<Float> = .zero
+        var boundsMax: SIMD3<Float> = .zero
     }
 
     private static func buffer(_ bytes: Int) -> MTLBuffer {
@@ -1292,15 +1391,28 @@ public final class ViewportScene: @unchecked Sendable {
         let positions = Self.buffer(chunk.vertices * 12)
         let v = positions.contents().bindMemory(to: Float.self, capacity: chunk.vertices * 3)
         var vo = 0
+        var lo = SIMD3<Float>(repeating: .infinity)
+        var hi = SIMD3<Float>(repeating: -.infinity)
         for piece in chunk.pieces {
             let placement = placements[piece.placement], m = placement.transform
             for point in definition(placement.definition).edges[piece.item].positions {
-                let p = m * SIMD4(point, 1)
+                let p4 = m * SIMD4(point, 1)
+                let p = SIMD3<Float>(p4.x, p4.y, p4.z)
                 v[vo] = p.x; v[vo + 1] = p.y; v[vo + 2] = p.z
                 vo += 3
+                lo = simd_min(lo, p)
+                hi = simd_max(hi, p)
             }
         }
-        return Merged(positions: positions, normals: nil, uvs: nil, indices: nil)
+        let valid = lo.x <= hi.x
+        return Merged(
+            positions: positions,
+            normals: nil,
+            uvs: nil,
+            indices: nil,
+            boundsMin: valid ? lo : .zero,
+            boundsMax: valid ? hi : .zero
+        )
     }
 
     /// Serial side of the build: SceneKit objects are not made from the merge threads. Edges (no material) use implicit indices.
@@ -1315,7 +1427,10 @@ public final class ViewportScene: @unchecked Sendable {
             ? SCNGeometryElement(data: nil, primitiveType: .line, primitiveCount: chunk.vertices / 2, bytesPerIndex: 4)
             : SCNGeometryElement(data: merged.indices, primitiveType: .triangles, primitiveCount: chunk.indices / 3, bytesPerIndex: 4)
         let geometry = SCNGeometry(sources: sources, elements: [element])
-        geometry.materials = [chunk.material ?? edgeMaterial]
+        if chunk.material == nil {
+            geometry.boundingBox = (SCNVector3(merged.boundsMin), SCNVector3(merged.boundsMax))
+        }
+        geometry.materials = [chunk.material ?? chunk.edgeMaterial ?? edgeMaterial]
         return geometry
     }
 
@@ -1373,8 +1488,15 @@ public final class ViewportScene: @unchecked Sendable {
                 material.shaderModifiers = [.surface: "_surface.diffuse.a *= \(Float(effectiveAlpha));"]
             }
         } else {
-            let c = source.color
-            material.diffuse.contents = NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: effectiveAlpha)
+            let raw = SIMD3<Float>(source.color.x, source.color.y, source.color.z)
+            let rgb: SIMD3<Float>
+            if model.fileInfo.isCAD {
+                let bgLuma = Rendering.backdropLuminance(for: backdropStyle, customColor: customBackdropColor)
+                rgb = Rendering.adaptedCADColor(raw, backdropLuminance: bgLuma)
+            } else {
+                rgb = raw
+            }
+            material.diffuse.contents = NSColor(srgbRed: CGFloat(rgb.x), green: CGFloat(rgb.y), blue: CGFloat(rgb.z), alpha: effectiveAlpha)
         }
         if isTranslucent {
             material.transparency = CGFloat(source.opacity)

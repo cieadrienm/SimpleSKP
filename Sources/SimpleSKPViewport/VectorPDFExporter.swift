@@ -141,10 +141,12 @@ public enum VectorPDFExporter {
 
         // 4. Collect visible 3D primitives & project to 2D
         let materialColors = resolveMaterialColors(for: model)
+        let bgLuma = Rendering.backdropLuminance(for: options.backdropStyle, customColor: options.customBackdropColor)
+        let effectiveEdgeShading: ShadingStyle = (model.fileInfo.isCAD || model.stats.faces == 0) ? .wireframe : options.shadingStyle
         let edgeRGB = Rendering.contrastingEdgeColor(
             for: options.backdropStyle,
             customColor: options.customBackdropColor,
-            shadingStyle: options.shadingStyle
+            shadingStyle: effectiveEdgeShading
         )
 
         var triangles: [ProjectedTriangle] = []
@@ -159,6 +161,26 @@ public enum VectorPDFExporter {
         func isLayerVisible(_ layerIndex: Int) -> Bool {
             guard options.visibleLayers.indices.contains(layerIndex) else { return true }
             return options.visibleLayers[layerIndex]
+        }
+
+        func resolvedCADEdgeColor(edgeSet: SKPModel.EdgeSet, inheritedMaterial: Int?, pathLayers: [Int]) -> SIMD3<Float>? {
+            guard model.fileInfo.isCAD else { return nil }
+            let raw: SIMD3<Float>
+            if let matIdx = edgeSet.material ?? inheritedMaterial, model.materials.indices.contains(matIdx) {
+                let c = model.materials[matIdx].color
+                raw = SIMD3<Float>(c.x, c.y, c.z)
+            } else {
+                let primaryLayer = pathLayers.last(where: { $0 != 0 }) ?? (pathLayers.first ?? 0)
+                let effectiveLayer = (edgeSet.layer != 0) ? edgeSet.layer : primaryLayer
+                if model.layers.indices.contains(effectiveLayer), let lc = model.layers[effectiveLayer].color {
+                    raw = SIMD3<Float>(lc.x, lc.y, lc.z)
+                } else if model.layers.indices.contains(edgeSet.layer), let lc = model.layers[edgeSet.layer].color {
+                    raw = SIMD3<Float>(lc.x, lc.y, lc.z)
+                } else {
+                    raw = SIMD3<Float>(1, 1, 1)
+                }
+            }
+            return Rendering.adaptedCADColor(raw, backdropLuminance: bgLuma)
         }
 
         func visit(definitionIndex: Int, transform: simd_float4x4, inheritedMaterial: Int?, pathLayers: [Int]) {
@@ -234,6 +256,7 @@ public enum VectorPDFExporter {
 
             if drawEdges {
                 for edgeSet in def.edges where isLayerVisible(edgeSet.layer) && edgeSet.positions.count >= 2 {
+                    let customEdgeColor = resolvedCADEdgeColor(edgeSet: edgeSet, inheritedMaterial: inheritedMaterial, pathLayers: pathLayers)
                     var i = 0
                     let count = edgeSet.positions.count
                     while i + 1 < count {
@@ -242,7 +265,8 @@ public enum VectorPDFExporter {
                         i += 2
                         let p0 = SIMD3<Float>(w0.x, w0.y, w0.z)
                         let p1 = SIMD3<Float>(w1.x, w1.y, w1.z)
-                        if let seg = projector.projectSegment(p0, p1, depthBias: edgeBias) {
+                        if var seg = projector.projectSegment(p0, p1, depthBias: edgeBias) {
+                            seg.color = customEdgeColor
                             edges.append(seg)
                         }
                     }
@@ -372,11 +396,23 @@ public enum VectorPDFExporter {
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
         ctx.setLineWidth(edges.count > 120_000 ? 0.38 : 0.62)
-        ctx.setStrokeColor(CGColor(srgbRed: CGFloat(color.x), green: CGFloat(color.y), blue: CGFloat(color.z), alpha: 0.94))
 
         let minLength: CGFloat = edges.count > 160_000 ? 0.55 : 0.05
+        var currentRGB: SIMD3<Float>? = nil
         var inBatch = 0
         for edge in edges where edge.length >= minLength {
+            let edgeRGB = edge.color ?? color
+            if let cur = currentRGB, simd_distance_squared(cur, edgeRGB) > 1e-5 {
+                if inBatch > 0 {
+                    ctx.strokePath()
+                    inBatch = 0
+                }
+                currentRGB = edgeRGB
+                ctx.setStrokeColor(CGColor(srgbRed: CGFloat(edgeRGB.x), green: CGFloat(edgeRGB.y), blue: CGFloat(edgeRGB.z), alpha: 0.94))
+            } else if currentRGB == nil {
+                currentRGB = edgeRGB
+                ctx.setStrokeColor(CGColor(srgbRed: CGFloat(edgeRGB.x), green: CGFloat(edgeRGB.y), blue: CGFloat(edgeRGB.z), alpha: 0.94))
+            }
             ctx.move(to: edge.p0)
             ctx.addLine(to: edge.p1)
             inBatch += 1
@@ -457,7 +493,16 @@ public enum VectorPDFExporter {
                 }
             case .edge(let idx):
                 let edge = edges[idx]
-                ctx.setStrokeColor(edgeCGColor)
+                if let custom = edge.color {
+                    ctx.setStrokeColor(CGColor(
+                        srgbRed: CGFloat(custom.x),
+                        green: CGFloat(custom.y),
+                        blue: CGFloat(custom.z),
+                        alpha: shadingStyle == .xray ? 0.72 : 0.92
+                    ))
+                } else {
+                    ctx.setStrokeColor(edgeCGColor)
+                }
                 ctx.setLineWidth(edgeLineWidth)
                 ctx.beginPath()
                 ctx.move(to: edge.p0)
@@ -617,6 +662,7 @@ public enum VectorPDFExporter {
         var p1: CGPoint
         var depth: Float
         var length: CGFloat
+        var color: SIMD3<Float>? = nil
     }
 
     private struct Projector {

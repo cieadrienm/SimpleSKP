@@ -211,18 +211,85 @@ public enum Rendering {
         if shadingStyle == .clay && style != .warmPaper && luma < 0.52 {
             return SIMD3<Float>(0.16, 0.18, 0.22)
         }
-        if style == .architecturalSky && shadingStyle != .wireframe {
-            return SIMD3<Float>(0.14, 0.16, 0.20)
-        }
         if luma < 0.52 {
             return shadingStyle == .wireframe
                 ? SIMD3<Float>(0.95, 0.96, 0.99)
-                : SIMD3<Float>(0.86, 0.89, 0.94)
+                : SIMD3<Float>(0.88, 0.91, 0.96)
         } else {
             return shadingStyle == .wireframe
                 ? SIMD3<Float>(0.07, 0.09, 0.12)
                 : SIMD3<Float>(0.14, 0.16, 0.20)
         }
+    }
+
+    /// Adapts a raw AutoCAD layer or entity sRGB color (`0…1`) to guarantee high legibility and contrast against
+    /// a backdrop with perceptual luminance `backdropLuminance` (`0…1`), while preserving the CAD layer's hue.
+    /// - Black/White (ACI 7) automatically becomes crisp silver-white on dark backdrops and deep charcoal ink on light backdrops.
+    /// - Dark blues, purples, and reds are lifted in luminance on dark backdrops; bright yellows, greens, and cyans are darkened on light paper.
+    public static func adaptedCADColor(_ rawRGB: SIMD3<Float>, backdropLuminance: Float) -> SIMD3<Float> {
+        let c = simd_clamp(rawRGB, .zero, SIMD3(repeating: 1))
+        let maxC = max(c.x, max(c.y, c.z))
+        let minC = min(c.x, min(c.y, c.z))
+        let delta = maxC - minC
+        let rawLuma = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+        let isDarkBackdrop = backdropLuminance < 0.54
+
+        // 1. Achromatic colors: AutoCAD ACI 7 (White/Black) and greys (ACI 8, 9, 250…255)
+        if delta < 0.08 {
+            if maxC < 0.20 || minC > 0.84 {
+                return isDarkBackdrop
+                    ? SIMD3<Float>(0.93, 0.95, 0.98)
+                    : SIMD3<Float>(0.11, 0.13, 0.17)
+            }
+            let v = isDarkBackdrop ? (0.64 + 0.24 * rawLuma) : (0.24 + 0.24 * rawLuma)
+            return SIMD3<Float>(repeating: v)
+        }
+
+        // 2. Chromatic colors: convert RGB -> HSV (h in 0..<360)
+        var h: Float = 0
+        if maxC == c.x {
+            h = 60.0 * ((c.y - c.z) / delta).truncatingRemainder(dividingBy: 6.0)
+        } else if maxC == c.y {
+            h = 60.0 * (((c.z - c.x) / delta) + 2.0)
+        } else {
+            h = 60.0 * (((c.x - c.y) / delta) + 4.0)
+        }
+        if h < 0 { h += 360.0 }
+        var s = delta / max(maxC, 1e-5)
+        var v = maxC
+
+        if isDarkBackdrop {
+            v = max(v, 0.92)
+            s = min(s, 0.82)
+            if h >= 205.0 && h <= 285.0 {
+                // Deep blue / indigo / violet: boost brightness and mix white so perceptual contrast is high on dark studio
+                s = min(s, 0.60)
+                v = max(v, 0.98)
+            } else if h <= 18.0 || h >= 342.0 {
+                // Red / crimson: soften saturation slightly for luminous coral-red legibility
+                s = min(s, 0.74)
+                v = max(v, 0.96)
+            }
+        } else {
+            // Light backdrop (.warmPaper / light custom): darken high-luma hues (yellow, green, cyan) so they don't vanish
+            s = max(s, 0.78)
+            let maxV: Float = (h >= 38.0 && h <= 198.0) ? 0.55 : 0.66
+            v = min(max(v, 0.38), maxV)
+        }
+
+        let chroma = v * s
+        let x = chroma * (1.0 - abs((h / 60.0).truncatingRemainder(dividingBy: 2.0) - 1.0))
+        let m = v - chroma
+        let (r1, g1, b1): (Float, Float, Float)
+        switch Int(h / 60.0) % 6 {
+        case 0: (r1, g1, b1) = (chroma, x, 0)
+        case 1: (r1, g1, b1) = (x, chroma, 0)
+        case 2: (r1, g1, b1) = (0, chroma, x)
+        case 3: (r1, g1, b1) = (0, x, chroma)
+        case 4: (r1, g1, b1) = (x, 0, chroma)
+        default: (r1, g1, b1) = (chroma, 0, x)
+        }
+        return simd_clamp(SIMD3<Float>(r1 + m, g1 + m, b1 + m), .zero, SIMD3(repeating: 1))
     }
 
     /// Camera post-processing: HDR without exposure adaptation, screen-space ambient occlusion, subtle contrast, no bloom/blur/fringe.

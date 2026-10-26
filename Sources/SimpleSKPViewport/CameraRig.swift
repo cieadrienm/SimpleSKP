@@ -67,13 +67,24 @@ public final class CameraRig {
 
     private var spin = SIMD2<Float>.zero // yaw, pitch in rad/s
     private var lastOrbitTime: TimeInterval?
+    private var panVelocity = SIMD3<Float>.zero // model-space metres/s
+    private var lastPanTime: TimeInterval?
+    private var zoomInertiaRatio: Float = 1.0
+    private var zoomInertiaPoint: CGPoint = .zero
+    var onZoomInertiaStep: ((Float, CGPoint) -> Void)?
     private var glide: (from: Pose, to: Pose, fromScale: Double, toScale: Double, elapsed: Float, duration: Float)?
     private var timer: Timer?
     private var lastTick: CFTimeInterval = 0
 
     init(node: SCNNode) { self.node = node }
 
-    var isMoving: Bool { glide != nil || spin != .zero || !keys.intersection(Self.moveKeys).isEmpty }
+    var isMoving: Bool {
+        glide != nil
+            || spin != .zero
+            || simd_length(panVelocity) > 1e-3
+            || abs(zoomInertiaRatio - 1.0) > 1e-3
+            || !keys.intersection(Self.moveKeys).isEmpty
+    }
 
     /// Model diagonal / 32 per second (4× slower than the initial diagonal / 8), kept within 0.125–12.5 m/s.
     func setSpeed(diagonal: Float) { baseSpeed = max(0.125, min(12.5, diagonal / 32)) }
@@ -103,6 +114,33 @@ public final class CameraRig {
         lastOrbitTime = nil
     }
 
+    /// Records a model-space pan displacement (`delta`) so releasing a drag or gesture coasts smoothly.
+    func recordPan(delta: SIMD3<Float>, time: TimeInterval?) {
+        guard let time else {
+            panVelocity = .zero
+            lastPanTime = nil
+            return
+        }
+        let dt = Float(lastPanTime.map { time - $0 } ?? 0)
+        let instVelocity = delta / (dt > 0 ? max(dt, 1 / 120) : 1 / 60)
+        panVelocity = simd_length(panVelocity) > 1e-4 ? (panVelocity * 0.45 + instVelocity * 0.55) : instVelocity
+        lastPanTime = time
+    }
+
+    /// End of a pan drag or gesture: the translation coasts gently if the hand was still moving.
+    func releasePan(time: TimeInterval) {
+        if let last = lastPanTime, time - last < 0.05 { startTicking() } else { panVelocity = .zero }
+        lastPanTime = nil
+    }
+
+    /// Accumulates a multiplicative zoom ratio to be interpolated smoothly over ~120 ms at 60–120 Hz.
+    func addZoomInertia(ratio: Float, at point: CGPoint) {
+        guard ratio.isFinite, ratio > 0.05, ratio < 20.0 else { return }
+        zoomInertiaPoint = point
+        zoomInertiaRatio = max(0.05, min(20.0, zoomInertiaRatio * ratio))
+        startTicking()
+    }
+
     func look(yaw: Float, pitch: Float) {
         pose.yaw += yaw
         pose.pitch = clampedPitch(pose.pitch + pitch)
@@ -116,6 +154,9 @@ public final class CameraRig {
     /// Animates to `pose` (0.35 s ease-in-out by default) through the rig, so a click or a key can stop it midway.
     func glide(to target: Pose, orthographicScale: Double? = nil, duration: Float = 0.35) {
         spin = .zero
+        panVelocity = .zero
+        lastPanTime = nil
+        zoomInertiaRatio = 1.0
         let scale = node.camera?.orthographicScale ?? 1
         glide = (pose, target, scale, orthographicScale ?? scale, 0, duration)
         startTicking()
@@ -132,6 +173,9 @@ public final class CameraRig {
         glide = nil
         spin = .zero
         lastOrbitTime = nil
+        panVelocity = .zero
+        lastPanTime = nil
+        zoomInertiaRatio = 1.0
     }
 
     // MARK: Conversions
@@ -176,6 +220,18 @@ public final class CameraRig {
             orbit(yaw: s.x, pitch: s.y)
             spin *= exp(-inertiaDamping * dt)
             if simd_length(spin) < 0.01 { spin = .zero }
+        }
+        if simd_length(panVelocity) > 1e-3 {
+            pose.position += panVelocity * dt
+            panVelocity *= exp(-11.0 * dt)
+            if simd_length(panVelocity) <= 1e-3 { panVelocity = .zero }
+        }
+        if abs(zoomInertiaRatio - 1.0) > 1e-3 {
+            let alpha = min(1.0, 1.0 - exp(-16.0 * dt))
+            let stepRatio = pow(zoomInertiaRatio, alpha)
+            zoomInertiaRatio = pow(zoomInertiaRatio, 1.0 - alpha)
+            if abs(zoomInertiaRatio - 1.0) <= 1e-3 { zoomInertiaRatio = 1.0 }
+            onZoomInertiaStep?(stepRatio, zoomInertiaPoint)
         }
         let held = keys
         if !held.isDisjoint(with: Self.moveKeys) {

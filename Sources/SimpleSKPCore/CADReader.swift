@@ -441,6 +441,60 @@ public enum CADReader {
             textureDirectory: model.textureDirectory
         )
     }
+
+    // MARK: - AutoCAD Color Index (ACI 1…255) & TrueColor Lookup
+
+    /// Converts an AutoCAD 24-bit TrueColor integer (DXF group code `420`) to sRGB `0…1`.
+    public static func trueColor(from code420: Int) -> SIMD4<Float> {
+        let r = Float((code420 >> 16) & 0xFF) / 255.0
+        let g = Float((code420 >> 8) & 0xFF) / 255.0
+        let b = Float(code420 & 0xFF) / 255.0
+        return SIMD4<Float>(r, g, b, 1.0)
+    }
+
+    /// Converts an AutoCAD Color Index (`1…255`, DXF group code `62`) to sRGB `0…1`.
+    /// Negative indices in DXF LAYER records indicate a hidden layer Whose color is `abs(index)`.
+    public static func aciColor(for rawIndex: Int) -> SIMD4<Float>? {
+        let idx = abs(rawIndex)
+        guard idx >= 1 && idx <= 255 else { return nil }
+        switch idx {
+        case 1: return SIMD4(1.00, 0.00, 0.00, 1.0) // Red
+        case 2: return SIMD4(1.00, 1.00, 0.00, 1.0) // Yellow
+        case 3: return SIMD4(0.00, 1.00, 0.00, 1.0) // Green
+        case 4: return SIMD4(0.00, 1.00, 1.00, 1.0) // Cyan
+        case 5: return SIMD4(0.00, 0.00, 1.00, 1.0) // Blue
+        case 6: return SIMD4(1.00, 0.00, 1.00, 1.0) // Magenta
+        case 7: return SIMD4(1.00, 1.00, 1.00, 1.0) // White / Black (adaptive)
+        case 8: return SIMD4(0.50, 0.50, 0.50, 1.0) // Dark grey
+        case 9: return SIMD4(0.75, 0.75, 0.75, 1.0) // Light grey
+        case 250...255:
+            // Standard 6-step AutoCAD greyscale ramp
+            let t = Float(idx - 250) / 5.0
+            let v = 0.20 + t * 0.76
+            return SIMD4(v, v, v, 1.0)
+        default:
+            // Standard AutoCAD 10…249 24-hue × 10-shade palette
+            let hueStep = (idx - 10) / 10 // 0…23 (15° increments starting at Red = 0°)
+            let shade = (idx - 10) % 10   // 0,2,4,6,8 = full saturation brightness steps; 1,3,5,7,9 = pastel tint steps
+            let hueDeg = Float(hueStep) * 15.0
+            let brightnessFactors: [Float] = [1.00, 1.00, 0.80, 0.80, 0.60, 0.60, 0.50, 0.50, 0.30, 0.30]
+            let saturation: Float = (shade % 2 == 0) ? 1.0 : 0.50
+            let value = brightnessFactors[shade]
+            let c = value * saturation
+            let x = c * (1.0 - abs((hueDeg / 60.0).truncatingRemainder(dividingBy: 2.0) - 1.0))
+            let m = value - c
+            let (r1, g1, b1): (Float, Float, Float)
+            switch Int(hueDeg / 60.0) % 6 {
+            case 0: (r1, g1, b1) = (c, x, 0)
+            case 1: (r1, g1, b1) = (x, c, 0)
+            case 2: (r1, g1, b1) = (0, c, x)
+            case 3: (r1, g1, b1) = (0, x, c)
+            case 4: (r1, g1, b1) = (x, 0, c)
+            default: (r1, g1, b1) = (c, 0, x)
+            }
+            return SIMD4(r1 + m, g1 + m, b1 + m, 1.0)
+        }
+    }
 }
 
 // MARK: - Native Swift ASCII DXF Parser (Fallback & Standalone Support)
@@ -478,14 +532,19 @@ enum DXFNativeParser {
         }
 
         var unitScale: Float = 1.0 // default 1 unit = 1 m
-        var layers: [SKPModel.Layer] = [SKPModel.Layer(name: "0", isVisible: true)]
+        var layers: [SKPModel.Layer] = [SKPModel.Layer(name: "0", isVisible: true, color: CADReader.aciColor(for: 7))]
         var layerIndexByName: [String: Int] = ["0": 0]
 
-        func ensureLayer(_ name: String, visible: Bool = true) -> Int {
+        func ensureLayer(_ name: String, visible: Bool = true, color: SIMD4<Float>? = nil) -> Int {
             let clean = name.isEmpty ? "0" : name
-            if let idx = layerIndexByName[clean] { return idx }
+            if let idx = layerIndexByName[clean] {
+                if let color, layers[idx].color == nil {
+                    layers[idx].color = color
+                }
+                return idx
+            }
             let idx = layers.count
-            layers.append(SKPModel.Layer(name: clean, isVisible: visible))
+            layers.append(SKPModel.Layer(name: clean, isVisible: visible, color: color))
             layerIndexByName[clean] = idx
             return idx
         }
@@ -548,12 +607,15 @@ enum DXFNativeParser {
                 switch entity {
                 case "LINE":
                     var lyr = "0"
+                    var entColor: SIMD4<Float>? = nil
                     var x1: Float = 0, y1: Float = 0, z1: Float = 0
                     var x2: Float = 0, y2: Float = 0, z2: Float = 0
                     while let (c, v) = readPair() {
                         if c == 0 { pendingPair = (c, v); break }
                         switch c {
                         case 8: lyr = v
+                        case 62: if let aci = Int(v), entColor == nil { entColor = CADReader.aciColor(for: aci) }
+                        case 420: if let tc = Int(v) { entColor = CADReader.trueColor(from: tc) }
                         case 10: x1 = Float(v) ?? 0
                         case 20: y1 = Float(v) ?? 0
                         case 30: z1 = Float(v) ?? 0
@@ -563,10 +625,11 @@ enum DXFNativeParser {
                         default: break
                         }
                     }
-                    geo.addSegment(SIMD3(x1, y1, z1), SIMD3(x2, y2, z2), layer: ensureLayer(lyr))
+                    geo.addSegment(SIMD3(x1, y1, z1), SIMD3(x2, y2, z2), layer: ensureLayer(lyr, color: entColor))
 
                 case "LWPOLYLINE":
                     var lyr = "0"
+                    var entColor: SIMD4<Float>? = nil
                     var flags = 0
                     var elevation: Float = 0
                     var pts: [SIMD2<Float>] = []
@@ -575,6 +638,8 @@ enum DXFNativeParser {
                         if c == 0 { pendingPair = (c, v); break }
                         switch c {
                         case 8: lyr = v
+                        case 62: if let aci = Int(v), entColor == nil { entColor = CADReader.aciColor(for: aci) }
+                        case 420: if let tc = Int(v) { entColor = CADReader.trueColor(from: tc) }
                         case 38: elevation = Float(v) ?? 0
                         case 70: flags = Int(v) ?? 0
                         case 10:
@@ -587,7 +652,7 @@ enum DXFNativeParser {
                         default: break
                         }
                     }
-                    let lIdx = ensureLayer(lyr)
+                    let lIdx = ensureLayer(lyr, color: entColor)
                     if pts.count >= 2 {
                         for i in 0..<(pts.count - 1) {
                             geo.addSegment(SIMD3(pts[i].x, pts[i].y, elevation), SIMD3(pts[i + 1].x, pts[i + 1].y, elevation), layer: lIdx)
@@ -816,20 +881,26 @@ enum DXFNativeParser {
                     if c == 0 && v.uppercased() == "LAYER" {
                         var name = ""
                         var colorCode = 7
+                        var trueColorCode: Int? = nil
                         var flags = 0
                         while let (lc, lv) = readPair() {
                             if lc == 0 { pendingPair = (lc, lv); break }
                             switch lc {
                             case 2: name = lv
                             case 62: colorCode = Int(lv) ?? 7
+                            case 420: trueColorCode = Int(lv)
                             case 70: flags = Int(lv) ?? 0
                             default: break
                             }
                         }
                         if !name.isEmpty {
                             let visible = colorCode >= 0 && (flags & 1) == 0
-                            let idx = ensureLayer(name, visible: visible)
+                            let resolvedColor = trueColorCode.map(CADReader.trueColor(from:)) ?? CADReader.aciColor(for: colorCode)
+                            let idx = ensureLayer(name, visible: visible, color: resolvedColor)
                             layers[idx].isVisible = visible
+                            if let resolvedColor {
+                                layers[idx].color = resolvedColor
+                            }
                         }
                     }
                 }

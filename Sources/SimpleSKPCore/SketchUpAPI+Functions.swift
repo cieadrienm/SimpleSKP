@@ -47,6 +47,7 @@ extension SketchUpAPI {
         let SUTextureWriteToFile: @convention(c) (Ref, UnsafePointer<CChar>) -> Int32
         let SUTextureGetDimensions: @convention(c) (Ref, UnsafeMutablePointer<Int>, UnsafeMutablePointer<Int>, UnsafeMutablePointer<Double>, UnsafeMutablePointer<Double>) -> Int32
         let SULayerGetName: GetRef
+        let SULayerGetMaterial: GetRef?
         let SULayerGetVisibility: GetBool
         let SULayerGetParentLayerFolder: GetRef?
         let SULayerFolderGetName: GetRef?
@@ -135,6 +136,7 @@ extension SketchUpAPI {
             SUTextureWriteToFile = try sym(handle, "SUTextureWriteToFile")
             SUTextureGetDimensions = try sym(handle, "SUTextureGetDimensions")
             SULayerGetName = try sym(handle, "SULayerGetName")
+            SULayerGetMaterial = symOpt(handle, "SULayerGetMaterial")
             SULayerGetVisibility = try sym(handle, "SULayerGetVisibility")
             SULayerGetParentLayerFolder = symOpt(handle, "SULayerGetParentLayerFolder")
             SULayerFolderGetName = symOpt(handle, "SULayerFolderGetName")
