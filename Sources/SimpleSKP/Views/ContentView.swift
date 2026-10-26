@@ -279,6 +279,16 @@ struct TopBar: View {
                 ) {
                     model.zoomExtents()
                 }
+                ToolbarPillButton(
+                    title: L("Mesurer", "Measure"),
+                    symbol: "ruler",
+                    active: model.isMeasuring,
+                    disabled: !model.isReady,
+                    tooltip: L("Outil de mesure avec magnétisme sur points, milieux et arêtes (⌘D · Échap pour quitter)",
+                               "Measure tool with snapping on points, midpoints and edges (⌘D · Esc to exit)")
+                ) {
+                    model.toggleMeasureTool()
+                }
 
                 if !model.isCAD {
                     HStack(spacing: 1) {
@@ -1316,52 +1326,60 @@ private struct ViewportHUDOverlay: View {
     let model: DocumentModel
 
     var body: some View {
-        VStack {
-            // Top banners (Free-fly / Flash feedback)
-            HStack {
-                Spacer()
-                if model.isFreeFlying {
-                    HStack(spacing: 10) {
-                        Image(systemName: "airplane")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.accent.swiftUI)
-                        Text(L("Mode vol libre — Souris pour regarder · ZQSD / Flèches pour avancer · Échap pour sortir",
-                               "Free fly mode — Mouse to look · WASD / Arrows to move · Esc to exit"))
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(Theme.text.swiftUI)
-                        TextButton(title: L("Quitter (Échap)", "Exit (Esc)"), compact: true) {
-                            model.toggleFreeFlight()
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill(Theme.panel.swiftUI.opacity(0.92))
-                            .overlay(Capsule().strokeBorder(Theme.accent.swiftUI.opacity(0.45), lineWidth: 1))
-                    )
-                    .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
-                } else if let flash = model.flashMessage {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.alive.swiftUI)
-                        Text(flash)
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(Theme.text.swiftUI)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill(Theme.panel.swiftUI.opacity(0.92))
-                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-                    )
-                    .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
-                }
-                Spacer()
+        ZStack {
+            if model.isMeasuring {
+                MeasurementCanvasOverlay(model: model)
+                    .allowsHitTesting(false)
             }
-            .padding(.top, 10)
+
+            VStack {
+                // Top banners (Free-fly / Measurement / Flash feedback)
+                HStack {
+                    Spacer()
+                    if model.isFreeFlying {
+                        HStack(spacing: 10) {
+                            Image(systemName: "airplane")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.accent.swiftUI)
+                            Text(L("Mode vol libre — Souris pour regarder · ZQSD / Flèches pour avancer · Échap pour sortir",
+                                   "Free fly mode — Mouse to look · WASD / Arrows to move · Esc to exit"))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Theme.text.swiftUI)
+                            TextButton(title: L("Quitter (Échap)", "Exit (Esc)"), compact: true) {
+                                model.toggleFreeFlight()
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Theme.panel.swiftUI.opacity(0.92))
+                                .overlay(Capsule().strokeBorder(Theme.accent.swiftUI.opacity(0.45), lineWidth: 1))
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+                    } else if model.isMeasuring {
+                        MeasurementBannerView(model: model)
+                    } else if let flash = model.flashMessage {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.alive.swiftUI)
+                            Text(flash)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Theme.text.swiftUI)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Theme.panel.swiftUI.opacity(0.92))
+                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+                    }
+                    Spacer()
+                }
+                .padding(.top, 10)
 
             Spacer()
 
@@ -1447,6 +1465,319 @@ private struct ViewportHUDOverlay: View {
                 .shadow(color: .black.opacity(0.28), radius: 6, y: 2)
             }
             .padding(12)
+            }
+        }
+    }
+}
+
+// MARK: - Measurement Tool Overlay & Banner (⌘D)
+
+private struct MeasurementBannerView: View {
+    let model: DocumentModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "ruler.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.accent.swiftUI)
+
+            if let start = model.measureStart, let end = model.activeMeasureEnd {
+                let d = end.position - start.position
+                let dist = simd_length(d)
+                let xyDist = hypot(d.x, d.y)
+                let angleDeg = atan2(d.y, d.x) * 180.0 / .pi
+
+                Button {
+                    model.copyMeasurement()
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(DocumentModel.formatDistance(dist))
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .foregroundStyle(Theme.accent.swiftUI)
+
+                        Rectangle().fill(Theme.separator.swiftUI).frame(width: 1, height: 13)
+
+                        HStack(spacing: 6) {
+                            axisDeltaBadge("ΔX", d.x, color: Color(red: 0.95, green: 0.36, blue: 0.34))
+                            axisDeltaBadge("ΔY", d.y, color: Color(red: 0.30, green: 0.86, blue: 0.48))
+                            if abs(d.z) > 1e-3 || !model.is2DCAD {
+                                axisDeltaBadge("ΔZ", d.z, color: Color(red: 0.38, green: 0.68, blue: 0.98))
+                            }
+                        }
+
+                        if xyDist > 1e-4 {
+                            Rectangle().fill(Theme.separator.swiftUI).frame(width: 1, height: 13)
+                            Text(String(format: "%.1f°", angleDeg))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Theme.textDim.swiftUI)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .help(L("Cliquer pour copier la mesure dans le presse-papiers", "Click to copy measurement to clipboard"))
+
+                TextButton(title: L("Copier", "Copy"), symbol: "doc.on.doc", compact: true) {
+                    model.copyMeasurement()
+                }
+                TextButton(title: L("Effacer", "Clear"), compact: true) {
+                    model.clearMeasurement()
+                }
+            } else if model.measureStart != nil {
+                Text(L("Cliquez le 2e point (Points / Milieux / Arêtes · ⇧ : axe)",
+                       "Click 2nd point (Endpoints / Midpoints / Edges · ⇧: axis)"))
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Theme.text.swiftUI)
+                TextButton(title: L("Annuler", "Cancel"), compact: true) {
+                    model.clearMeasurement()
+                }
+            } else {
+                Text(L("Mesurer (⌘D) — Cliquez un 1er point ou une arête (magnétisme actif · Échap : quitter)",
+                       "Measure (⌘D) — Click 1st point or edge (snapping active · Esc: exit)"))
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Theme.text.swiftUI)
+            }
+
+            TextButton(title: L("Quitter", "Exit"), compact: true) {
+                model.setMeasureTool(false)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule()
+                .fill(Theme.panel.swiftUI.opacity(0.94))
+                .overlay(Capsule().strokeBorder(Theme.accent.swiftUI.opacity(0.50), lineWidth: 1))
+        )
+        .shadow(color: .black.opacity(0.38), radius: 8, y: 2)
+    }
+
+    private func axisDeltaBadge(_ label: String, _ value: Float, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(color)
+            Text(String(format: "%+.2f m", value))
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Theme.text.swiftUI)
+        }
+    }
+}
+
+private struct MeasurementCanvasOverlay: View {
+    let model: DocumentModel
+
+    private static func snapColor(for kind: MeasureSnap.Kind) -> Color {
+        switch kind {
+        case .vertex: return Color(red: 0.22, green: 0.92, blue: 0.56)   // Emerald green (Point)
+        case .midpoint: return Color(red: 0.22, green: 0.86, blue: 0.98) // Sky cyan (Midpoint)
+        case .edge: return Color(red: 1.00, green: 0.72, blue: 0.18)     // Amber gold (Edge)
+        case .face, .plane: return Color(red: 0.88, green: 0.90, blue: 0.96)
+        }
+    }
+
+    var body: some View {
+        // Observe camera state so the 2D projection updates at 60–120 Hz during orbit, pan, and zoom
+        let _ = model.cameraPosition
+        let _ = model.cameraYaw
+        let _ = model.cameraPitch
+        let _ = model.cameraFOV
+        let _ = model.cameraOrthoScale
+        let hoverSnap = model.measureHoverSnap
+        let startSnap = model.measureStart
+        let endSnap = model.activeMeasureEnd
+
+        GeometryReader { _ in
+            ZStack {
+                Canvas { ctx, _ in
+                    // 1. Highlight the snapped edge segment under the cursor
+                    if let hover = hoverSnap,
+                       let s0 = hover.segmentStart,
+                       let s1 = hover.segmentEnd,
+                       let p0 = model.viewport.projectModelPoint(s0),
+                       let p1 = model.viewport.projectModelPoint(s1) {
+                        var edgePath = Path()
+                        edgePath.move(to: p0)
+                        edgePath.addLine(to: p1)
+                        ctx.stroke(
+                            edgePath,
+                            with: .color(Self.snapColor(for: hover.kind).opacity(0.65)),
+                            style: StrokeStyle(lineWidth: 3.0, lineCap: .round)
+                        )
+                    }
+
+                    // 2. Draw active or completed measurement line + ΔX / ΔY / ΔZ projections
+                    if let start = startSnap, let end = endSnap,
+                       let pA = model.viewport.projectModelPoint(start.position),
+                       let pB = model.viewport.projectModelPoint(end.position) {
+                        let a = start.position
+                        let b = end.position
+                        let cornerX = SIMD3<Float>(b.x, a.y, a.z)
+                        let cornerXY = SIMD3<Float>(b.x, b.y, a.z)
+
+                        // Dashed ΔX, ΔY, ΔZ component lines
+                        if abs(b.x - a.x) > 1e-3,
+                           let pCornerX = model.viewport.projectModelPoint(cornerX),
+                           hypot(pCornerX.x - pA.x, pCornerX.y - pA.y) > 8 {
+                            var pathX = Path()
+                            pathX.move(to: pA)
+                            pathX.addLine(to: pCornerX)
+                            ctx.stroke(
+                                pathX,
+                                with: .color(Color(red: 0.95, green: 0.32, blue: 0.32).opacity(0.82)),
+                                style: StrokeStyle(lineWidth: 1.3, lineCap: .round, dash: [4, 3])
+                            )
+                        }
+                        if abs(b.y - a.y) > 1e-3,
+                           let pCornerX = model.viewport.projectModelPoint(cornerX),
+                           let pCornerXY = model.viewport.projectModelPoint(cornerXY),
+                           hypot(pCornerXY.x - pCornerX.x, pCornerXY.y - pCornerX.y) > 8 {
+                            var pathY = Path()
+                            pathY.move(to: pCornerX)
+                            pathY.addLine(to: pCornerXY)
+                            ctx.stroke(
+                                pathY,
+                                with: .color(Color(red: 0.28, green: 0.86, blue: 0.48).opacity(0.82)),
+                                style: StrokeStyle(lineWidth: 1.3, lineCap: .round, dash: [4, 3])
+                            )
+                        }
+                        if abs(b.z - a.z) > 1e-3,
+                           let pCornerXY = model.viewport.projectModelPoint(cornerXY),
+                           hypot(pB.x - pCornerXY.x, pB.y - pCornerXY.y) > 8 {
+                            var pathZ = Path()
+                            pathZ.move(to: pCornerXY)
+                            pathZ.addLine(to: pB)
+                            ctx.stroke(
+                                pathZ,
+                                with: .color(Color(red: 0.35, green: 0.68, blue: 0.98).opacity(0.85)),
+                                style: StrokeStyle(lineWidth: 1.3, lineCap: .round, dash: [4, 3])
+                            )
+                        }
+
+                        // Dark halo + bright amber-gold measurement line
+                        var mainLine = Path()
+                        mainLine.move(to: pA)
+                        mainLine.addLine(to: pB)
+                        ctx.stroke(
+                            mainLine,
+                            with: .color(Color.black.opacity(0.65)),
+                            style: StrokeStyle(lineWidth: 4.2, lineCap: .round)
+                        )
+                        ctx.stroke(
+                            mainLine,
+                            with: .color(Theme.accent.swiftUI),
+                            style: StrokeStyle(lineWidth: 2.2, lineCap: .round)
+                        )
+
+                        // Architectural perpendicular ticks at pA and pB
+                        let dx = pB.x - pA.x, dy = pB.y - pA.y
+                        let len = hypot(dx, dy)
+                        if len > 6 {
+                            let nx = -dy / len * 6.5
+                            let ny = dx / len * 6.5
+                            var ticks = Path()
+                            ticks.move(to: CGPoint(x: pA.x - nx, y: pA.y - ny))
+                            ticks.addLine(to: CGPoint(x: pA.x + nx, y: pA.y + ny))
+                            ticks.move(to: CGPoint(x: pB.x - nx, y: pB.y - ny))
+                            ticks.addLine(to: CGPoint(x: pB.x + nx, y: pB.y + ny))
+                            ctx.stroke(ticks, with: .color(Theme.accent.swiftUI), style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
+                        }
+
+                        drawSnapMarker(in: &ctx, at: pA, kind: start.kind)
+                        drawSnapMarker(in: &ctx, at: pB, kind: end.kind)
+                    }
+
+                    // 3. Draw live hover snap marker
+                    if let hover = hoverSnap,
+                       let pHover = model.viewport.projectModelPoint(hover.position) {
+                        drawSnapMarker(in: &ctx, at: pHover, kind: hover.kind)
+                    }
+                }
+
+                // Floating midpoint distance pill
+                if let start = startSnap, let end = endSnap,
+                   let pA = model.viewport.projectModelPoint(start.position),
+                   let pB = model.viewport.projectModelPoint(end.position) {
+                    let dist = simd_distance(start.position, end.position)
+                    if dist > 1e-5 {
+                        let mid = CGPoint(x: (pA.x + pB.x) * 0.5, y: (pA.y + pB.y) * 0.5 - 14)
+                        Text(DocumentModel.formatDistance(dist, compact: true))
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(
+                                Capsule()
+                                    .fill(Theme.panel.swiftUI.opacity(0.94))
+                                    .overlay(Capsule().strokeBorder(Theme.accent.swiftUI, lineWidth: 1.2))
+                            )
+                            .shadow(color: .black.opacity(0.45), radius: 5, y: 2)
+                            .position(mid)
+                    }
+                }
+
+                // Floating snap kind badge near cursor
+                if let hover = hoverSnap,
+                   let pHover = model.viewport.projectModelPoint(hover.position) {
+                    let badgeColor = Self.snapColor(for: hover.kind)
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(badgeColor)
+                            .frame(width: 6, height: 6)
+                        Text(DocumentModel.snapKindLabel(hover.kind))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(
+                        Capsule()
+                            .fill(Theme.panel.swiftUI.opacity(0.92))
+                            .overlay(Capsule().strokeBorder(badgeColor.opacity(0.75), lineWidth: 1))
+                    )
+                    .shadow(color: .black.opacity(0.35), radius: 4, y: 1)
+                    .position(x: pHover.x + 36, y: pHover.y + 18)
+                }
+            }
+        }
+    }
+
+    private func drawSnapMarker(in ctx: inout GraphicsContext, at pt: CGPoint, kind: MeasureSnap.Kind) {
+        let color = Self.snapColor(for: kind)
+        let r: CGFloat = 6.5
+        switch kind {
+        case .vertex:
+            // Diamond + center dot for Endpoint / Vertex
+            var diamond = Path()
+            diamond.move(to: CGPoint(x: pt.x, y: pt.y - r - 1.5))
+            diamond.addLine(to: CGPoint(x: pt.x + r + 1.5, y: pt.y))
+            diamond.addLine(to: CGPoint(x: pt.x, y: pt.y + r + 1.5))
+            diamond.addLine(to: CGPoint(x: pt.x - r - 1.5, y: pt.y))
+            diamond.closeSubpath()
+            ctx.stroke(diamond, with: .color(.black.opacity(0.7)), style: StrokeStyle(lineWidth: 3.2))
+            ctx.stroke(diamond, with: .color(color), style: StrokeStyle(lineWidth: 1.8))
+            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2.5, y: pt.y - 2.5, width: 5, height: 5)), with: .color(color))
+        case .midpoint:
+            // Triangle for Midpoint
+            var tri = Path()
+            tri.move(to: CGPoint(x: pt.x, y: pt.y - r - 1.5))
+            tri.addLine(to: CGPoint(x: pt.x + r + 1.5, y: pt.y + r))
+            tri.addLine(to: CGPoint(x: pt.x - r - 1.5, y: pt.y + r))
+            tri.closeSubpath()
+            ctx.stroke(tri, with: .color(.black.opacity(0.7)), style: StrokeStyle(lineWidth: 3.2))
+            ctx.stroke(tri, with: .color(color), style: StrokeStyle(lineWidth: 1.8))
+            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2.2, y: pt.y - 2.2, width: 4.4, height: 4.4)), with: .color(color))
+        case .edge:
+            // Square for On-Edge
+            let rect = CGRect(x: pt.x - r + 1, y: pt.y - r + 1, width: (r - 1) * 2, height: (r - 1) * 2)
+            ctx.stroke(Path(rect), with: .color(.black.opacity(0.7)), style: StrokeStyle(lineWidth: 3.2))
+            ctx.stroke(Path(rect), with: .color(color), style: StrokeStyle(lineWidth: 1.8))
+            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2.2, y: pt.y - 2.2, width: 4.4, height: 4.4)), with: .color(color))
+        case .face, .plane:
+            // Circle + crosshair for Surface / Plane
+            let circle = Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r * 2, height: r * 2))
+            ctx.stroke(circle, with: .color(.black.opacity(0.65)), style: StrokeStyle(lineWidth: 3.0))
+            ctx.stroke(circle, with: .color(color), style: StrokeStyle(lineWidth: 1.6))
+            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2, y: pt.y - 2, width: 4, height: 4)), with: .color(color))
         }
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import simd
 import SimpleSKPCore
 import SimpleSKPMCPCore
 @testable import SimpleSKPViewport
@@ -545,5 +546,34 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         model.setHoveredLayer(nil)
         XCTAssertNil(model.hoveredLayerIndex)
         XCTAssertTrue(scene.hoveredLayers.isEmpty)
+
+        // Measurement tool (⌘D) workflow: toggle, snap start, shift-locked hover, click end, escape
+        model.toggleMeasureTool()
+        XCTAssertTrue(model.isMeasuring)
+        XCTAssertTrue(model.viewport.isMeasuring)
+
+        let snapA = MeasureSnap(position: SIMD3(0, 0, 0), kind: .vertex)
+        model.handleMeasureClick(snapA, shiftLocked: false)
+        XCTAssertEqual(model.measureStart, snapA)
+        XCTAssertNil(model.measureEnd)
+
+        // Hovering an edge with Shift held locks along the dominant axis (X = 5.0, Y = 0, Z = 0)
+        let rawHover = MeasureSnap(position: SIMD3(5.0, 1.2, 0.3), kind: .edge)
+        model.handleMeasureHover(rawHover, shiftLocked: true)
+        XCTAssertEqual(model.activeMeasureEnd?.position, SIMD3(5.0, 0, 0))
+
+        // Clicking a vertex finalizes the measurement (vertices ignore Shift axis lock so exact vertex-to-vertex works)
+        let snapB = MeasureSnap(position: SIMD3(3.0, 4.0, 0.0), kind: .vertex)
+        model.handleMeasureClick(snapB, shiftLocked: true)
+        XCTAssertEqual(model.measureEnd, snapB)
+        XCTAssertEqual(DocumentModel.formatDistance(simd_distance(snapA.position, snapB.position)), "5.000 m")
+
+        // First Escape clears the active points while keeping the tool active; second Escape exits the tool
+        model.handleMeasureEscape()
+        XCTAssertTrue(model.isMeasuring)
+        XCTAssertNil(model.measureStart)
+        XCTAssertNil(model.measureEnd)
+        model.handleMeasureEscape()
+        XCTAssertFalse(model.isMeasuring)
     }
 }

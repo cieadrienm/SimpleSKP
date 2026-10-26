@@ -67,6 +67,10 @@ final class DocumentModel {
     var cameraOrthoScale: Float = 1
     var cameraSpeedScale: Float = 1
     var showSidebar = false
+    var isMeasuring = false
+    var measureStart: MeasureSnap? = nil
+    var measureEnd: MeasureSnap? = nil
+    var measureHoverSnap: MeasureSnap? = nil
     var loadSeconds: Double?
     /// Mirrors the viewport, which ends free fly itself (Esc, lost focus): the status bar shows how to get out.
     private(set) var isFreeFlying = false
@@ -78,7 +82,11 @@ final class DocumentModel {
     @ObservationIgnored var onCameraFeedback: ((DocumentModel) -> Void)?
 
     init() {
-        viewport.onFreeFlyingChange = { [weak self] in self?.isFreeFlying = $0 }
+        viewport.onFreeFlyingChange = { [weak self] in
+            guard let self else { return }
+            self.isFreeFlying = $0
+            if $0, self.isMeasuring { self.setMeasureTool(false) }
+        }
         viewport.onPoseChange = { [weak self] _, _, _ in
             guard let self else { return }
             self.syncCameraStateFromViewport()
@@ -95,6 +103,15 @@ final class DocumentModel {
         }
         viewport.onSelectLayer = { [weak self] index in
             self?.selectLayerFromViewport(index)
+        }
+        viewport.onMeasureHover = { [weak self] snap, shift in
+            self?.handleMeasureHover(snap, shiftLocked: shift)
+        }
+        viewport.onMeasureClick = { [weak self] snap, shift in
+            self?.handleMeasureClick(snap, shiftLocked: shift)
+        }
+        viewport.onMeasureEscape = { [weak self] in
+            self?.handleMeasureEscape()
         }
     }
 
@@ -770,6 +787,125 @@ final class DocumentModel {
 
     func toggleFreeFlight() {
         if isReady { viewport.isFreeFlying.toggle() }
+    }
+
+    // MARK: Measurement Tool (⌘D)
+
+    func toggleMeasureTool() {
+        guard isReady else { return }
+        setMeasureTool(!isMeasuring)
+    }
+
+    func setMeasureTool(_ enabled: Bool) {
+        guard isMeasuring != enabled else { return }
+        if enabled, isFreeFlying {
+            viewport.isFreeFlying = false
+        }
+        isMeasuring = enabled
+        viewport.isMeasuring = enabled
+        if !enabled {
+            measureStart = nil
+            measureEnd = nil
+            measureHoverSnap = nil
+            viewport.measureFallbackZ = nil
+        }
+        viewport.requestRedraw()
+    }
+
+    func clearMeasurement() {
+        measureStart = nil
+        measureEnd = nil
+        viewport.measureFallbackZ = nil
+    }
+
+    func handleMeasureEscape() {
+        if measureStart != nil || measureEnd != nil {
+            clearMeasurement()
+        } else {
+            setMeasureTool(false)
+        }
+    }
+
+    private func resolvedMeasureSnap(_ snap: MeasureSnap, shiftLocked: Bool) -> MeasureSnap {
+        guard shiftLocked, let start = measureStart, measureEnd == nil,
+              snap.kind != .vertex, snap.kind != .midpoint else {
+            return snap
+        }
+        let d = snap.position - start.position
+        let ax = abs(d.x), ay = abs(d.y), az = abs(d.z)
+        var locked = start.position
+        if ax >= ay && ax >= az {
+            locked.x = snap.position.x
+        } else if ay >= ax && ay >= az {
+            locked.y = snap.position.y
+        } else {
+            locked.z = snap.position.z
+        }
+        return MeasureSnap(position: locked, kind: snap.kind, segmentStart: nil, segmentEnd: nil, layerIndex: snap.layerIndex)
+    }
+
+    func handleMeasureHover(_ snap: MeasureSnap?, shiftLocked: Bool) {
+        guard isMeasuring else { return }
+        if let snap {
+            measureHoverSnap = resolvedMeasureSnap(snap, shiftLocked: shiftLocked)
+        } else {
+            measureHoverSnap = nil
+        }
+    }
+
+    func handleMeasureClick(_ snap: MeasureSnap, shiftLocked: Bool) {
+        guard isMeasuring else { return }
+        let resolved = resolvedMeasureSnap(snap, shiftLocked: shiftLocked)
+        if measureStart == nil || measureEnd != nil {
+            measureStart = resolved
+            measureEnd = nil
+            viewport.measureFallbackZ = resolved.position.z
+        } else {
+            measureEnd = resolved
+        }
+        measureHoverSnap = resolved
+    }
+
+    var activeMeasureEnd: MeasureSnap? {
+        measureEnd ?? measureHoverSnap
+    }
+
+    static func formatDistance(_ metres: Float, compact: Bool = false) -> String {
+        let a = abs(metres)
+        if a < 0.01 {
+            return String(format: "%.1f mm", metres * 1000.0)
+        } else if a < 1.0 {
+            if compact {
+                return String(format: "%.1f cm", metres * 100.0)
+            }
+            return String(format: "%.1f cm (%.0f mm)", metres * 100.0, metres * 1000.0)
+        } else {
+            return String(format: compact ? "%.2f m" : "%.3f m", metres)
+        }
+    }
+
+    static func snapKindLabel(_ kind: MeasureSnap.Kind) -> String {
+        switch kind {
+        case .vertex: return L("Point", "Endpoint")
+        case .midpoint: return L("Milieu", "Midpoint")
+        case .edge: return L("Arête", "Edge")
+        case .face: return L("Surface", "On Face")
+        case .plane: return L("Plan", "Plane")
+        }
+    }
+
+    func copyMeasurement() {
+        guard let a = measureStart?.position, let b = activeMeasureEnd?.position else { return }
+        let d = b - a
+        let dist = simd_length(d)
+        let text = String(
+            format: "L = %.3f m (%.1f cm) · ΔX = %+.3f m · ΔY = %+.3f m · ΔZ = %+.3f m",
+            dist, dist * 100.0, d.x, d.y, d.z
+        )
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        flash(L("Mesure copiée : \(Self.formatDistance(dist, compact: true))", "Measurement copied: \(Self.formatDistance(dist, compact: true))"))
     }
 
     func toggleEdges() {

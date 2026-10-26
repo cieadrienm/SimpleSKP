@@ -262,6 +262,7 @@ struct ShortcutsView: View {
                 ("⌥⌘A", L("Occlusion ambiante SSAO", "Ambient occlusion SSAO")),
                 ("Z", L("Réinitialiser la vue initiale", "Reset to initial view")),
                 ("⇧Z", L("Zoom étendu sur le modèle", "Zoom extents to fit model")),
+                ("⌘D", L("Outil de mesure avec magnétisme (Points / Milieux / Arêtes)", "Measure tool with snapping (Points / Midpoints / Edges)")),
                 ("⌥⌘F", L("Mode vol libre (Échap pour sortir)", "Free fly mode (Esc to exit)")),
                 ("⌘[ / ⌘]", L("Scène précédente / suivante", "Previous / next scene")),
                 ("⇧⌘[ / ⇧⌘]", L("Scène précédente / suivante (10× plus lent)", "Previous / next scene (10× slower)")),

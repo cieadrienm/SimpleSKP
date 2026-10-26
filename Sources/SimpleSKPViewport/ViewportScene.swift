@@ -2,6 +2,37 @@ import SceneKit
 import Metal
 import SimpleSKPCore
 
+/// 3D / 2D measurement snap result in model space (metres, Z up).
+public struct MeasureSnap: Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        case vertex
+        case midpoint
+        case edge
+        case face
+        case plane
+    }
+
+    public var position: SIMD3<Float>
+    public var kind: Kind
+    public var segmentStart: SIMD3<Float>?
+    public var segmentEnd: SIMD3<Float>?
+    public var layerIndex: Int?
+
+    public init(
+        position: SIMD3<Float>,
+        kind: Kind,
+        segmentStart: SIMD3<Float>? = nil,
+        segmentEnd: SIMD3<Float>? = nil,
+        layerIndex: Int? = nil
+    ) {
+        self.position = position
+        self.kind = kind
+        self.segmentStart = segmentStart
+        self.segmentEnd = segmentEnd
+        self.layerIndex = layerIndex
+    }
+}
+
 /// Builds the SceneKit scene for a model. May be constructed off the main thread, right after `SKPReader.load`.
 /// Root node rotated −90° about X (Z up → Y up). The instance tree is flattened: SketchUp shows an entity iff every layer
 /// on its path is visible, so all faces sharing a layer set (the layers along their path) and a resolved material are
@@ -604,6 +635,184 @@ public final class ViewportScene: @unchecked Sendable {
             return bestEdgeSet.primaryLayer
         }
         return bestFaceSet?.primaryLayer
+    }
+
+    /// Snaps the cursor ray to the nearest visible vertex (`extrémité`), edge midpoint (`milieu`), edge segment (`arête`), or face surface.
+    public func pickSnapPoint(
+        from: SIMD3<Float>,
+        direction: SIMD3<Float>,
+        right: SIMD3<Float>,
+        up: SIMD3<Float>,
+        reach: Float,
+        metresPerPoint: Float?,
+        tanHalfFOV: Float,
+        viewportHeight: Float,
+        screenRadiusPoints: Float = 13.0
+    ) -> MeasureSnap? {
+        var bestFaceT: Float = .infinity
+        var bestFacePoint: SIMD3<Float>? = nil
+        var bestFaceLayer: Int? = nil
+
+        if shadingStyle != .wireframe {
+            let to = from + direction * reach
+            let hits = modelRoot.hitTestWithSegment(
+                from: SCNVector3(from),
+                to: SCNVector3(to),
+                options: [
+                    SCNHitTestOption.backFaceCulling.rawValue: false,
+                    SCNHitTestOption.categoryBitMask.rawValue: 1,
+                ]
+            )
+            for hit in hits {
+                guard !hit.node.isHidden, hit.node.parent?.isHidden == false,
+                      let set = faceNodeSet[ObjectIdentifier(hit.node)], isVisible(set) else { continue }
+                let hitModel = modelRoot.simdConvertPosition(SIMD3<Float>(hit.worldCoordinates), from: nil)
+                let t = simd_dot(hitModel - from, direction)
+                if t >= 0, t < bestFaceT {
+                    bestFaceT = t
+                    bestFacePoint = hitModel
+                    bestFaceLayer = set.primaryLayer
+                    break
+                }
+            }
+        }
+
+        let u: SIMD3<Float>
+        let rProj = right - direction * simd_dot(right, direction)
+        if simd_length_squared(rProj) > 1e-6 {
+            u = simd_normalize(rProj)
+        } else {
+            let fallback = abs(direction.z) < 0.9 ? SIMD3<Float>(0, 0, 1) : SIMD3<Float>(1, 0, 0)
+            u = simd_normalize(simd_cross(direction, fallback))
+        }
+        let v = simd_cross(direction, u)
+        let perspUnitScale = 2.0 * tanHalfFOV / max(1.0, viewportHeight)
+        let maxDepth = min(reach, bestFaceT < .infinity ? bestFaceT * 1.03 + 0.08 : reach)
+        let maxTol = (metresPerPoint ?? (maxDepth * perspUnitScale)) * screenRadiusPoints
+
+        var bestVertexSnap: MeasureSnap? = nil
+        var bestVertexScore: Float = .infinity
+        var bestMidpointSnap: MeasureSnap? = nil
+        var bestMidpointScore: Float = .infinity
+        var bestEdgeSnap: MeasureSnap? = nil
+        var bestEdgeScore: Float = .infinity
+
+        let vertexRadiusPts: Float = min(11.5, screenRadiusPoints)
+        let midpointRadiusPts: Float = min(9.5, screenRadiusPoints)
+
+        for chunk in edgeChunks {
+            guard chunk.set.node?.isHidden == false, isVisible(chunk.set), chunk.vertexCount >= 2 else { continue }
+            let bMin = chunk.boundsMin - SIMD3<Float>(repeating: maxTol)
+            let bMax = chunk.boundsMax + SIMD3<Float>(repeating: maxTol)
+            guard Self.rayIntersectsAABB(origin: from, direction: direction, maxT: maxDepth + maxTol, min: bMin, max: bMax) else {
+                continue
+            }
+
+            let ptr = chunk.buffer.contents().bindMemory(to: Float.self, capacity: chunk.vertexCount * 3)
+            let segCount = chunk.vertexCount / 2
+            let layerIdx = chunk.set.primaryLayer
+
+            for sIdx in 0..<segCount {
+                let o0 = sIdx * 6
+                let w0 = SIMD3<Float>(ptr[o0], ptr[o0 + 1], ptr[o0 + 2])
+                let w1 = SIMD3<Float>(ptr[o0 + 3], ptr[o0 + 4], ptr[o0 + 5])
+                let p0 = w0 - from
+                let p1 = w1 - from
+
+                let z0 = simd_dot(p0, direction)
+                let z1 = simd_dot(p1, direction)
+                let zMax = max(z0, z1)
+                let zMin = min(z0, z1)
+                if zMax < 0 || zMin > maxDepth { continue }
+
+                let segTol = (metresPerPoint ?? (max(zMax, 0.01) * perspUnitScale)) * screenRadiusPoints
+                let x0 = simd_dot(p0, u), x1 = simd_dot(p1, u)
+                if max(x0, x1) < -segTol || min(x0, x1) > segTol { continue }
+                let y0 = simd_dot(p0, v), y1 = simd_dot(p1, v)
+                if max(y0, y1) < -segTol || min(y0, y1) > segTol { continue }
+
+                // 1. Check endpoints (vertices)
+                if z0 >= 0 {
+                    let mpp0 = max(metresPerPoint ?? (max(z0, 0.01) * perspUnitScale), 1e-6)
+                    if z0 <= bestFaceT + mpp0 * 18.0 {
+                        let distPts0 = hypot(x0, y0) / mpp0
+                        if distPts0 <= vertexRadiusPts {
+                            let score = distPts0 + z0 * 1e-4
+                            if score < bestVertexScore {
+                                bestVertexScore = score
+                                bestVertexSnap = MeasureSnap(position: w0, kind: .vertex, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                            }
+                        }
+                    }
+                }
+                if z1 >= 0 {
+                    let mpp1 = max(metresPerPoint ?? (max(z1, 0.01) * perspUnitScale), 1e-6)
+                    if z1 <= bestFaceT + mpp1 * 18.0 {
+                        let distPts1 = hypot(x1, y1) / mpp1
+                        if distPts1 <= vertexRadiusPts {
+                            let score = distPts1 + z1 * 1e-4
+                            if score < bestVertexScore {
+                                bestVertexScore = score
+                                bestVertexSnap = MeasureSnap(position: w1, kind: .vertex, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                            }
+                        }
+                    }
+                }
+
+                // 2. Check segment midpoint (when segment is at least 18 pt on screen)
+                let zMid = (z0 + z1) * 0.5
+                if zMid >= 0 {
+                    let mppMid = max(metresPerPoint ?? (max(zMid, 0.01) * perspUnitScale), 1e-6)
+                    let segScreenLen = hypot(x1 - x0, y1 - y0) / mppMid
+                    if segScreenLen >= 18.0, zMid <= bestFaceT + mppMid * 18.0 {
+                        let xMid = (x0 + x1) * 0.5, yMid = (y0 + y1) * 0.5
+                        let distPtsMid = hypot(xMid, yMid) / mppMid
+                        if distPtsMid <= midpointRadiusPts {
+                            let score = distPtsMid + zMid * 1e-4
+                            if score < bestMidpointScore {
+                                bestMidpointScore = score
+                                bestMidpointSnap = MeasureSnap(position: (w0 + w1) * 0.5, kind: .midpoint, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                            }
+                        }
+                    }
+                }
+
+                // 3. Check closest point along the edge segment
+                let dx = x1 - x0, dy = y1 - y0
+                let lenSq = dx * dx + dy * dy
+                let s: Float = lenSq > 1e-12 ? simd_clamp(-(x0 * dx + y0 * dy) / lenSq, 0.0, 1.0) : 0.0
+                let cz = z0 + s * (z1 - z0)
+                if cz >= 0, cz <= maxDepth {
+                    let mppZ = max(metresPerPoint ?? (max(cz, 0.01) * perspUnitScale), 1e-6)
+                    if cz <= bestFaceT + mppZ * 18.0 {
+                        let cx = x0 + s * dx, cy = y0 + s * dy
+                        let distPts = hypot(cx, cy) / mppZ
+                        if distPts <= screenRadiusPoints {
+                            let score = distPts + cz * 1e-4
+                            if score < bestEdgeScore {
+                                bestEdgeScore = score
+                                let snappedPos = w0 + s * (w1 - w0)
+                                bestEdgeSnap = MeasureSnap(position: snappedPos, kind: .edge, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let bestVertexSnap {
+            return bestVertexSnap
+        }
+        if let bestMidpointSnap {
+            return bestMidpointSnap
+        }
+        if let bestEdgeSnap {
+            return bestEdgeSnap
+        }
+        if let bestFacePoint {
+            return MeasureSnap(position: bestFacePoint, kind: .face, layerIndex: bestFaceLayer)
+        }
+        return nil
     }
 
     private static func rayIntersectsAABB(

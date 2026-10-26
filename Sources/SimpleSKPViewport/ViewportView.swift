@@ -29,6 +29,25 @@ public final class ViewportView: SCNView {
     /// Currently hovered layer index in `model.layers`, if any.
     public private(set) var hoveredLayer: Int? = nil
 
+    /// `true` when the interactive measurement tool (`⌘D`) is active.
+    public var isMeasuring: Bool = false {
+        didSet {
+            guard isMeasuring != oldValue else { return }
+            window?.invalidateCursorRects(for: self)
+            if !isMeasuring {
+                onMeasureHover?(nil, false)
+            }
+        }
+    }
+    /// Optional reference Z plane (e.g. `measureStart.position.z`) for planar fallback while measuring.
+    public var measureFallbackZ: Float? = nil
+    /// Called when the cursor moves while `isMeasuring == true`, passing `(snap, isShiftPressed)`.
+    public var onMeasureHover: ((MeasureSnap?, Bool) -> Void)?
+    /// Called when the user clicks to place a measurement point while `isMeasuring == true`, passing `(snap, isShiftPressed)`.
+    public var onMeasureClick: ((MeasureSnap, Bool) -> Void)?
+    /// Called when the user presses `Esc` while `isMeasuring == true`.
+    public var onMeasureEscape: (() -> Void)?
+
     /// `true` when viewing a 2D AutoCAD plan: left-drag & trackpad scroll translate, wheel/pinch zoom, and `⌥`-drag rotates the 2D plan in-plane.
     public var is2DNavigationMode: Bool { rig.is2DMode }
 
@@ -405,6 +424,13 @@ public final class ViewportView: SCNView {
         beginPivot(at: lastPoint)
     }
 
+    public override func resetCursorRects() {
+        super.resetCursorRects()
+        if isMeasuring {
+            addCursorRect(bounds, cursor: .crosshair)
+        }
+    }
+
     public override func mouseDragged(with event: NSEvent) { dragged(event) }
     public override func rightMouseDragged(with event: NSEvent) { dragged(event) }
     public override func otherMouseDragged(with event: NSEvent) { dragged(event) }
@@ -417,6 +443,9 @@ public final class ViewportView: SCNView {
         guard drag == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
         updateHoveredLayer(at: point)
+        if isMeasuring {
+            onMeasureHover?(pickSnapPoint(at: point), event.modifierFlags.contains(.shift))
+        }
     }
 
     public override func mouseExited(with event: NSEvent) {
@@ -424,15 +453,19 @@ public final class ViewportView: SCNView {
             hoveredLayer = nil
             onHoverLayer?(nil)
         }
+        if isMeasuring {
+            onMeasureHover?(nil, false)
+        }
         super.mouseExited(with: event)
     }
 
     public override func mouseUp(with event: NSEvent) {
+        let shiftPressed = event.modifierFlags.contains(.shift)
         let wasSingleClick = !didDragDuringMouseDown
             && event.clickCount == 1
             && !isFreeFlying
             && !event.modifierFlags.contains(.option)
-            && !event.modifierFlags.contains(.shift)
+            && (!shiftPressed || isMeasuring)
         if drag == .orbit || drag == .rotate2D {
             rig.release(time: event.timestamp)
         } else if drag == .pan {
@@ -441,6 +474,13 @@ public final class ViewportView: SCNView {
         drag = nil
         if wasSingleClick {
             let point = convert(event.locationInWindow, from: nil)
+            if isMeasuring {
+                if let snap = pickSnapPoint(at: point) {
+                    onMeasureHover?(snap, shiftPressed)
+                    onMeasureClick?(snap, shiftPressed)
+                }
+                return
+            }
             if let picked = pickLayer(at: point) {
                 hoveredLayer = picked
                 onHoverLayer?(picked)
@@ -573,6 +613,7 @@ public final class ViewportView: SCNView {
         allowScrollMomentum = false
         rig.stop()
         if event.keyCode == 53, isFreeFlying { isFreeFlying = false; return } // Esc
+        if event.keyCode == 53, isMeasuring { onMeasureEscape?(); return } // Esc in measure tool
         if press(event) { return }
         if event.charactersIgnoringModifiers?.lowercased() == "z",
            event.modifierFlags.isDisjoint(with: [.command, .option, .control]) {
@@ -646,9 +687,17 @@ public final class ViewportView: SCNView {
             let point = self.convert(event.locationInWindow, from: nil)
             if self.bounds.contains(point) {
                 self.updateHoveredLayer(at: point)
-            } else if self.hoveredLayer != nil {
-                self.hoveredLayer = nil
-                self.onHoverLayer?(nil)
+                if self.isMeasuring {
+                    self.onMeasureHover?(self.pickSnapPoint(at: point), event.modifierFlags.contains(.shift))
+                }
+            } else {
+                if self.hoveredLayer != nil {
+                    self.hoveredLayer = nil
+                    self.onHoverLayer?(nil)
+                }
+                if self.isMeasuring {
+                    self.onMeasureHover?(nil, false)
+                }
             }
             return event
         }
@@ -853,6 +902,75 @@ public final class ViewportView: SCNView {
         guard picked != hoveredLayer else { return }
         hoveredLayer = picked
         onHoverLayer?(picked)
+    }
+
+    /// Snaps the cursor at `point` (in view coordinates) to the nearest visible vertex, edge midpoint, edge segment, face, or 2D plane.
+    public func pickSnapPoint(at point: CGPoint, screenRadiusPoints: Float = 13.0) -> MeasureSnap? {
+        guard let scene = viewportScene else { return nil }
+        let bounds = scene.visibleBounds
+        let pose = rig.pose
+        let reach = simd_distance(pose.position, (bounds.min + bounds.max) / 2) + simd_distance(bounds.min, bounds.max)
+        let viewHeight = Float(max(1, self.bounds.height))
+        let metresPerPoint = visibleHeight / viewHeight
+        var from = pose.position
+        var direction = ray(through: point)
+        let orthoMPP: Float?
+        if camera.usesOrthographicProjection {
+            from += (pose.right * Float(point.x - self.bounds.midX) + pose.up * Float(point.y - self.bounds.midY)) * metresPerPoint
+            direction = pose.forward
+            orthoMPP = metresPerPoint
+        } else {
+            orthoMPP = nil
+        }
+
+        if let snapped = scene.pickSnapPoint(
+            from: from,
+            direction: direction,
+            right: pose.right,
+            up: pose.up,
+            reach: max(reach, 1.0),
+            metresPerPoint: orthoMPP,
+            tanHalfFOV: tanHalfFOV,
+            viewportHeight: viewHeight,
+            screenRadiusPoints: screenRadiusPoints
+        ) {
+            return snapped
+        }
+
+        // Planar fallback for 2D CAD plans, pure-edge models, or when a first point reference Z is active
+        let model = scene.model
+        if (model.stats.faces == 0 || model.isPlanar2D || measureFallbackZ != nil), abs(direction.z) > 1e-5 {
+            let planeZ = measureFallbackZ ?? ((bounds.min.z + bounds.max.z) * 0.5)
+            let t = (planeZ - from.z) / direction.z
+            if t > 0, t <= max(reach, 1.0) * 2.0 {
+                return MeasureSnap(position: from + direction * t, kind: .plane)
+            }
+        }
+        return nil
+    }
+
+    /// Projects a model-space point (metres, Z up) to top-left screen coordinates (`0...width × 0...height`) for SwiftUI overlays.
+    public func projectModelPoint(_ point: SIMD3<Float>) -> CGPoint? {
+        let w = max(1, Float(bounds.width)), h = max(1, Float(bounds.height))
+        let rel = point - rig.pose.position
+        let x = simd_dot(rel, rig.pose.right)
+        let y = simd_dot(rel, rig.pose.up)
+        let z = simd_dot(rel, rig.pose.forward)
+        let halfH = h * 0.5
+        if camera.usesOrthographicProjection {
+            let scale = Float(camera.orthographicScale)
+            guard scale > 1e-6 else { return nil }
+            let sx = w * 0.5 + (x / scale) * halfH
+            let sy = h * 0.5 - (y / scale) * halfH
+            return CGPoint(x: CGFloat(sx), y: CGFloat(sy))
+        } else {
+            guard z > 1e-3 else { return nil }
+            let tanHalf = tanHalfFOV
+            guard tanHalf > 1e-6 else { return nil }
+            let sx = w * 0.5 + (x / (z * tanHalf)) * halfH
+            let sy = h * 0.5 - (y / (z * tanHalf)) * halfH
+            return CGPoint(x: CGFloat(sx), y: CGFloat(sy))
+        }
     }
 
     private func modelToWorld(_ point: SIMD3<Float>) -> SIMD3<Float> {

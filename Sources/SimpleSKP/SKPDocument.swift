@@ -97,6 +97,7 @@ final class SKPDocument: NSDocument {
     @objc func toggleShadows(_ sender: Any?) { model.toggleShadows() }
     @objc func toggleLightingMode(_ sender: Any?) { model.setLightingMode(model.lightingMode == .sun ? .point : .sun) }
     @objc func toggleAmbientOcclusion(_ sender: Any?) { model.toggleAmbientOcclusion() }
+    @objc func toggleMeasureTool(_ sender: Any?) { model.toggleMeasureTool() }
     @objc func toggleFreeFlight(_ sender: Any?) { model.toggleFreeFlight() }
     @objc func previousScene(_ sender: Any?) { model.previousScene() }
     @objc func nextScene(_ sender: Any?) { model.nextScene() }
@@ -143,6 +144,9 @@ final class SKPDocument: NSDocument {
             return model.isReady
         case #selector(toggleAmbientOcclusion(_:)):
             item.state = model.ambientOcclusionEnabled ? .on : .off
+            return model.isReady
+        case #selector(toggleMeasureTool(_:)):
+            item.state = model.isMeasuring ? .on : .off
             return model.isReady
         case #selector(toggleFreeFlight(_:)):
             item.state = model.isFreeFlying ? .on : .off

@@ -531,5 +531,26 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(view.rig.isMoving, "Remaining 60% zoom glides via CameraRig inertia")
         for _ in 0..<45 { view.rig.step(dt: 1.0 / 60.0) }
         XCTAssertEqual(view.orthographicScale, scaleBeforeZoom * 0.75, accuracy: scaleBeforeZoom * 0.01, "Smooth zoom converges to exact target scale")
+
+        // 5. Measure tool snapping on vertex, midpoint, and edge of the 2D CAD rectangle (-10..10 × -5..5)
+        view.look(.top, animated: false)
+        func viewPoint(for modelPt: SIMD3<Float>) -> CGPoint {
+            let canvasPt = view.projectModelPoint(modelPt)!
+            return CGPoint(x: canvasPt.x, y: view.bounds.height - canvasPt.y)
+        }
+        // Vertex at (-10, -5, 0)
+        let vSnap = view.pickSnapPoint(at: viewPoint(for: SIMD3(-10, -5, 0)))
+        XCTAssertEqual(vSnap?.kind, .vertex)
+        XCTAssertEqual(simd_distance(vSnap?.position ?? .zero, SIMD3(-10, -5, 0)), 0, accuracy: 1e-4)
+
+        // Midpoint of bottom edge at (0, -5, 0)
+        let mSnap = view.pickSnapPoint(at: viewPoint(for: SIMD3(0, -5, 0)))
+        XCTAssertEqual(mSnap?.kind, .midpoint)
+        XCTAssertEqual(simd_distance(mSnap?.position ?? .zero, SIMD3(0, -5, 0)), 0, accuracy: 1e-4)
+
+        // Point along bottom edge at (4.2, -5, 0) (away from endpoints and midpoint)
+        let eSnap = view.pickSnapPoint(at: viewPoint(for: SIMD3(4.2, -5, 0)))
+        XCTAssertEqual(eSnap?.kind, .edge)
+        XCTAssertEqual(simd_distance(eSnap?.position ?? .zero, SIMD3(4.2, -5, 0)), 0, accuracy: 1e-2)
     }
 }

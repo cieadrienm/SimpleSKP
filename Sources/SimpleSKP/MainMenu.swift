@@ -91,6 +91,7 @@ enum MainMenu {
         menu.addItem(.separator())
         menu.add(L("Réinitialiser la vue", "Reset View"), #selector(SKPDocument.resetView(_:)), key: "z", modifiers: [])
         menu.add(L("Zoom étendu", "Zoom Extents"), #selector(SKPDocument.zoomExtents(_:)), key: "z", modifiers: [.shift])
+        menu.add(L("Outil de mesure (Règle)", "Measure Tool (Ruler)"), #selector(SKPDocument.toggleMeasureTool(_:)), key: "d", modifiers: [.command])
         menu.add(L("Mode vol libre", "Free Fly Mode"), #selector(SKPDocument.toggleFreeFlight(_:)), key: "f", modifiers: [.command, .option])
         menu.addItem(.separator())
         menu.add(L("Scène précédente", "Previous Scene"), #selector(SKPDocument.previousScene(_:)), key: "[")
