@@ -109,6 +109,20 @@ public final class ViewportScene: @unchecked Sendable {
         didSet { updateLightingModeAndPointLights() }
     }
 
+    /// Active virtual video projectors in model space (metres, Z up).
+    public var videoProjectors: [VideoProjector] = [] {
+        didSet { updateVideoProjectors() }
+    }
+
+    /// Index of the currently selected video projector for highlighting its frustum in the viewport.
+    public var selectedVideoProjectorIndex: Int = 0 {
+        didSet {
+            if oldValue != selectedVideoProjectorIndex {
+                rebuildProjectorGizmos()
+            }
+        }
+    }
+
     /// Center of the currently visible geometry in model coordinates (metres, Z up).
     public var defaultPointLightPosition: SIMD3<Float> {
         let b = visibleBounds
@@ -209,6 +223,17 @@ public final class ViewportScene: @unchecked Sendable {
         var boundsMax: SIMD3<Float>
     }
 
+    private struct FaceChunk {
+        var node: SCNNode
+        var positions: MTLBuffer
+        var indicesData: Data
+        var indexBuffer: MTLBuffer?
+        var indexCount: Int
+        var set: LayerSet
+        var boundsMin: SIMD3<Float>
+        var boundsMax: SIMD3<Float>
+    }
+
     /// A definition placed in the flattened tree (-1 = the root): model-space transform, material its unpainted faces
     /// inherit, sorted layers along its path (its own instance layer included).
     private struct Placement {
@@ -238,10 +263,33 @@ public final class ViewportScene: @unchecked Sendable {
     private var setsByLayer: [Int: [LayerSet]] = [:]
     private var faceNodes: [(node: SCNNode, material: SCNMaterial)] = []
     private var faceNodeSet: [ObjectIdentifier: LayerSet] = [:]
+    private var faceChunks: [FaceChunk] = []
     private var edgeNodes: [SCNNode] = []
     private var edgeChunks: [EdgeChunk] = []
     private var gridNode: SCNNode?
     private let pointLightsRoot = SCNNode()
+    public let projectorsRoot = SCNNode()
+    private lazy var projectorRenderer = VideoProjectorRenderer(device: Self.device)
+    private var baseSurfaceModifiers: [ObjectIdentifier: String] = [:]
+    private var projectorsShaderActive = false
+    /// Root node for 3D/2D measurement overlays (`⌘D`), living directly inside `modelRoot` so measurements pan, zoom, and orbit in the exact same Metal pass as the scene geometry with zero frame lag.
+    public let measureRoot = SCNNode()
+    private var measureIsActive = false
+    private var measureStartSnap: MeasureSnap?
+    private var measureEndSnap: MeasureSnap?
+    private var measureHoverSnap: MeasureSnap?
+    private var measureDistanceText: String?
+    private var measureHoverBadgeText: String?
+    private var measureCameraPose: CameraRig.Pose?
+    private var measureOrthoScale: Float?
+    private var measureTanHalfFOV: Float = 0.315
+    private var measureViewportHeight: Float = 600
+    private var cachedDistancePillKey: String?
+    private var cachedDistancePillMaterial: SCNMaterial?
+    private var cachedDistancePillSizePt: CGSize = .zero
+    private var cachedHoverBadgeKey: String?
+    private var cachedHoverBadgeMaterial: SCNMaterial?
+    private var cachedHoverBadgeSizePt: CGSize = .zero
     private var hiddenLayers = Set<Int>()
     private var cachedVisibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
     public private(set) var activePulseLayers: Set<Int> = []
@@ -250,7 +298,7 @@ public final class ViewportScene: @unchecked Sendable {
     public private(set) var hoveredLayers: Set<Int> = []
     private var hoverRestoreActions: [() -> Void] = []
 
-    public init(model: SKPModel) {
+    public init(model: SKPModel, deferInitialLayerBuild: Bool = false) {
         self.model = model
         self.scene = SCNScene()
         scene.background.contents = Rendering.skyImage(backdrop: true)
@@ -269,7 +317,9 @@ public final class ViewportScene: @unchecked Sendable {
         modelRoot.simdEulerAngles.x = -.pi / 2
         scene.rootNode.addChildNode(modelRoot)
         place(-1, transform: matrix_identity_float4x4, material: nil, layers: [])
-        build(layerSets.values.filter(isVisible))
+        if !deferInitialLayerBuild {
+            build(layerSets.values.filter(isVisible))
+        }
         if ProcessInfo.processInfo.environment["SIMPLESKP_TIMING"] == "1" {
             print(String(format: "ViewportScene: %.3f s, %d placements, %d layer sets (%d built), %d nodes", CFAbsoluteTimeGetCurrent() - start,
                          placements.count, layerSets.count, layerSets.values.filter { $0.node != nil }.count,
@@ -305,9 +355,15 @@ public final class ViewportScene: @unchecked Sendable {
 
         pointLightsRoot.name = "pointLights"
         pointLightsRoot.isHidden = true
+        projectorsRoot.name = "videoProjectors"
+        projectorsRoot.isHidden = true
+        measureRoot.name = "measurement"
+        measureRoot.isHidden = true
         modelRoot.addChildNode(sun)
         modelRoot.addChildNode(skyFill)
         modelRoot.addChildNode(pointLightsRoot)
+        modelRoot.addChildNode(projectorsRoot)
+        modelRoot.addChildNode(measureRoot)
         detectedSceneLights = Self.extractSceneLights(from: model, placements: placements, hiddenLayers: hiddenLayers)
         if !detectedSceneLights.isEmpty {
             pointLights = detectedSceneLights
@@ -342,6 +398,7 @@ public final class ViewportScene: @unchecked Sendable {
         build(sets.filter { $0.node == nil && isVisible($0) })
         for set in sets { set.node?.isHidden = !isVisible(set) }
         updateShadowDistance()
+        if !videoProjectors.isEmpty { updateVideoProjectors() }
         if Thread.isMainThread { MainActor.assumeIsolated { applyHoverVisuals() } }
     }
 
@@ -353,6 +410,7 @@ public final class ViewportScene: @unchecked Sendable {
         build(layerSets.values.filter { $0.node == nil && isVisible($0) })
         for set in layerSets.values { set.node?.isHidden = !isVisible(set) }
         updateShadowDistance()
+        if !videoProjectors.isEmpty { updateVideoProjectors() }
         if Thread.isMainThread { MainActor.assumeIsolated { applyHoverVisuals() } }
     }
 
@@ -375,6 +433,9 @@ public final class ViewportScene: @unchecked Sendable {
     /// The model's bounds when nothing is shown. Main thread; recomputed after a layer change.
     public var visibleBounds: (min: SIMD3<Float>, max: SIMD3<Float>) {
         if let cachedVisibleBounds { return cachedVisibleBounds }
+        if layerSets.values.contains(where: { $0.node == nil && isVisible($0) }) {
+            return (model.boundsMin, model.boundsMax)
+        }
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
         for set in layerSets.values {
             guard let node = set.node, !node.isHidden else { continue }
@@ -386,6 +447,39 @@ public final class ViewportScene: @unchecked Sendable {
         let bounds = lo.x <= hi.x ? (lo, hi) : (model.boundsMin, model.boundsMax)
         cachedVisibleBounds = bounds
         return bounds
+    }
+
+    /// Sorted primary layer indices (`0..<model.layers.count`) that have visible geometry in the scene.
+    public var orderedVisiblePrimaryLayers: [Int] {
+        var seen = Set<Int>()
+        for set in layerSets.values where isVisible(set) {
+            seen.insert(set.primaryLayer)
+        }
+        return seen.sorted()
+    }
+
+    /// Builds and reveals unbuilt visible `LayerSet`s whose `primaryLayer` belongs to `targetPrimaryLayers`.
+    /// Returns the total number of edge segments and triangles built in the scene so far.
+    public func buildVisibleSets(forPrimaryLayers targetPrimaryLayers: Set<Int>) -> (edgesBuilt: Int, facesBuilt: Int) {
+        let toBuild = layerSets.values.filter { $0.node == nil && isVisible($0) && targetPrimaryLayers.contains($0.primaryLayer) }
+        if !toBuild.isEmpty {
+            build(toBuild)
+            for set in toBuild { set.node?.isHidden = !isVisible(set) }
+            cachedVisibleBounds = nil
+        }
+        let edgesCount = edgeChunks.reduce(0) { $0 + $1.vertexCount / 2 }
+        return (edgesCount, faceNodes.count)
+    }
+
+    /// Finishes building any remaining visible `LayerSet`s that were deferred during progressive view construction.
+    public func finishDeferredLayerBuild() {
+        let remaining = layerSets.values.filter { $0.node == nil && isVisible($0) }
+        guard !remaining.isEmpty else { return }
+        build(remaining)
+        for set in remaining { set.node?.isHidden = !isVisible(set) }
+        cachedVisibleBounds = nil
+        updateShadowDistance()
+        if !videoProjectors.isEmpty { updateVideoProjectors() }
     }
 
     private func isVisible(_ set: LayerSet) -> Bool { set.layers.allSatisfy { !hiddenLayers.contains($0) } }
@@ -1150,6 +1244,18 @@ public final class ViewportScene: @unchecked Sendable {
                 child.renderingOrder = transparent ? 2 : 0
                 faceNodes.append((child, material))
                 faceNodeSet[ObjectIdentifier(child)] = chunk.set
+                if !transparent, let indicesData = mergedData.indices, chunk.indices >= 3 {
+                    faceChunks.append(FaceChunk(
+                        node: child,
+                        positions: mergedData.positions,
+                        indicesData: indicesData,
+                        indexBuffer: nil,
+                        indexCount: chunk.indices,
+                        set: chunk.set,
+                        boundsMin: mergedData.boundsMin,
+                        boundsMax: mergedData.boundsMax
+                    ))
+                }
                 if shadingStyle != .textured {
                     applyShadingStyle(to: child, original: material)
                 }
@@ -1225,8 +1331,13 @@ public final class ViewportScene: @unchecked Sendable {
         m.transparency = min(original.transparency, 0.36)
         m.transparencyMode = .dualLayer
         m.writesToDepthBuffer = false
-        m.shaderModifiers = [.surface: "_surface.diffuse.a = min(_surface.diffuse.a, 0.36);"]
+        let baseSnippet = "_surface.diffuse.a = min(_surface.diffuse.a, 0.36);"
+        baseSurfaceModifiers[ObjectIdentifier(m)] = baseSnippet
+        m.shaderModifiers = [.surface: baseSnippet]
         xrayMaterials[id] = m
+        if projectorsShaderActive {
+            applyCurrentProjectorShader(to: m)
+        }
         return m
     }
 
@@ -1310,6 +1421,493 @@ public final class ViewportScene: @unchecked Sendable {
         root.addChildNode(lineNode([origin, origin + SIMD3(0, axisLen, 0)], color: NSColor(srgbRed: 0.38, green: 0.80, blue: 0.42, alpha: 0.85)))
         root.addChildNode(lineNode([origin, origin + SIMD3(0, 0, axisLen * 0.6)], color: NSColor(srgbRed: 0.35, green: 0.60, blue: 0.96, alpha: 0.85)))
         return root
+    }
+
+    // MARK: - SceneKit-Native Zero-Lag Measurement Overlay (⌘D)
+
+    /// Updates the active measurement points and labels in the scene graph (`measureRoot` inside `modelRoot`).
+    @MainActor
+    public func updateMeasurement(
+        isActive: Bool,
+        start: MeasureSnap?,
+        end: MeasureSnap?,
+        hover: MeasureSnap?,
+        distanceText: String?,
+        hoverBadgeText: String?
+    ) {
+        guard measureIsActive != isActive
+            || measureStartSnap != start
+            || measureEndSnap != end
+            || measureHoverSnap != hover
+            || measureDistanceText != distanceText
+            || measureHoverBadgeText != hoverBadgeText
+        else { return }
+        measureIsActive = isActive
+        measureStartSnap = start
+        measureEndSnap = end
+        measureHoverSnap = hover
+        measureDistanceText = distanceText
+        measureHoverBadgeText = hoverBadgeText
+        rebuildMeasurementNodes()
+    }
+
+    /// Synchronizes the camera parameters used to keep measurement lines, ticks, markers, and labels at constant screen size.
+    /// During orthographic panning (`orthoScale != nil`, unchanged `yaw`/`pitch`/`orthoScale`), the nodes already sit in `modelRoot`
+    /// at model coordinates so the GPU translates them in the exact same render pass with zero CPU work.
+    @MainActor
+    public func updateMeasurementCamera(
+        pose: CameraRig.Pose,
+        orthoScale: Float?,
+        tanHalfFOV: Float,
+        viewportHeight: Float
+    ) {
+        let prevPose = measureCameraPose
+        let prevOrtho = measureOrthoScale
+        let prevTan = measureTanHalfFOV
+        let prevHeight = measureViewportHeight
+
+        measureCameraPose = pose
+        measureOrthoScale = orthoScale
+        measureTanHalfFOV = max(tanHalfFOV, 1e-4)
+        measureViewportHeight = max(viewportHeight, 1.0)
+
+        guard measureIsActive, (measureStartSnap != nil || measureHoverSnap != nil) else { return }
+
+        // Fast path for orthographic pan: camera orientation and scale are unchanged, so modelRoot's view matrix
+        // moves the entire measurement on the GPU with zero CPU rebuild.
+        if let orthoScale, let prevOrtho, let prevPose,
+           abs(orthoScale - prevOrtho) < 1e-6,
+           abs(pose.yaw - prevPose.yaw) < 1e-6,
+           abs(pose.pitch - prevPose.pitch) < 1e-6,
+           abs(measureViewportHeight - prevHeight) < 0.5,
+           abs(measureTanHalfFOV - prevTan) < 1e-6 {
+            return
+        }
+
+        rebuildMeasurementNodes()
+    }
+
+    @MainActor
+    private func rebuildMeasurementNodes() {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+        defer { SCNTransaction.commit() }
+
+        measureRoot.childNodes.forEach { $0.removeFromParentNode() }
+        guard measureIsActive, let pose = measureCameraPose else {
+            measureRoot.isHidden = true
+            return
+        }
+        guard measureStartSnap != nil || measureHoverSnap != nil else {
+            measureRoot.isHidden = true
+            return
+        }
+        measureRoot.isHidden = false
+
+        let right = pose.right
+        let up = pose.up
+        let forward = pose.forward
+        let camQuat = simd_quatf(pose.basis)
+
+        func mpp(at point: SIMD3<Float>) -> Float {
+            if let ortho = measureOrthoScale {
+                return ( max(ortho, 1e-4) * 2.0 ) / measureViewportHeight
+            }
+            let depth = max(simd_dot(point - pose.position, forward), 0.05)
+            return (2.0 * depth * measureTanHalfFOV) / measureViewportHeight
+        }
+
+        func appendRibbonSegment(
+            from a: SIMD3<Float>,
+            to b: SIMD3<Float>,
+            widthPt: Float,
+            into vertices: inout [SIMD3<Float>]
+        ) {
+            let d = b - a
+            let sx = simd_dot(d, right)
+            let sy = simd_dot(d, up)
+            let sLen = hypot(sx, sy)
+            guard sLen > 1e-7 else { return }
+            let nx = -sy / sLen
+            let ny = sx / sLen
+            let perp = right * nx + up * ny
+            let wA = (widthPt * 0.5) * mpp(at: a)
+            let wB = (widthPt * 0.5) * mpp(at: b)
+            let v0 = a - perp * wA
+            let v1 = a + perp * wA
+            let v2 = b + perp * wB
+            let v3 = b - perp * wB
+            vertices.append(contentsOf: [v0, v1, v2, v0, v2, v3])
+        }
+
+        func appendDashedRibbon(
+            from a: SIMD3<Float>,
+            to b: SIMD3<Float>,
+            widthPt: Float,
+            dashPt: Float = 4.5,
+            gapPt: Float = 3.2,
+            into vertices: inout [SIMD3<Float>]
+        ) {
+            let d = b - a
+            let sx = simd_dot(d, right)
+            let sy = simd_dot(d, up)
+            let sLen = hypot(sx, sy)
+            let midMPP = max(mpp(at: (a + b) * 0.5), 1e-6)
+            let totalPts = sLen / midMPP
+            guard totalPts > 8.0 else { return }
+            let stepPts = dashPt + gapPt
+            let dashCount = min(Int(ceil(totalPts / stepPts)), 96)
+            guard dashCount > 0 else { return }
+            for i in 0..<dashCount {
+                let t0 = Float(i) / Float(dashCount)
+                let t1 = min(1.0, (Float(i) + dashPt / stepPts) / Float(dashCount))
+                if t1 > t0 {
+                    appendRibbonSegment(from: a + d * t0, to: a + d * t1, widthPt: widthPt, into: &vertices)
+                }
+            }
+        }
+
+        func makeRibbonNode(vertices: [SIMD3<Float>], color: NSColor, renderingOrder: Int) -> SCNNode? {
+            guard vertices.count >= 3 else { return nil }
+            let buf = Self.buffer(vertices.count * 12)
+            let ptr = buf.contents().bindMemory(to: Float.self, capacity: vertices.count * 3)
+            for (i, v) in vertices.enumerated() {
+                ptr[i * 3] = v.x
+                ptr[i * 3 + 1] = v.y
+                ptr[i * 3 + 2] = v.z
+            }
+            let src = SCNGeometrySource(
+                buffer: buf,
+                vertexFormat: .float3,
+                semantic: .vertex,
+                vertexCount: vertices.count,
+                dataOffset: 0,
+                dataStride: 12
+            )
+            let elem = SCNGeometryElement(
+                data: nil,
+                primitiveType: .triangles,
+                primitiveCount: vertices.count / 3,
+                bytesPerIndex: 4
+            )
+            let geom = SCNGeometry(sources: [src], elements: [elem])
+            let mat = SCNMaterial()
+            mat.lightingModel = .constant
+            mat.diffuse.contents = color
+            mat.isDoubleSided = true
+            mat.readsFromDepthBuffer = false
+            mat.writesToDepthBuffer = false
+            geom.materials = [mat]
+            let node = SCNNode(geometry: geom)
+            node.categoryBitMask = Self.edgeCategory
+            node.castsShadow = false
+            node.renderingOrder = renderingOrder
+            return node
+        }
+
+        func appendSnapMarker(at point: SIMD3<Float>, kind: MeasureSnap.Kind, renderingOrder: Int) {
+            let scale = mpp(at: point)
+            let rPt: Float = 7.0
+            let r = rPt * scale
+            var haloVerts: [SIMD3<Float>] = []
+            var strokeVerts: [SIMD3<Float>] = []
+
+            let corners: [SIMD3<Float>]
+            switch kind {
+            case .vertex:
+                corners = [
+                    point + up * (r * 1.18),
+                    point + right * (r * 1.18),
+                    point - up * (r * 1.18),
+                    point - right * (r * 1.18),
+                ]
+            case .midpoint:
+                corners = [
+                    point + up * (r * 1.18),
+                    point + right * (r * 1.15) - up * (r * 0.95),
+                    point - right * (r * 1.15) - up * (r * 0.95),
+                ]
+            case .edge:
+                let s = r * 0.88
+                corners = [
+                    point - right * s + up * s,
+                    point + right * s + up * s,
+                    point + right * s - up * s,
+                    point - right * s - up * s,
+                ]
+            case .face, .plane:
+                var pts: [SIMD3<Float>] = []
+                let segs = 12
+                for i in 0..<segs {
+                    let a = Float(i) * (2.0 * .pi / Float(segs))
+                    pts.append(point + (right * cos(a) + up * sin(a)) * r)
+                }
+                corners = pts
+            }
+
+            for i in 0..<corners.count {
+                let c0 = corners[i]
+                let c1 = corners[(i + 1) % corners.count]
+                appendRibbonSegment(from: c0, to: c1, widthPt: 3.4, into: &haloVerts)
+                appendRibbonSegment(from: c0, to: c1, widthPt: 1.9, into: &strokeVerts)
+            }
+            // Center dot quad
+            let dotR = 2.4 * scale
+            let d0 = point - right * dotR - up * dotR
+            let d1 = point + right * dotR - up * dotR
+            let d2 = point + right * dotR + up * dotR
+            let d3 = point - right * dotR + up * dotR
+            strokeVerts.append(contentsOf: [d0, d1, d2, d0, d2, d3])
+
+            if let haloNode = makeRibbonNode(
+                vertices: haloVerts,
+                color: NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.72),
+                renderingOrder: renderingOrder
+            ) {
+                measureRoot.addChildNode(haloNode)
+            }
+            if let strokeNode = makeRibbonNode(
+                vertices: strokeVerts,
+                color: Self.measureSnapNSColor(for: kind, alpha: 1.0),
+                renderingOrder: renderingOrder + 1
+            ) {
+                measureRoot.addChildNode(strokeNode)
+            }
+        }
+
+        // 1. Highlight snapped edge segment under cursor
+        if let hover = measureHoverSnap,
+           let s0 = hover.segmentStart,
+           let s1 = hover.segmentEnd {
+            var edgeVerts: [SIMD3<Float>] = []
+            appendRibbonSegment(from: s0, to: s1, widthPt: 3.0, into: &edgeVerts)
+            if let edgeNode = makeRibbonNode(
+                vertices: edgeVerts,
+                color: Self.measureSnapNSColor(for: hover.kind, alpha: 0.68),
+                renderingOrder: 20
+            ) {
+                measureRoot.addChildNode(edgeNode)
+            }
+        }
+
+        // 2. Active or completed measurement line + ΔX / ΔY / ΔZ projections + ticks + distance pill
+        if let start = measureStartSnap, let end = measureEndSnap {
+            let a = start.position
+            let b = end.position
+            let cornerX = SIMD3<Float>(b.x, a.y, a.z)
+            let cornerXY = SIMD3<Float>(b.x, b.y, a.z)
+
+            if abs(b.x - a.x) > 1e-3 {
+                var vx: [SIMD3<Float>] = []
+                appendDashedRibbon(from: a, to: cornerX, widthPt: 1.4, into: &vx)
+                if let nx = makeRibbonNode(vertices: vx, color: NSColor(srgbRed: 1.35, green: 0.42, blue: 0.42, alpha: 0.85), renderingOrder: 21) {
+                    measureRoot.addChildNode(nx)
+                }
+            }
+            if abs(b.y - a.y) > 1e-3 {
+                var vy: [SIMD3<Float>] = []
+                appendDashedRibbon(from: cornerX, to: cornerXY, widthPt: 1.4, into: &vy)
+                if let ny = makeRibbonNode(vertices: vy, color: NSColor(srgbRed: 0.38, green: 1.22, blue: 0.64, alpha: 0.85), renderingOrder: 21) {
+                    measureRoot.addChildNode(ny)
+                }
+            }
+            if abs(b.z - a.z) > 1e-3 {
+                var vz: [SIMD3<Float>] = []
+                appendDashedRibbon(from: cornerXY, to: b, widthPt: 1.4, into: &vz)
+                if let nz = makeRibbonNode(vertices: vz, color: NSColor(srgbRed: 0.48, green: 0.94, blue: 1.40, alpha: 0.88), renderingOrder: 21) {
+                    measureRoot.addChildNode(nz)
+                }
+            }
+
+            var mainHalo: [SIMD3<Float>] = []
+            var mainStroke: [SIMD3<Float>] = []
+            appendRibbonSegment(from: a, to: b, widthPt: 4.4, into: &mainHalo)
+            appendRibbonSegment(from: a, to: b, widthPt: 2.3, into: &mainStroke)
+
+            // Architectural perpendicular ticks at a and b
+            let d = b - a
+            let sx = simd_dot(d, right)
+            let sy = simd_dot(d, up)
+            let sLen = hypot(sx, sy)
+            let midMPP = max(mpp(at: (a + b) * 0.5), 1e-6)
+            if sLen / midMPP > 6.0 {
+                let nx = -sy / sLen
+                let ny = sx / sLen
+                let perp = right * nx + up * ny
+                let tickA = 6.5 * mpp(at: a)
+                let tickB = 6.5 * mpp(at: b)
+                appendRibbonSegment(from: a - perp * tickA, to: a + perp * tickA, widthPt: 3.6, into: &mainHalo)
+                appendRibbonSegment(from: b - perp * tickB, to: b + perp * tickB, widthPt: 3.6, into: &mainHalo)
+                appendRibbonSegment(from: a - perp * tickA, to: a + perp * tickA, widthPt: 2.0, into: &mainStroke)
+                appendRibbonSegment(from: b - perp * tickB, to: b + perp * tickB, widthPt: 2.0, into: &mainStroke)
+            }
+
+            if let haloNode = makeRibbonNode(
+                vertices: mainHalo,
+                color: NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.68),
+                renderingOrder: 22
+            ) {
+                measureRoot.addChildNode(haloNode)
+            }
+            if let strokeNode = makeRibbonNode(
+                vertices: mainStroke,
+                color: NSColor(srgbRed: 1.42, green: 1.00, blue: 0.22, alpha: 1.0),
+                renderingOrder: 23
+            ) {
+                measureRoot.addChildNode(strokeNode)
+            }
+
+            appendSnapMarker(at: a, kind: start.kind, renderingOrder: 24)
+            appendSnapMarker(at: b, kind: end.kind, renderingOrder: 24)
+
+            // Floating midpoint distance pill
+            if let text = measureDistanceText, !text.isEmpty, simd_distance(a, b) > 1e-5 {
+                let mid = (a + b) * 0.5
+                let midScale = mpp(at: mid)
+                let (mat, sizePt) = distancePillMaterial(for: text)
+                let plane = SCNPlane(width: CGFloat(sizePt.width) * CGFloat(midScale), height: CGFloat(sizePt.height) * CGFloat(midScale))
+                plane.materials = [mat]
+                let pillNode = SCNNode(geometry: plane)
+                pillNode.categoryBitMask = Self.edgeCategory
+                pillNode.castsShadow = false
+                pillNode.renderingOrder = 28
+                pillNode.simdOrientation = camQuat
+                pillNode.simdPosition = mid + up * (15.0 * midScale)
+                measureRoot.addChildNode(pillNode)
+            }
+        }
+
+        // 3. Live hover snap marker + floating snap kind badge
+        if let hover = measureHoverSnap {
+            appendSnapMarker(at: hover.position, kind: hover.kind, renderingOrder: 26)
+            if let badgeText = measureHoverBadgeText, !badgeText.isEmpty {
+                let hScale = mpp(at: hover.position)
+                let (mat, sizePt) = hoverBadgeMaterial(text: badgeText, kind: hover.kind)
+                let plane = SCNPlane(width: CGFloat(sizePt.width) * CGFloat(hScale), height: CGFloat(sizePt.height) * CGFloat(hScale))
+                plane.materials = [mat]
+                let badgeNode = SCNNode(geometry: plane)
+                badgeNode.categoryBitMask = Self.edgeCategory
+                badgeNode.castsShadow = false
+                badgeNode.renderingOrder = 29
+                badgeNode.simdOrientation = camQuat
+                badgeNode.simdPosition = hover.position + right * (Float(sizePt.width * 0.5 + 14.0) * hScale) - up * (18.0 * hScale)
+                measureRoot.addChildNode(badgeNode)
+            }
+        }
+    }
+
+    private static func measureSnapNSColor(for kind: MeasureSnap.Kind, alpha: CGFloat, hdrBoost: CGFloat = 1.42) -> NSColor {
+        switch kind {
+        case .vertex:
+            return NSColor(srgbRed: 0.22 * hdrBoost, green: 0.92 * hdrBoost, blue: 0.56 * hdrBoost, alpha: alpha)
+        case .midpoint:
+            return NSColor(srgbRed: 0.22 * hdrBoost, green: 0.86 * hdrBoost, blue: 0.98 * hdrBoost, alpha: alpha)
+        case .edge:
+            return NSColor(srgbRed: 1.00 * hdrBoost, green: 0.72 * hdrBoost, blue: 0.18 * hdrBoost, alpha: alpha)
+        case .face, .plane:
+            return NSColor(srgbRed: 0.88 * hdrBoost, green: 0.90 * hdrBoost, blue: 0.96 * hdrBoost, alpha: alpha)
+        }
+    }
+
+    @MainActor
+    private func distancePillMaterial(for text: String) -> (SCNMaterial, CGSize) {
+        if cachedDistancePillKey == text, let mat = cachedDistancePillMaterial {
+            return (mat, cachedDistancePillSizePt)
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 12.0, weight: .bold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white,
+        ]
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        let padX: CGFloat = 8.5
+        let padY: CGFloat = 3.5
+        let sizePt = CGSize(width: ceil(textSize.width + padX * 2), height: ceil(textSize.height + padY * 2))
+        let image = NSImage(size: sizePt, flipped: false) { rect in
+            let insetRect = rect.insetBy(dx: 0.8, dy: 0.8)
+            let path = NSBezierPath(roundedRect: insetRect, xRadius: insetRect.height * 0.5, yRadius: insetRect.height * 0.5)
+            NSColor(srgbRed: 0.10, green: 0.11, blue: 0.14, alpha: 0.95).setFill()
+            path.fill()
+            NSColor(srgbRed: 1.00, green: 0.72, blue: 0.18, alpha: 1.0).setStroke()
+            path.lineWidth = 1.25
+            path.stroke()
+            let textOrigin = CGPoint(
+                x: (rect.width - textSize.width) * 0.5,
+                y: (rect.height - textSize.height) * 0.5
+            )
+            (text as NSString).draw(at: textOrigin, withAttributes: attrs)
+            return true
+        }
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = image
+        mat.isDoubleSided = true
+        mat.readsFromDepthBuffer = false
+        mat.writesToDepthBuffer = false
+        mat.shaderModifiers = [.surface: "_surface.diffuse.rgb *= 1.45;"]
+        cachedDistancePillKey = text
+        cachedDistancePillMaterial = mat
+        cachedDistancePillSizePt = sizePt
+        return (mat, sizePt)
+    }
+
+    @MainActor
+    private func hoverBadgeMaterial(text: String, kind: MeasureSnap.Kind) -> (SCNMaterial, CGSize) {
+        let key = "\(kind.rawValue):\(text)"
+        if cachedHoverBadgeKey == key, let mat = cachedHoverBadgeMaterial {
+            return (mat, cachedHoverBadgeSizePt)
+        }
+        let font = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor(srgbRed: 0.93, green: 0.94, blue: 0.96, alpha: 1.0),
+        ]
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        let dotDiam: CGFloat = 6.0
+        let spacing: CGFloat = 4.5
+        let padX: CGFloat = 7.5
+        let padY: CGFloat = 3.0
+        let sizePt = CGSize(
+            width: ceil(padX * 2 + dotDiam + spacing + textSize.width),
+            height: ceil(max(textSize.height, dotDiam) + padY * 2)
+        )
+        let badgeColor = Self.measureSnapNSColor(for: kind, alpha: 1.0, hdrBoost: 1.0)
+        let image = NSImage(size: sizePt, flipped: false) { rect in
+            let insetRect = rect.insetBy(dx: 0.8, dy: 0.8)
+            let path = NSBezierPath(roundedRect: insetRect, xRadius: insetRect.height * 0.5, yRadius: insetRect.height * 0.5)
+            NSColor(srgbRed: 0.10, green: 0.11, blue: 0.14, alpha: 0.93).setFill()
+            path.fill()
+            badgeColor.withAlphaComponent(0.80).setStroke()
+            path.lineWidth = 1.0
+            path.stroke()
+
+            let dotRect = CGRect(
+                x: padX,
+                y: (rect.height - dotDiam) * 0.5,
+                width: dotDiam,
+                height: dotDiam
+            )
+            badgeColor.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+
+            let textOrigin = CGPoint(
+                x: padX + dotDiam + spacing,
+                y: (rect.height - textSize.height) * 0.5
+            )
+            (text as NSString).draw(at: textOrigin, withAttributes: attrs)
+            return true
+        }
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = image
+        mat.isDoubleSided = true
+        mat.readsFromDepthBuffer = false
+        mat.writesToDepthBuffer = false
+        mat.shaderModifiers = [.surface: "_surface.diffuse.rgb *= 1.45;"]
+        cachedHoverBadgeKey = key
+        cachedHoverBadgeMaterial = mat
+        cachedHoverBadgeSizePt = sizePt
+        return (mat, sizePt)
     }
 
     // MARK: - Point Lights & Scene Light Detection
@@ -1559,6 +2157,8 @@ public final class ViewportScene: @unchecked Sendable {
         let nv = normals.contents().bindMemory(to: Float.self, capacity: chunk.vertices * 3)
         let uv = uvs?.contents().bindMemory(to: SIMD2<Float>.self, capacity: chunk.vertices)
         var vo = 0, io = 0, base: UInt32 = 0
+        var lo = SIMD3<Float>(repeating: .infinity)
+        var hi = SIMD3<Float>(repeating: -.infinity)
         indices.withUnsafeMutableBytes { ib in
             let ix = ib.bindMemory(to: UInt32.self).baseAddress!
             for piece in chunk.pieces {
@@ -1574,6 +2174,9 @@ public final class ViewportScene: @unchecked Sendable {
                     mesh.normals.withUnsafeBufferPointer { normals in
                         for i in 0..<positions.count {
                             let p = m * SIMD4(positions[i], 1), n = simd_normalize(normalMatrix * normals[i])
+                            let p3 = SIMD3<Float>(p.x, p.y, p.z)
+                            lo = simd_min(lo, p3)
+                            hi = simd_max(hi, p3)
                             let o = (vo + i) * 3
                             pv[o] = p.x; pv[o + 1] = p.y; pv[o + 2] = p.z
                             nv[o] = n.x; nv[o + 1] = n.y; nv[o + 2] = n.z
@@ -1592,7 +2195,15 @@ public final class ViewportScene: @unchecked Sendable {
                 base += UInt32(mesh.positions.count)
             }
         }
-        return Merged(positions: positions, normals: normals, uvs: uvs, indices: indices)
+        let valid = lo.x <= hi.x
+        return Merged(
+            positions: positions,
+            normals: normals,
+            uvs: uvs,
+            indices: indices,
+            boundsMin: valid ? lo : .zero,
+            boundsMax: valid ? hi : .zero
+        )
     }
 
     /// Packed segment end points in model space; implicit indices (consecutive pairs).
@@ -1631,14 +2242,19 @@ public final class ViewportScene: @unchecked Sendable {
         }
         var sources = [source(merged.positions, .vertex, .float3, stride: 12)]
         if let normals = merged.normals { sources.append(source(normals, .normal, .float3, stride: 12)) }
-        if let uvs = merged.uvs { sources.append(source(uvs, .texcoord, .float2, stride: 8)) }
+        if let uvs = merged.uvs {
+            sources.append(source(uvs, .texcoord, .float2, stride: 8))
+        } else if chunk.material != nil, projectorsShaderActive {
+            // SceneKit's shader generator binds `texcoord0(6)` in the vertex stage whenever a material uses
+            // `SCNMaterialProperty` textures in `#pragma arguments` (such as video projector shadow/color atlases).
+            // Reusing `merged.positions` with stride 12 provides a valid `.texcoord` source at zero memory cost.
+            sources.append(source(merged.positions, .texcoord, .float2, stride: 12))
+        }
         let element = chunk.material == nil
             ? SCNGeometryElement(data: nil, primitiveType: .line, primitiveCount: chunk.vertices / 2, bytesPerIndex: 4)
             : SCNGeometryElement(data: merged.indices, primitiveType: .triangles, primitiveCount: chunk.indices / 3, bytesPerIndex: 4)
         let geometry = SCNGeometry(sources: sources, elements: [element])
-        if chunk.material == nil {
-            geometry.boundingBox = (SCNVector3(merged.boundsMin), SCNVector3(merged.boundsMax))
-        }
+        geometry.boundingBox = (SCNVector3(merged.boundsMin), SCNVector3(merged.boundsMax))
         geometry.materials = [chunk.material ?? chunk.edgeMaterial ?? edgeMaterial]
         return geometry
     }
@@ -1678,7 +2294,11 @@ public final class ViewportScene: @unchecked Sendable {
         material.roughness.contents = 0.85
         material.metalness.contents = 0
         material.isDoubleSided = true
-        guard let index else { material.diffuse.contents = NSColor(white: 0.96, alpha: 1); return material }
+        guard let index else {
+            material.diffuse.contents = NSColor(white: 0.96, alpha: 1)
+            if projectorsShaderActive { applyCurrentProjectorShader(to: material) }
+            return material
+        }
         let source = model.materials[index]
         let isTranslucent = source.opacity < 1 || source.isTransparent
         // SceneKit's `.physicallyBased` Metal shader ignores `SCNMaterial.transparency` when `diffuse.contents` has alpha == 1.0.
@@ -1694,7 +2314,9 @@ public final class ViewportScene: @unchecked Sendable {
                                        : SCNMatrix4Identity
             material.diffuse.contentsTransform = SCNMatrix4Mult(scale, flip)
             if source.opacity < 1 {
-                material.shaderModifiers = [.surface: "_surface.diffuse.a *= \(Float(effectiveAlpha));"]
+                let baseSnippet = "_surface.diffuse.a *= \(Float(effectiveAlpha));"
+                baseSurfaceModifiers[ObjectIdentifier(material)] = baseSnippet
+                material.shaderModifiers = [.surface: baseSnippet]
             }
         } else {
             let raw = SIMD3<Float>(source.color.x, source.color.y, source.color.z)
@@ -1712,7 +2334,418 @@ public final class ViewportScene: @unchecked Sendable {
             material.transparencyMode = .dualLayer
             material.writesToDepthBuffer = false // edges and opaque geometry behind glass stay visible
         }
+        if projectorsShaderActive {
+            applyCurrentProjectorShader(to: material)
+        }
         return material
+    }
+
+    // MARK: - Video Projectors & Depth-Map Occlusion
+
+    /// Updates the offscreen Metal shadow depth maps, pattern atlas, scene material shader modifiers, and 3D frustum gizmos.
+    private func updateVideoProjectors() {
+        let active = Array(videoProjectors.filter { $0.isEnabled && $0.intensity > 0.0001 }.prefix(VideoProjectorRenderer.maxActiveProjectors))
+        let b = visibleBounds
+        let diag = max(simd_distance(b.min, b.max), 10.0)
+        let zNear: Float = 0.15
+        let zFar: Float = max(diag * 2.5, 120.0)
+
+        if !active.isEmpty {
+            // Ensure all visible layer sets are built so their faces cast occlusion shadows
+            let unbuiltVisible = layerSets.values.filter { $0.node == nil && isVisible($0) }
+            if !unbuiltVisible.isEmpty {
+                build(unbuiltVisible)
+                for set in unbuiltVisible { set.node?.isHidden = !isVisible(set) }
+            }
+
+            // Lazily create MTLBuffer index buffers for face chunks and ensure untextured face chunks
+            // expose a `.texcoord` geometry source for SceneKit's `SCNMaterialProperty` shader arguments.
+            for i in faceChunks.indices {
+                if faceChunks[i].indexBuffer == nil {
+                    let data = faceChunks[i].indicesData
+                    let buf = data.withUnsafeBytes { rawBuf -> MTLBuffer in
+                        Self.device.makeBuffer(bytes: rawBuf.baseAddress!, length: max(data.count, 4), options: .storageModeShared)!
+                    }
+                    faceChunks[i].indexBuffer = buf
+                }
+                if let oldGeom = faceChunks[i].node.geometry,
+                   oldGeom.sources(for: .texcoord).isEmpty,
+                   let vCount = oldGeom.sources(for: .vertex).first?.vectorCount {
+                    let texSource = SCNGeometrySource(
+                        buffer: faceChunks[i].positions,
+                        vertexFormat: .float2,
+                        semantic: .texcoord,
+                        vertexCount: vCount,
+                        dataOffset: 0,
+                        dataStride: 12
+                    )
+                    let newGeom = SCNGeometry(sources: oldGeom.sources + [texSource], elements: oldGeom.elements)
+                    newGeom.boundingBox = oldGeom.boundingBox
+                    newGeom.materials = oldGeom.materials
+                    faceChunks[i].node.geometry = newGeom
+                }
+            }
+
+            let refs: [VideoProjectorRenderer.FaceChunkRef] = faceChunks.compactMap { chunk in
+                guard let idxBuf = chunk.indexBuffer else { return nil }
+                return VideoProjectorRenderer.FaceChunkRef(
+                    positions: chunk.positions,
+                    indexBuffer: idxBuf,
+                    indexCount: chunk.indexCount,
+                    isVisible: { [weak self] in
+                        guard let self else { return false }
+                        return !chunk.node.isHidden && chunk.set.node?.isHidden == false && self.isVisible(chunk.set)
+                    }
+                )
+            }
+
+            projectorRenderer.update(
+                activeProjectors: active,
+                faceChunks: refs,
+                zNear: zNear,
+                zFar: zFar
+            )
+            projectorsShaderActive = true
+        } else if projectorsShaderActive {
+            projectorsShaderActive = false
+        }
+
+        var allFaceMaterials: [SCNMaterial] = [defaultMaterial, clayMaterial]
+        allFaceMaterials.append(contentsOf: materials.values)
+        allFaceMaterials.append(contentsOf: xrayMaterials.values)
+        for mat in allFaceMaterials {
+            applyCurrentProjectorShader(to: mat, activeProjectors: active, zNear: zNear, zFar: zFar)
+        }
+
+        rebuildProjectorGizmos()
+    }
+
+    private func applyCurrentProjectorShader(
+        to material: SCNMaterial,
+        activeProjectors: [VideoProjector]? = nil,
+        zNear: Float = 0.15,
+        zFar: Float = 150.0
+    ) {
+        let active = activeProjectors ?? Array(videoProjectors.filter { $0.isEnabled && $0.intensity > 0.0001 }.prefix(VideoProjectorRenderer.maxActiveProjectors))
+        let baseSnippet = baseSurfaceModifiers[ObjectIdentifier(material)]
+
+        guard !active.isEmpty,
+              let depthProp = projectorRenderer.depthProperty,
+              let colorProp = projectorRenderer.colorProperty
+        else {
+            material.emission.contents = NSColor.black
+            if let baseSnippet {
+                material.shaderModifiers = [.surface: baseSnippet]
+            } else {
+                material.shaderModifiers = nil
+            }
+            return
+        }
+
+        // Enable SceneKit's emission channel in the generated PBR Metal shader;
+        // `surfaceShaderModifier` initializes `_surface.emission.rgb = float3(0.0)` and writes `sskp_totalProj`.
+        material.emission.contents = NSColor.white
+
+        let combinedSurface = VideoProjectorRenderer.surfaceShaderModifier + (baseSnippet.map { "\n" + $0 } ?? "")
+        if material.shaderModifiers?[.surface] != combinedSurface {
+            material.shaderModifiers = [.surface: combinedSurface]
+        }
+
+        material.setValue(NSNumber(value: active.count), forKey: "sskp_projCount")
+        material.setValue(depthProp, forKey: "sskp_projDepth")
+        material.setValue(colorProp, forKey: "sskp_projColor")
+
+        for i in 0..<VideoProjectorRenderer.maxActiveProjectors {
+            if i < active.count {
+                let p = active[i]
+                let vp = p.viewProjectionMatrix(zNear: zNear, zFar: zFar)
+                material.setValue(NSValue(scnMatrix4: SCNMatrix4(vp)), forKey: "sskp_projVP\(i)")
+                let pi = SCNVector4(CGFloat(p.position.x), CGFloat(p.position.y), CGFloat(p.position.z), CGFloat(p.intensity))
+                material.setValue(NSValue(scnVector4: pi), forKey: "sskp_projPI\(i)")
+            } else {
+                material.setValue(NSValue(scnMatrix4: SCNMatrix4Identity), forKey: "sskp_projVP\(i)")
+                material.setValue(NSValue(scnVector4: SCNVector4Zero), forKey: "sskp_projPI\(i)")
+            }
+        }
+    }
+
+    /// Tests whether `point` in model space is visible to `projector` (inside its optical frustum and NOT occluded by any closer scene surface).
+    public func isPointIlluminatedByProjector(_ point: SIMD3<Float>, projector: VideoProjector) -> Bool {
+        guard projector.isEnabled, projector.intensity > 0.0001 else { return false }
+        let b = visibleBounds
+        let zFar = max(simd_distance(b.min, b.max) * 2.5, 120.0)
+        let proj = projector.projectPoint(point, zNear: 0.15, zFar: zFar)
+        guard proj.isInsideFrustum else { return false }
+        let delta = point - projector.position
+        let dist = simd_length(delta)
+        guard dist > 0.15 else { return false }
+        let dir = delta / dist
+        if let hitDist = raycastModelDistance(from: projector.position, direction: dir, maxDistance: dist) {
+            // If an obstacle is hit more than 2 cm before `point`, the ray is blocked by matter
+            if hitDist < dist - 0.025 {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Raycasts a segment in model space (`modelRoot`) against visible opaque face geometry and returns the closest hit distance along `direction`.
+    public func raycastModelDistance(from origin: SIMD3<Float>, direction: SIMD3<Float>, maxDistance: Float) -> Float? {
+        let dirLen = simd_length(direction)
+        guard dirLen > 1e-6, maxDistance > 0.02 else { return nil }
+        let unitDir = direction / dirLen
+        var bestT: Float = .infinity
+
+        for chunk in faceChunks {
+            guard !chunk.node.isHidden,
+                  chunk.set.node?.isHidden == false,
+                  chunk.node.castsShadow,
+                  isVisible(chunk.set),
+                  chunk.indexCount >= 3
+            else { continue }
+            guard Self.rayIntersectsAABB(
+                origin: origin,
+                direction: unitDir,
+                maxT: min(bestT, maxDistance),
+                min: chunk.boundsMin,
+                max: chunk.boundsMax
+            ) else { continue }
+
+            let pv = chunk.positions.contents().bindMemory(to: Float.self, capacity: chunk.positions.length / 4)
+            chunk.indicesData.withUnsafeBytes { rawIdx in
+                guard let ix = rawIdx.bindMemory(to: UInt32.self).baseAddress else { return }
+                var tIdx = 0
+                let count = chunk.indexCount
+                while tIdx + 2 < count {
+                    let i0 = Int(ix[tIdx]) * 3
+                    let i1 = Int(ix[tIdx + 1]) * 3
+                    let i2 = Int(ix[tIdx + 2]) * 3
+                    tIdx += 3
+                    let v0 = SIMD3<Float>(pv[i0], pv[i0 + 1], pv[i0 + 2])
+                    let v1 = SIMD3<Float>(pv[i1], pv[i1 + 1], pv[i1 + 2])
+                    let v2 = SIMD3<Float>(pv[i2], pv[i2 + 1], pv[i2 + 2])
+                    let e1 = v1 - v0
+                    let e2 = v2 - v0
+                    let h = simd_cross(unitDir, e2)
+                    let a = simd_dot(e1, h)
+                    if abs(a) < 1e-7 { continue }
+                    let f = 1.0 / a
+                    let s = origin - v0
+                    let u = f * simd_dot(s, h)
+                    if u < 0.0 || u > 1.0 { continue }
+                    let q = simd_cross(s, e1)
+                    let v = f * simd_dot(unitDir, q)
+                    if v < 0.0 || u + v > 1.0 { continue }
+                    let t = f * simd_dot(e2, q)
+                    if t >= 0.04, t <= maxDistance, t < bestT {
+                        bestT = t
+                    }
+                }
+            }
+        }
+        return bestT < .infinity ? bestT : nil
+    }
+
+    private func rebuildProjectorGizmos() {
+        projectorsRoot.childNodes.forEach { $0.removeFromParentNode() }
+        guard !videoProjectors.isEmpty else {
+            projectorsRoot.isHidden = true
+            return
+        }
+        projectorsRoot.isHidden = false
+
+        let b = visibleBounds
+        let diag = max(simd_distance(b.min, b.max), 2.0)
+
+        for (idx, proj) in videoProjectors.enumerated() {
+            let isSelected = (idx == selectedVideoProjectorIndex)
+            let holder = SCNNode()
+            holder.name = proj.name
+
+            // 1. Scale 3D Projector Body (oriented along opticalBasis, with front lens at `proj.position`)
+            let (right, up, forward) = proj.opticalBasis()
+            let bodySize = proj.spec.bodySize
+            // Scale up body outline slightly if scene is huge so it stays easy to locate, while keeping true proportion
+            let minBodyWidth = max(bodySize.x, min(diag * 0.014, 0.95))
+            let scaleFactor = minBodyWidth / max(bodySize.x, 0.1)
+            let halfW = (bodySize.x * scaleFactor) * 0.5
+            let depth = bodySize.y * scaleFactor
+            let halfH = (bodySize.z * scaleFactor) * 0.5
+
+            // Front face at `proj.position`, extending backwards along `-forward` by `depth`
+            let fBL = proj.position - right * halfW - up * halfH
+            let fBR = proj.position + right * halfW - up * halfH
+            let fTR = proj.position + right * halfW + up * halfH
+            let fTL = proj.position - right * halfW + up * halfH
+            let bBL = fBL - forward * depth
+            let bBR = fBR - forward * depth
+            let bTR = fTR - forward * depth
+            let bTL = fTL - forward * depth
+
+            var chassisSegments: [SIMD3<Float>] = [
+                // Front face
+                fBL, fBR, fBR, fTR, fTR, fTL, fTL, fBL,
+                // Back face
+                bBL, bBR, bBR, bTR, bTR, bTL, bTL, bBL,
+                // Side edges
+                fBL, bBL, fBR, bBR, fTR, bTR, fTL, bTL,
+            ]
+            // Lens barrel octagon on the front face
+            let lensR = min(halfW, halfH) * 0.58
+            let lensLen = depth * 0.22
+            let lensFront = proj.position + forward * lensLen
+            for s in 0..<8 {
+                let a0 = Float(s) * (.pi / 4.0)
+                let a1 = Float(s + 1) * (.pi / 4.0)
+                let p0 = proj.position + (right * cos(a0) + up * sin(a0)) * lensR
+                let p1 = proj.position + (right * cos(a1) + up * sin(a1)) * lensR
+                let q0 = lensFront + (right * cos(a0) + up * sin(a0)) * (lensR * 0.85)
+                let q1 = lensFront + (right * cos(a1) + up * sin(a1)) * (lensR * 0.85)
+                chassisSegments.append(contentsOf: [p0, p1, q0, q1, p0, q0])
+            }
+
+            let chassisColor: NSColor
+            if !proj.isEnabled {
+                chassisColor = NSColor(srgbRed: 0.65, green: 0.68, blue: 0.72, alpha: 0.75)
+            } else if isSelected {
+                chassisColor = NSColor(srgbRed: 0.22 * 1.48, green: 0.96 * 1.48, blue: 0.68 * 1.48, alpha: 1.0)
+            } else {
+                chassisColor = NSColor(srgbRed: 0.28 * 1.35, green: 0.84 * 1.35, blue: 0.98 * 1.35, alpha: 0.95)
+            }
+            holder.addChildNode(Self.makeProjectorLineNode(points: chassisSegments, color: chassisColor, depthTest: false, order: 12))
+
+            // 2. Off-Axis Wireframe Frustum & Surface-Clipped Projection Outline
+            if proj.showsFrustum {
+                let throwDist = proj.throwDistance
+                let maxRayReach = max(throwDist * 2.5, diag * 1.5)
+                let cornersAtThrow = proj.frustumCorners(atDistance: throwDist)
+                let rawCorners = [
+                    cornersAtThrow.bottomLeft,
+                    cornersAtThrow.bottomRight,
+                    cornersAtThrow.topRight,
+                    cornersAtThrow.topLeft,
+                ]
+
+                // Clip each corner ray against the first architectural obstacle it hits
+                var clippedCorners: [SIMD3<Float>] = []
+                for c in rawCorners {
+                    let rayVec = c - proj.position
+                    let rayDist = max(simd_length(rayVec), 0.05)
+                    let rayDir = rayVec / rayDist
+                    if let hitT = raycastModelDistance(from: proj.position, direction: rayDir, maxDistance: maxRayReach) {
+                        clippedCorners.append(proj.position + rayDir * hitT)
+                    } else {
+                        clippedCorners.append(c)
+                    }
+                }
+
+                // Subdivide the 4 perimeter edges (6 segments per edge) and raycast each point so the projected frame hugs 3D walls/floors
+                var surfaceOutlineSegments: [SIMD3<Float>] = []
+                let subdivs = 6
+                for edgeIdx in 0..<4 {
+                    let cA = rawCorners[edgeIdx]
+                    let cB = rawCorners[(edgeIdx + 1) % 4]
+                    var prevPt: SIMD3<Float>? = nil
+                    for step in 0...subdivs {
+                        let t = Float(step) / Float(subdivs)
+                        let targetPt = cA + (cB - cA) * t
+                        let rayVec = targetPt - proj.position
+                        let rayDist = max(simd_length(rayVec), 0.05)
+                        let rayDir = rayVec / rayDist
+                        let hitPt: SIMD3<Float>
+                        if let hitT = raycastModelDistance(from: proj.position, direction: rayDir, maxDistance: maxRayReach) {
+                            hitPt = proj.position + rayDir * hitT
+                        } else {
+                            hitPt = targetPt
+                        }
+                        if let prevPt {
+                            surfaceOutlineSegments.append(contentsOf: [prevPt, hitPt])
+                        }
+                        prevPt = hitPt
+                    }
+                }
+
+                // 4 corner rays from lens to clipped surface points
+                var raySegments: [SIMD3<Float>] = []
+                for cc in clippedCorners {
+                    raySegments.append(contentsOf: [lensFront, cc])
+                }
+                // Optical axis ray from lens to target (or first hit)
+                let axisHitT = raycastModelDistance(from: proj.position, direction: forward, maxDistance: throwDist)
+                let axisEnd = axisHitT.map { proj.position + forward * $0 } ?? proj.target
+                raySegments.append(contentsOf: [lensFront, axisEnd])
+
+                // Target marker cross at `proj.target`
+                let targetCrossR = max(proj.projectedHeight(atDistance: throwDist) * 0.05, 0.08)
+                let targetSegments: [SIMD3<Float>] = [
+                    proj.target - right * targetCrossR, proj.target + right * targetCrossR,
+                    proj.target - up * targetCrossR, proj.target + up * targetCrossR,
+                    rawCorners[0], rawCorners[1],
+                    rawCorners[1], rawCorners[2],
+                    rawCorners[2], rawCorners[3],
+                    rawCorners[3], rawCorners[0],
+                ]
+
+                let rayColor = isSelected
+                    ? NSColor(srgbRed: 0.20 * 1.4, green: 0.92 * 1.4, blue: 0.65 * 1.4, alpha: 0.82)
+                    : NSColor(srgbRed: 0.25 * 1.25, green: 0.78 * 1.25, blue: 0.95 * 1.25, alpha: 0.58)
+                let outlineColor = isSelected
+                    ? NSColor(srgbRed: 0.30 * 1.5, green: 1.00 * 1.5, blue: 0.72 * 1.5, alpha: 0.98)
+                    : NSColor(srgbRed: 0.30 * 1.35, green: 0.88 * 1.35, blue: 1.00 * 1.35, alpha: 0.85)
+                let targetPlaneColor = NSColor(srgbRed: 1.00 * 1.3, green: 0.76 * 1.3, blue: 0.22 * 1.3, alpha: isSelected ? 0.55 : 0.30)
+
+                holder.addChildNode(Self.makeProjectorLineNode(points: raySegments, color: rayColor, depthTest: true, order: 10))
+                holder.addChildNode(Self.makeProjectorLineNode(points: surfaceOutlineSegments, color: outlineColor, depthTest: false, order: 11))
+                holder.addChildNode(Self.makeProjectorLineNode(points: targetSegments, color: targetPlaneColor, depthTest: false, order: 9))
+            }
+
+            projectorsRoot.addChildNode(holder)
+        }
+    }
+
+    private static func makeProjectorLineNode(
+        points: [SIMD3<Float>],
+        color: NSColor,
+        depthTest: Bool,
+        order: Int
+    ) -> SCNNode {
+        guard points.count >= 2 else { return SCNNode() }
+        let buf = buffer(points.count * 12)
+        let ptr = buf.contents().bindMemory(to: Float.self, capacity: points.count * 3)
+        for (i, p) in points.enumerated() {
+            ptr[i * 3] = p.x
+            ptr[i * 3 + 1] = p.y
+            ptr[i * 3 + 2] = p.z
+        }
+        let src = SCNGeometrySource(
+            buffer: buf,
+            vertexFormat: .float3,
+            semantic: .vertex,
+            vertexCount: points.count,
+            dataOffset: 0,
+            dataStride: 12
+        )
+        let elem = SCNGeometryElement(
+            data: nil,
+            primitiveType: .line,
+            primitiveCount: points.count / 2,
+            bytesPerIndex: 4
+        )
+        let geom = SCNGeometry(sources: [src], elements: [elem])
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = color
+        mat.readsFromDepthBuffer = depthTest
+        mat.writesToDepthBuffer = false
+        if depthTest {
+            mat.shaderModifiers = [.geometry: edgeBias]
+        }
+        geom.materials = [mat]
+        let node = SCNNode(geometry: geom)
+        node.categoryBitMask = edgeCategory
+        node.castsShadow = false
+        node.renderingOrder = order
+        return node
     }
 
     /// Edges lie on their faces: pull them towards the eye so the depth test keeps them in front of coplanar faces but

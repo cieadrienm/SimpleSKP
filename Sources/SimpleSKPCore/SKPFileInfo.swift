@@ -30,8 +30,47 @@ public struct SKPFileInfo: Sendable {
     /// True when the file is an AutoCAD `.dwg` or `.dxf` drawing.
     public var isCAD: Bool { isDWG || isDXF }
 
+    /// True when the file is a Collada `.dae` 3D model.
+    public var isDAE: Bool {
+        if let version, version.hasPrefix("COLLADA") { return true }
+        return url.pathExtension.lowercased() == "dae"
+    }
+
+    /// True when the file is a Wavefront `.obj` 3D model.
+    public var isOBJ: Bool {
+        if version == "OBJ" { return true }
+        return url.pathExtension.lowercased() == "obj"
+    }
+
+    /// True when the file is a `.dae` or `.obj` 3D mesh file.
+    public var is3DMesh: Bool { isDAE || isOBJ }
+
+    /// True when the file is a SimpleSKP `.sskp` project file.
+    public var isSSKP: Bool {
+        if version == "SSKP" { return true }
+        return url.pathExtension.lowercased() == "sskp"
+    }
+
     /// Reads only the first megabyte of the file. Throws `SKPError.unreadable` when the file cannot be read.
     public static func read(_ url: URL) throws -> SKPFileInfo {
+        if url.pathExtension.lowercased() == "sskp" {
+            do {
+                let project = try SSKPProject.read(from: url)
+                let modelURL = project.resolveModelURL(relativeTo: url)
+                let baseInfo = try read(modelURL)
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? baseInfo.fileSize
+                let baseLabel = baseInfo.versionLabel ?? modelURL.pathExtension.uppercased()
+                return SKPFileInfo(
+                    url: url,
+                    fileSize: size,
+                    version: baseInfo.version ?? "SSKP",
+                    versionLabel: "SSKP · \(baseLabel)",
+                    thumbnailPNG: baseInfo.thumbnailPNG
+                )
+            } catch {
+                throw SKPError.unreadable(url)
+            }
+        }
         do {
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
@@ -69,6 +108,24 @@ public struct SKPFileInfo: Sendable {
                 fileSize: fileSize,
                 version: dxfInfo.version,
                 versionLabel: dxfInfo.label,
+                thumbnailPNG: nil
+            )
+        }
+        if let daeInfo = parseDAEVersion(header, url: url) {
+            return SKPFileInfo(
+                url: url,
+                fileSize: fileSize,
+                version: daeInfo.version,
+                versionLabel: daeInfo.label,
+                thumbnailPNG: nil
+            )
+        }
+        if let objInfo = parseOBJVersion(header, url: url) {
+            return SKPFileInfo(
+                url: url,
+                fileSize: fileSize,
+                version: objInfo.version,
+                versionLabel: objInfo.label,
                 thumbnailPNG: nil
             )
         }
@@ -134,6 +191,25 @@ public struct SKPFileInfo: Sendable {
             }
         }
         return ("DXF", "AutoCAD DXF")
+    }
+
+    static func parseDAEVersion(_ data: Data, url: URL) -> (version: String, label: String)? {
+        let isDAEExt = url.pathExtension.lowercased() == "dae"
+        let sample = data.prefix(min(data.count, 32_768))
+        let text = String(data: sample, encoding: .utf8) ?? String(data: sample, encoding: .isoLatin1) ?? ""
+        guard isDAEExt || text.contains("<COLLADA") else { return nil }
+        var ver = "1.4"
+        if text.contains("version=\"1.5") {
+            ver = "1.5"
+        } else if text.contains("version=\"1.4.1\"") {
+            ver = "1.4.1"
+        }
+        return ("COLLADA \(ver)", "Collada DAE \(ver)")
+    }
+
+    static func parseOBJVersion(_ data: Data, url: URL) -> (version: String, label: String)? {
+        guard url.pathExtension.lowercased() == "obj" else { return nil }
+        return ("OBJ", "Wavefront OBJ")
     }
 
     /// nil when the version does not start with a number.

@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # The version shown by the Finder, About and the status bar: bump it here, and only here (CHANGELOG.md says
 # what changed; a release is tagged vX.Y.Z). The build number counts commits.
-VERSION="1.2.0"
+VERSION="1.4.0"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 CONFIG="${1:-release}"
 

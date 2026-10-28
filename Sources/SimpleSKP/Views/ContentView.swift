@@ -108,7 +108,7 @@ private struct LoadingProgressOverlay: View {
             .frame(height: 3.5)
 
             // Centered prominent loading card
-            VStack(spacing: 12) {
+            VStack(spacing: 11) {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
@@ -119,16 +119,10 @@ private struct LoadingProgressOverlay: View {
                             .foregroundStyle(Theme.text.swiftUI)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        HStack(spacing: 6) {
-                            Text(progress?.phase ?? L("Ouverture du modèle…", "Opening model…"))
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Theme.textDim.swiftUI)
-                            if let faces = progress?.faces, faces > 0 {
-                                Text("· " + Format.count(faces, L("face", "face")))
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(Theme.textFaint.swiftUI)
-                            }
-                        }
+                        Text(progress?.phase ?? L("Ouverture du modèle…", "Opening model…"))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                            .lineLimit(1)
                     }
                     Spacer(minLength: 8)
                     Text("\(Int((fraction * 100).rounded())) %")
@@ -160,6 +154,49 @@ private struct LoadingProgressOverlay: View {
                 }
                 .frame(height: 8)
 
+                // Didactic live counters & current element being imported
+                if let p = progress, (p.layers > 0 || p.blocks > 0 || p.edges > 0 || p.faces > 0 || p.currentItem != nil) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let item = p.currentItem, !item.isEmpty {
+                            HStack(spacing: 6) {
+                                Image(systemName: "cube.transparent")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(Theme.accent.swiftUI)
+                                Text(item)
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(Theme.text.swiftUI)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(Color.white.opacity(0.06))
+                                    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Theme.accent.swiftUI.opacity(0.28), lineWidth: 0.5))
+                            )
+                        }
+
+                        if p.layers > 0 || p.blocks > 0 || p.edges > 0 || p.faces > 0 {
+                            HStack(spacing: 10) {
+                                if p.layers > 0 {
+                                    statBadge(label: L("Calques", "Layers"), value: p.layers)
+                                }
+                                if p.blocks > 0 {
+                                    statBadge(label: L("Blocs", "Blocks"), value: p.blocks)
+                                }
+                                if p.edges > 0 {
+                                    statBadge(label: L("Arêtes", "Edges"), value: p.edges)
+                                }
+                                if p.faces > 0 {
+                                    statBadge(label: L("Faces", "Faces"), value: p.faces)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                }
+
                 if let versionLabel {
                     HStack {
                         Chip(text: versionLabel)
@@ -169,7 +206,7 @@ private struct LoadingProgressOverlay: View {
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 15)
-            .frame(width: 380)
+            .frame(width: 400)
             .background(
                 RoundedRectangle(cornerRadius: 12)
                     .fill(Theme.panel.swiftUI.opacity(0.94))
@@ -185,6 +222,17 @@ private struct LoadingProgressOverlay: View {
             withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                 pulse = true
             }
+        }
+    }
+
+    private func statBadge(label: String, value: Int) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.textFaint.swiftUI)
+            Text(Format.integer(value))
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Theme.textDim.swiftUI)
         }
     }
 }
@@ -203,6 +251,7 @@ struct TopBar: View {
     let model: DocumentModel
     @State private var showCameraPopover = false
     @State private var showLightingPopover = false
+    @State private var showProjectorPopover = false
 
     private static let primaryViews: [(view: StandardView, label: String, shortcut: String)] = [
         (.iso, L("Iso", "Iso"), "⌘1"),
@@ -238,9 +287,21 @@ struct TopBar: View {
                 }
                 IconButton(
                     symbol: "folder",
-                    tooltip: L("Ouvrir un fichier SketchUp ou AutoCAD… (⌘O)", "Open a SketchUp or AutoCAD file… (⌘O)")
+                    tooltip: L("Ouvrir un fichier SketchUp, AutoCAD, Collada, OBJ ou .sskp… (⌘O)", "Open a SketchUp, AutoCAD, Collada, OBJ or .sskp file… (⌘O)")
                 ) {
                     NSDocumentController.shared.openDocument(nil)
+                }
+                if model.showsHiddenFeaturesUI {
+                    ToolbarPillButton(
+                        title: ".sskp",
+                        symbol: "square.and.arrow.down",
+                        active: model.sskpURL != nil,
+                        disabled: !model.isReady || model.underlyingModelURL == nil,
+                        tooltip: L("Enregistrer le projet SimpleSKP (.sskp) avec les vidéoprojecteurs et réglages (⌘S)",
+                                   "Save SimpleSKP project (.sskp) with video projectors and settings (⌘S)")
+                    ) {
+                        model.saveSSKPProject()
+                    }
                 }
                 if model.info != nil {
                     IconButton(
@@ -423,6 +484,22 @@ struct TopBar: View {
                     }
                     .popover(isPresented: $showLightingPopover, arrowEdge: .bottom) {
                         LightingPopover(model: model)
+                    }
+
+                    if model.showsHiddenFeaturesUI {
+                        ToolbarPillButton(
+                            title: model.videoProjectors.isEmpty ? "VP" : "VP (\(model.videoProjectors.count))",
+                            symbol: "videoprojector.fill",
+                            active: showProjectorPopover || !model.videoProjectors.isEmpty || model.projectorPickMode != .none,
+                            disabled: !model.isReady,
+                            tooltip: L("Outil Vidéoprojecteur (Optoma ZU920ST, rapport de projection, lens shift H/V et masquage géométrique)",
+                                       "Video Projector tool (Optoma ZU920ST, throw ratio, H/V lens shift and geometric occlusion)")
+                        ) {
+                            showProjectorPopover.toggle()
+                        }
+                        .popover(isPresented: $showProjectorPopover, arrowEdge: .bottom) {
+                            ProjectorPopover(model: model)
+                        }
                     }
                 } else {
                     ToolbarPillButton(
@@ -1320,6 +1397,580 @@ struct LightingPopover: View {
     }
 }
 
+// MARK: - Video Projector Popover
+
+struct ProjectorPopover: View {
+    let model: DocumentModel
+
+    var body: some View {
+        let range = model.pointLightCoordinateRange
+        let span = max(Float(range.upperBound - range.lowerBound), 1.0)
+        let step = max(0.05, Double((span / 100.0).rounded(.toNearestOrAwayFromZero)))
+
+        VStack(alignment: .leading, spacing: 11) {
+            SectionHeader(L("Vidéoprojecteurs", "Video Projectors")) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        Button {
+                            model.undo()
+                        } label: {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(model.canUndo ? Theme.text.swiftUI : Theme.textDim.swiftUI.opacity(0.35))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!model.canUndo)
+                        .help(model.undoMenuTitle + " (⌘Z)")
+
+                        Button {
+                            model.redo()
+                        } label: {
+                            Image(systemName: "arrow.uturn.forward")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(model.canRedo ? Theme.text.swiftUI : Theme.textDim.swiftUI.opacity(0.35))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!model.canRedo)
+                        .help(model.redoMenuTitle + " (⇧⌘Z)")
+                    }
+
+                    Button {
+                        model.addVideoProjector(spec: .optomaZU920ST)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 10.5))
+                            Text(L("Ajouter un VP", "Add VP"))
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.alive.swiftUI)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if model.videoProjectors.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "videoprojector.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(Theme.alive.swiftUI)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Optoma ZU920ST")
+                                .font(.system(size: 12.5, weight: .bold))
+                                .foregroundStyle(Theme.text.swiftUI)
+                            Text("WUXGA 1920×1200 (16:10) · 0.65–0.75:1 · Shift H ±25 % V ±55 %")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(Theme.textDim.swiftUI)
+                        }
+                    }
+                    Text(L("Ajoutez un vidéoprojecteur pour simuler son optique réelle et ses zones masquées sur l’architecture.",
+                           "Add a video projector to simulate its accurate optics and occluded shadow zones on the architecture."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textFaint.swiftUI)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button {
+                        model.addVideoProjector(spec: .optomaZU920ST)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle.fill")
+                            Text(L("Ajouter un Optoma ZU920ST", "Add Optoma ZU920ST"))
+                                .font(.system(size: 11.5, weight: .semibold))
+                        }
+                        .foregroundStyle(Theme.background.swiftUI)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.alive.swiftUI))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.white.opacity(0.04))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+                )
+            } else if let proj = model.selectedVideoProjector {
+                let spec = proj.spec
+
+                // 1. Selector + Enable + Duplicate + Delete
+                HStack(spacing: 6) {
+                    Picker("", selection: Binding(
+                        get: { model.selectedVideoProjectorIndex },
+                        set: { model.selectVideoProjector($0) }
+                    )) {
+                        ForEach(Array(model.videoProjectors.enumerated()), id: \.offset) { index, item in
+                            Text(item.isEnabled ? "● \(item.name)" : "○ \(item.name)").tag(index)
+                        }
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+
+                    Toggle("", isOn: Binding(
+                        get: { proj.isEnabled },
+                        set: { enabled in model.updateSelectedVideoProjector { $0.isEnabled = enabled } }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .help(L("Allumer ou éteindre ce vidéoprojecteur", "Turn this projector on or off"))
+
+                    Button {
+                        model.duplicateSelectedVideoProjector()
+                    } label: {
+                        Image(systemName: "plus.square.on.square")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L("Dupliquer ce vidéoprojecteur", "Duplicate this projector"))
+
+                    Button {
+                        model.removeSelectedVideoProjector()
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.danger.swiftUI)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L("Supprimer ce vidéoprojecteur", "Delete this projector"))
+                }
+
+                // Editable Name & Catalog Model Picker
+                HStack(spacing: 6) {
+                    TextField(L("Nom du VP", "VP Name"), text: Binding(
+                        get: { proj.name },
+                        set: { newName in model.updateSelectedVideoProjector { $0.name = newName } }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .font(.system(size: 11.5))
+
+                    Picker("", selection: Binding(
+                        get: { proj.specID },
+                        set: { newID in
+                            let newSpec = ProjectorCatalog.spec(for: newID)
+                            model.updateSelectedVideoProjector { $0.applySpec(newSpec) }
+                        }
+                    )) {
+                        ForEach(ProjectorCatalog.all) { item in
+                            Text(item.displayName).tag(item.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 138)
+                }
+
+                // Optical spec summary pill
+                HStack {
+                    Text("\(spec.resolutionLabel) · \(Format.integer(spec.lumens)) lm")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.alive.swiftUI)
+                    Spacer()
+                    Text(String(
+                        format: "D %.2f m → %.2f × %.2f m",
+                        proj.throwDistance,
+                        proj.projectedWidth(),
+                        proj.projectedHeight()
+                    ))
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.text.swiftUI)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.05)))
+
+                Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
+                // 2. Optical Lens Data (Throw Ratio + Lens Shift H/V)
+                SectionHeader(L("Optique (Objectif \(spec.model))", "Optics (\(spec.model) Lens)")) {
+                    if abs(proj.lensShiftH) > 0.005 || abs(proj.lensShiftV) > 0.005 || abs(proj.throwRatio - spec.defaultThrowRatio) > 0.005 {
+                        Button {
+                            model.updateSelectedVideoProjector {
+                                $0.throwRatio = spec.defaultThrowRatio
+                                $0.lensShiftH = 0
+                                $0.lensShiftV = 0
+                            }
+                        } label: {
+                            Text(L("Centrer optique", "Center optics"))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Theme.accent.swiftUI)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                // Throw Ratio
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(L("Rapport de projection (Zoom)", "Throw ratio (Zoom)"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text(String(format: "%.2f : 1  (%.2f–%.2f)", proj.throwRatio, spec.minThrowRatio, spec.maxThrowRatio))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    HStack(spacing: 6) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(proj.throwRatio) },
+                                set: { val in
+                                    model.updateSelectedVideoProjector {
+                                        $0.throwRatio = simd_clamp(Float(val), spec.minThrowRatio, spec.maxThrowRatio)
+                                    }
+                                }
+                            ),
+                            in: Double(spec.minThrowRatio)...Double(spec.maxThrowRatio)
+                        )
+                        .controlSize(.small)
+                        .tint(Theme.alive.swiftUI)
+
+                        HStack(spacing: 2) {
+                            stepButton("minus") {
+                                model.updateSelectedVideoProjector {
+                                    $0.throwRatio = simd_clamp($0.throwRatio - 0.01, spec.minThrowRatio, spec.maxThrowRatio)
+                                }
+                            }
+                            stepButton("plus") {
+                                model.updateSelectedVideoProjector {
+                                    $0.throwRatio = simd_clamp($0.throwRatio + 0.01, spec.minThrowRatio, spec.maxThrowRatio)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Lens Shift V (±55%) & H (±25%)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(L("Lens Shift Vertical (±\(Int((spec.maxLensShiftV * 100).rounded())) %)",
+                               "Vertical Lens Shift (±\(Int((spec.maxLensShiftV * 100).rounded()))%)"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text(String(format: "%+.0f %%", proj.lensShiftV * 100.0))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(proj.lensShiftV) },
+                            set: { val in
+                                model.updateSelectedVideoProjector {
+                                    $0.lensShiftV = simd_clamp(Float(val), -spec.maxLensShiftV, spec.maxLensShiftV)
+                                }
+                            }
+                        ),
+                        in: Double(-spec.maxLensShiftV)...Double(spec.maxLensShiftV)
+                    )
+                    .controlSize(.small)
+                    .tint(Theme.accent.swiftUI)
+
+                    HStack {
+                        Text(L("Lens Shift Horizontal (±\(Int((spec.maxLensShiftH * 100).rounded())) %)",
+                               "Horizontal Lens Shift (±\(Int((spec.maxLensShiftH * 100).rounded()))%)"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text(String(format: "%+.0f %%", proj.lensShiftH * 100.0))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(proj.lensShiftH) },
+                            set: { val in
+                                model.updateSelectedVideoProjector {
+                                    $0.lensShiftH = simd_clamp(Float(val), -spec.maxLensShiftH, spec.maxLensShiftH)
+                                }
+                            }
+                        ),
+                        in: Double(-spec.maxLensShiftH)...Double(spec.maxLensShiftH)
+                    )
+                    .controlSize(.small)
+                    .tint(Theme.accent.swiftUI)
+                }
+
+                Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
+                // 3. Position XYZ & Interactive 3D Placement
+                SectionHeader(L("Position & Visée 3D (m)", "3D Position & Aim (m)"))
+                HStack(spacing: 4) {
+                    ToolbarPillButton(
+                        title: L("À la caméra", "At camera"),
+                        symbol: "video",
+                        active: false,
+                        tooltip: L("Placer le vidéoprojecteur à la position et visée actuelles de la caméra",
+                                   "Place projector at current camera position and aim")
+                    ) {
+                        model.moveSelectedProjectorToCamera()
+                    }
+                    ToolbarPillButton(
+                        title: L("Clic pos.", "Click pos."),
+                        symbol: "scope",
+                        active: model.projectorPickMode == .position,
+                        tooltip: L("Cliquer un point dans la vue 3D pour placer l'objectif du vidéoprojecteur",
+                                   "Click a point in the 3D view to place the projector lens")
+                    ) {
+                        model.startPickingProjectorPosition()
+                    }
+                    ToolbarPillButton(
+                        title: L("Clic cible", "Click target"),
+                        symbol: "target",
+                        active: model.projectorPickMode == .target,
+                        tooltip: L("Cliquer une paroi dans la vue 3D pour orienter la cible du vidéoprojecteur",
+                                   "Click a surface in the 3D view to aim the projector target")
+                    ) {
+                        model.startPickingProjectorTarget()
+                    }
+                    ToolbarPillButton(
+                        title: L("Voir VP", "View VP"),
+                        symbol: "eye",
+                        active: false,
+                        tooltip: L("Placer la caméra dans l'axe du vidéoprojecteur", "Place camera along projector axis")
+                    ) {
+                        model.lookThroughSelectedProjector()
+                    }
+                }
+
+                vpCoordRow(
+                    axis: "X",
+                    color: NSColor(srgbRed: 0.92, green: 0.28, blue: 0.26, alpha: 1.0),
+                    value: proj.position.x,
+                    range: range,
+                    step: Float(step)
+                ) { newX in
+                    model.updateSelectedVideoProjector {
+                        let dx = newX - $0.position.x
+                        $0.position.x = newX
+                        $0.target.x += dx
+                    }
+                }
+                vpCoordRow(
+                    axis: "Y",
+                    color: NSColor(srgbRed: 0.25, green: 0.78, blue: 0.36, alpha: 1.0),
+                    value: proj.position.y,
+                    range: range,
+                    step: Float(step)
+                ) { newY in
+                    model.updateSelectedVideoProjector {
+                        let dy = newY - $0.position.y
+                        $0.position.y = newY
+                        $0.target.y += dy
+                    }
+                }
+                vpCoordRow(
+                    axis: "Z",
+                    color: NSColor(srgbRed: 0.24, green: 0.54, blue: 0.96, alpha: 1.0),
+                    value: proj.position.z,
+                    range: range,
+                    step: Float(step)
+                ) { newZ in
+                    model.updateSelectedVideoProjector {
+                        let dz = newZ - $0.position.z
+                        $0.position.z = newZ
+                        $0.target.z += dz
+                    }
+                }
+
+                // Pan / Tilt / Roll
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(L("Azimut (Pan)", "Azimuth (Pan)"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text(String(format: "%+.1f°", proj.panDegrees))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(proj.panDegrees) },
+                            set: { newPan in
+                                model.updateSelectedVideoProjector {
+                                    $0.setPanTilt(panDegrees: Float(newPan), tiltDegrees: $0.tiltDegrees)
+                                }
+                            }
+                        ),
+                        in: -180.0...180.0
+                    )
+                    .controlSize(.small)
+                    .tint(Theme.accent.swiftUI)
+
+                    HStack {
+                        Text(L("Inclinaison (Tilt)", "Elevation (Tilt)"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        Text(String(format: "%+.1f°", proj.tiltDegrees))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(proj.tiltDegrees) },
+                            set: { newTilt in
+                                model.updateSelectedVideoProjector {
+                                    $0.setPanTilt(panDegrees: $0.panDegrees, tiltDegrees: Float(newTilt))
+                                }
+                            }
+                        ),
+                        in: -89.0...89.0
+                    )
+                    .controlSize(.small)
+                    .tint(Theme.accent.swiftUI)
+
+                    HStack {
+                        Text(L("Roulis (Roll)", "Roll"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim.swiftUI)
+                        Spacer()
+                        ForEach([0, 90, -90, 180], id: \.self) { angle in
+                            ToolbarPillButton(
+                                title: "\(angle)°",
+                                active: abs(proj.rollDegrees - Float(angle)) < 1.0
+                            ) {
+                                model.updateSelectedVideoProjector { $0.rollDegrees = Float(angle) }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle().fill(Theme.separator.swiftUI).frame(height: 1)
+
+                // 4. Pattern, Power & Frustum
+                SectionHeader(L("Mire & Puissance", "Pattern & Power"))
+                HStack(spacing: 4) {
+                    ToolbarPillButton(
+                        title: L("Mire", "Grid"),
+                        symbol: "squareshape.split.3x3",
+                        active: proj.pattern == .testGrid
+                    ) {
+                        model.updateSelectedVideoProjector { $0.pattern = .testGrid }
+                    }
+                    ToolbarPillButton(
+                        title: L("Barres", "Bars"),
+                        symbol: "chart.bar.fill",
+                        active: proj.pattern == .colorBars
+                    ) {
+                        model.updateSelectedVideoProjector { $0.pattern = .colorBars }
+                    }
+                    ToolbarPillButton(
+                        title: L("Cadre", "Frame"),
+                        symbol: "rectangle.inset.filled",
+                        active: proj.pattern == .whiteFrame
+                    ) {
+                        model.updateSelectedVideoProjector { $0.pattern = .whiteFrame }
+                    }
+                    ToolbarPillButton(
+                        title: L("Image…", "Image…"),
+                        symbol: "photo",
+                        active: proj.pattern == .customImage
+                    ) {
+                        model.chooseCustomImageForSelectedProjector()
+                    }
+                }
+
+                HStack {
+                    Text(L("Intensité lumineuse", "Light intensity"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textDim.swiftUI)
+                    Spacer()
+                    Text("\(Int((proj.intensity * 100).rounded())) %")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(proj.intensity) },
+                        set: { val in model.updateSelectedVideoProjector { $0.intensity = Float(val) } }
+                    ),
+                    in: 0.0...2.5
+                )
+                .controlSize(.small)
+                .tint(Theme.alive.swiftUI)
+
+                HStack {
+                    Toggle(isOn: Binding(
+                        get: { proj.showsFrustum },
+                        set: { val in model.updateSelectedVideoProjector { $0.showsFrustum = val } }
+                    )) {
+                        Text(L("Afficher le faisceau 3D (Frustum)", "Show 3D beam frustum"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.text.swiftUI)
+                    }
+                    .toggleStyle(.checkbox)
+
+                    Spacer()
+
+                    TextButton(
+                        title: L("Sauver .sskp", "Save .sskp"),
+                        symbol: "square.and.arrow.down",
+                        compact: true
+                    ) {
+                        model.saveSSKPProject()
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 356)
+        .background(Theme.panel.swiftUI)
+        .preferredColorScheme(.dark)
+    }
+
+    private func vpCoordRow(
+        axis: String,
+        color: NSColor,
+        value: Float,
+        range: ClosedRange<Double>,
+        step: Float,
+        onChange: @escaping (Float) -> Void
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(axis)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color(nsColor: color))
+                .frame(width: 14, alignment: .leading)
+
+            Slider(
+                value: Binding(
+                    get: { Double(value) },
+                    set: { onChange(Float($0)) }
+                ),
+                in: range
+            )
+            .controlSize(.small)
+            .tint(Color(nsColor: color))
+
+            Text(String(format: "%+.2f m", value))
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Theme.text.swiftUI)
+                .frame(width: 58, alignment: .trailing)
+
+            HStack(spacing: 2) {
+                stepButton("minus") { onChange(value - step) }
+                stepButton("plus") { onChange(value + step) }
+            }
+        }
+    }
+
+    private func stepButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .frame(width: 16, height: 16)
+                .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.textDim.swiftUI)
+    }
+}
+
 // MARK: - Viewport HUD Overlay
 
 private struct ViewportHUDOverlay: View {
@@ -1327,13 +1978,29 @@ private struct ViewportHUDOverlay: View {
 
     var body: some View {
         ZStack {
-            if model.isMeasuring {
-                MeasurementCanvasOverlay(model: model)
-                    .allowsHitTesting(false)
+            if let construction = model.constructionProgress {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.08))
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Theme.accent.swiftUI.opacity(0.85), Theme.accent.swiftUI],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: max(24, geo.size.width * min(max(construction.fraction, 0.05), 1.0)))
+                            .animation(.easeOut(duration: 0.08), value: construction.fraction)
+                    }
+                    .frame(height: 3.0)
+                }
+                .allowsHitTesting(false)
             }
 
             VStack {
-                // Top banners (Free-fly / Measurement / Flash feedback)
+                // Top banners (Free-fly / Measurement / View Construction / Flash feedback)
                 HStack {
                     Spacer()
                     if model.isFreeFlying {
@@ -1359,6 +2026,67 @@ private struct ViewportHUDOverlay: View {
                         .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
                     } else if model.isMeasuring {
                         MeasurementBannerView(model: model)
+                    } else if model.projectorPickMode != .none {
+                        HStack(spacing: 10) {
+                            Image(systemName: model.projectorPickMode == .position ? "scope" : "target")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.alive.swiftUI)
+                            Text(model.projectorPickMode == .position
+                                 ? L("Cliquez un point dans la vue 3D pour placer l’objectif du vidéoprojecteur (Échap pour annuler)",
+                                     "Click a point in the 3D view to place the projector lens (Esc to cancel)")
+                                 : L("Cliquez une paroi dans la vue 3D pour orienter la cible du vidéoprojecteur (Échap pour annuler)",
+                                     "Click a surface in the 3D view to aim the projector target (Esc to cancel)"))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Theme.text.swiftUI)
+                            TextButton(title: L("Annuler", "Cancel"), compact: true) {
+                                model.cancelProjectorPick()
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Theme.panel.swiftUI.opacity(0.94))
+                                .overlay(Capsule().strokeBorder(Theme.alive.swiftUI.opacity(0.55), lineWidth: 1))
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+                    } else if let construction = model.constructionProgress {
+                        let dotColor = model.layerDisplayColor(construction.currentLayerIndex) ?? Theme.accent.swiftUI
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(dotColor)
+                                .frame(width: 8, height: 8)
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 0.6))
+                            Text(L("Construction de la vue :", "Building view:"))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Theme.textDim.swiftUI)
+                            Text(construction.currentLayerName)
+                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.text.swiftUI)
+                                .lineLimit(1)
+                                .frame(maxWidth: 220, alignment: .leading)
+                            Text("(\(construction.completedLayers)/\(construction.totalLayers))")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Theme.textFaint.swiftUI)
+                            if construction.edgesBuilt > 0 {
+                                Rectangle().fill(Theme.separator.swiftUI).frame(width: 1, height: 12)
+                                Text(Format.count(construction.edgesBuilt, L("arête", "edge")))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(Theme.textDim.swiftUI)
+                            }
+                            Text("\(Int((construction.fraction * 100).rounded())) %")
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .foregroundStyle(Theme.accent.swiftUI)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Theme.panel.swiftUI.opacity(0.94))
+                                .overlay(Capsule().strokeBorder(dotColor.opacity(0.55), lineWidth: 1))
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+                        .allowsHitTesting(false)
                     } else if let flash = model.flashMessage {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle.fill")
@@ -1559,225 +2287,6 @@ private struct MeasurementBannerView: View {
             Text(String(format: "%+.2f m", value))
                 .font(.system(size: 10.5, design: .monospaced))
                 .foregroundStyle(Theme.text.swiftUI)
-        }
-    }
-}
-
-private struct MeasurementCanvasOverlay: View {
-    let model: DocumentModel
-
-    private static func snapColor(for kind: MeasureSnap.Kind) -> Color {
-        switch kind {
-        case .vertex: return Color(red: 0.22, green: 0.92, blue: 0.56)   // Emerald green (Point)
-        case .midpoint: return Color(red: 0.22, green: 0.86, blue: 0.98) // Sky cyan (Midpoint)
-        case .edge: return Color(red: 1.00, green: 0.72, blue: 0.18)     // Amber gold (Edge)
-        case .face, .plane: return Color(red: 0.88, green: 0.90, blue: 0.96)
-        }
-    }
-
-    var body: some View {
-        // Observe camera state so the 2D projection updates at 60–120 Hz during orbit, pan, and zoom
-        let _ = model.cameraPosition
-        let _ = model.cameraYaw
-        let _ = model.cameraPitch
-        let _ = model.cameraFOV
-        let _ = model.cameraOrthoScale
-        let hoverSnap = model.measureHoverSnap
-        let startSnap = model.measureStart
-        let endSnap = model.activeMeasureEnd
-
-        GeometryReader { _ in
-            ZStack {
-                Canvas { ctx, _ in
-                    // 1. Highlight the snapped edge segment under the cursor
-                    if let hover = hoverSnap,
-                       let s0 = hover.segmentStart,
-                       let s1 = hover.segmentEnd,
-                       let p0 = model.viewport.projectModelPoint(s0),
-                       let p1 = model.viewport.projectModelPoint(s1) {
-                        var edgePath = Path()
-                        edgePath.move(to: p0)
-                        edgePath.addLine(to: p1)
-                        ctx.stroke(
-                            edgePath,
-                            with: .color(Self.snapColor(for: hover.kind).opacity(0.65)),
-                            style: StrokeStyle(lineWidth: 3.0, lineCap: .round)
-                        )
-                    }
-
-                    // 2. Draw active or completed measurement line + ΔX / ΔY / ΔZ projections
-                    if let start = startSnap, let end = endSnap,
-                       let pA = model.viewport.projectModelPoint(start.position),
-                       let pB = model.viewport.projectModelPoint(end.position) {
-                        let a = start.position
-                        let b = end.position
-                        let cornerX = SIMD3<Float>(b.x, a.y, a.z)
-                        let cornerXY = SIMD3<Float>(b.x, b.y, a.z)
-
-                        // Dashed ΔX, ΔY, ΔZ component lines
-                        if abs(b.x - a.x) > 1e-3,
-                           let pCornerX = model.viewport.projectModelPoint(cornerX),
-                           hypot(pCornerX.x - pA.x, pCornerX.y - pA.y) > 8 {
-                            var pathX = Path()
-                            pathX.move(to: pA)
-                            pathX.addLine(to: pCornerX)
-                            ctx.stroke(
-                                pathX,
-                                with: .color(Color(red: 0.95, green: 0.32, blue: 0.32).opacity(0.82)),
-                                style: StrokeStyle(lineWidth: 1.3, lineCap: .round, dash: [4, 3])
-                            )
-                        }
-                        if abs(b.y - a.y) > 1e-3,
-                           let pCornerX = model.viewport.projectModelPoint(cornerX),
-                           let pCornerXY = model.viewport.projectModelPoint(cornerXY),
-                           hypot(pCornerXY.x - pCornerX.x, pCornerXY.y - pCornerX.y) > 8 {
-                            var pathY = Path()
-                            pathY.move(to: pCornerX)
-                            pathY.addLine(to: pCornerXY)
-                            ctx.stroke(
-                                pathY,
-                                with: .color(Color(red: 0.28, green: 0.86, blue: 0.48).opacity(0.82)),
-                                style: StrokeStyle(lineWidth: 1.3, lineCap: .round, dash: [4, 3])
-                            )
-                        }
-                        if abs(b.z - a.z) > 1e-3,
-                           let pCornerXY = model.viewport.projectModelPoint(cornerXY),
-                           hypot(pB.x - pCornerXY.x, pB.y - pCornerXY.y) > 8 {
-                            var pathZ = Path()
-                            pathZ.move(to: pCornerXY)
-                            pathZ.addLine(to: pB)
-                            ctx.stroke(
-                                pathZ,
-                                with: .color(Color(red: 0.35, green: 0.68, blue: 0.98).opacity(0.85)),
-                                style: StrokeStyle(lineWidth: 1.3, lineCap: .round, dash: [4, 3])
-                            )
-                        }
-
-                        // Dark halo + bright amber-gold measurement line
-                        var mainLine = Path()
-                        mainLine.move(to: pA)
-                        mainLine.addLine(to: pB)
-                        ctx.stroke(
-                            mainLine,
-                            with: .color(Color.black.opacity(0.65)),
-                            style: StrokeStyle(lineWidth: 4.2, lineCap: .round)
-                        )
-                        ctx.stroke(
-                            mainLine,
-                            with: .color(Theme.accent.swiftUI),
-                            style: StrokeStyle(lineWidth: 2.2, lineCap: .round)
-                        )
-
-                        // Architectural perpendicular ticks at pA and pB
-                        let dx = pB.x - pA.x, dy = pB.y - pA.y
-                        let len = hypot(dx, dy)
-                        if len > 6 {
-                            let nx = -dy / len * 6.5
-                            let ny = dx / len * 6.5
-                            var ticks = Path()
-                            ticks.move(to: CGPoint(x: pA.x - nx, y: pA.y - ny))
-                            ticks.addLine(to: CGPoint(x: pA.x + nx, y: pA.y + ny))
-                            ticks.move(to: CGPoint(x: pB.x - nx, y: pB.y - ny))
-                            ticks.addLine(to: CGPoint(x: pB.x + nx, y: pB.y + ny))
-                            ctx.stroke(ticks, with: .color(Theme.accent.swiftUI), style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
-                        }
-
-                        drawSnapMarker(in: &ctx, at: pA, kind: start.kind)
-                        drawSnapMarker(in: &ctx, at: pB, kind: end.kind)
-                    }
-
-                    // 3. Draw live hover snap marker
-                    if let hover = hoverSnap,
-                       let pHover = model.viewport.projectModelPoint(hover.position) {
-                        drawSnapMarker(in: &ctx, at: pHover, kind: hover.kind)
-                    }
-                }
-
-                // Floating midpoint distance pill
-                if let start = startSnap, let end = endSnap,
-                   let pA = model.viewport.projectModelPoint(start.position),
-                   let pB = model.viewport.projectModelPoint(end.position) {
-                    let dist = simd_distance(start.position, end.position)
-                    if dist > 1e-5 {
-                        let mid = CGPoint(x: (pA.x + pB.x) * 0.5, y: (pA.y + pB.y) * 0.5 - 14)
-                        Text(DocumentModel.formatDistance(dist, compact: true))
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .foregroundStyle(Color.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(
-                                Capsule()
-                                    .fill(Theme.panel.swiftUI.opacity(0.94))
-                                    .overlay(Capsule().strokeBorder(Theme.accent.swiftUI, lineWidth: 1.2))
-                            )
-                            .shadow(color: .black.opacity(0.45), radius: 5, y: 2)
-                            .position(mid)
-                    }
-                }
-
-                // Floating snap kind badge near cursor
-                if let hover = hoverSnap,
-                   let pHover = model.viewport.projectModelPoint(hover.position) {
-                    let badgeColor = Self.snapColor(for: hover.kind)
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(badgeColor)
-                            .frame(width: 6, height: 6)
-                        Text(DocumentModel.snapKindLabel(hover.kind))
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Theme.text.swiftUI)
-                    }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2.5)
-                    .background(
-                        Capsule()
-                            .fill(Theme.panel.swiftUI.opacity(0.92))
-                            .overlay(Capsule().strokeBorder(badgeColor.opacity(0.75), lineWidth: 1))
-                    )
-                    .shadow(color: .black.opacity(0.35), radius: 4, y: 1)
-                    .position(x: pHover.x + 36, y: pHover.y + 18)
-                }
-            }
-        }
-    }
-
-    private func drawSnapMarker(in ctx: inout GraphicsContext, at pt: CGPoint, kind: MeasureSnap.Kind) {
-        let color = Self.snapColor(for: kind)
-        let r: CGFloat = 6.5
-        switch kind {
-        case .vertex:
-            // Diamond + center dot for Endpoint / Vertex
-            var diamond = Path()
-            diamond.move(to: CGPoint(x: pt.x, y: pt.y - r - 1.5))
-            diamond.addLine(to: CGPoint(x: pt.x + r + 1.5, y: pt.y))
-            diamond.addLine(to: CGPoint(x: pt.x, y: pt.y + r + 1.5))
-            diamond.addLine(to: CGPoint(x: pt.x - r - 1.5, y: pt.y))
-            diamond.closeSubpath()
-            ctx.stroke(diamond, with: .color(.black.opacity(0.7)), style: StrokeStyle(lineWidth: 3.2))
-            ctx.stroke(diamond, with: .color(color), style: StrokeStyle(lineWidth: 1.8))
-            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2.5, y: pt.y - 2.5, width: 5, height: 5)), with: .color(color))
-        case .midpoint:
-            // Triangle for Midpoint
-            var tri = Path()
-            tri.move(to: CGPoint(x: pt.x, y: pt.y - r - 1.5))
-            tri.addLine(to: CGPoint(x: pt.x + r + 1.5, y: pt.y + r))
-            tri.addLine(to: CGPoint(x: pt.x - r - 1.5, y: pt.y + r))
-            tri.closeSubpath()
-            ctx.stroke(tri, with: .color(.black.opacity(0.7)), style: StrokeStyle(lineWidth: 3.2))
-            ctx.stroke(tri, with: .color(color), style: StrokeStyle(lineWidth: 1.8))
-            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2.2, y: pt.y - 2.2, width: 4.4, height: 4.4)), with: .color(color))
-        case .edge:
-            // Square for On-Edge
-            let rect = CGRect(x: pt.x - r + 1, y: pt.y - r + 1, width: (r - 1) * 2, height: (r - 1) * 2)
-            ctx.stroke(Path(rect), with: .color(.black.opacity(0.7)), style: StrokeStyle(lineWidth: 3.2))
-            ctx.stroke(Path(rect), with: .color(color), style: StrokeStyle(lineWidth: 1.8))
-            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2.2, y: pt.y - 2.2, width: 4.4, height: 4.4)), with: .color(color))
-        case .face, .plane:
-            // Circle + crosshair for Surface / Plane
-            let circle = Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r * 2, height: r * 2))
-            ctx.stroke(circle, with: .color(.black.opacity(0.65)), style: StrokeStyle(lineWidth: 3.0))
-            ctx.stroke(circle, with: .color(color), style: StrokeStyle(lineWidth: 1.6))
-            ctx.fill(Path(ellipseIn: CGRect(x: pt.x - 2, y: pt.y - 2, width: 4, height: 4)), with: .color(color))
         }
     }
 }
@@ -1987,7 +2496,7 @@ struct SidebarView: View {
                                     layerColor: model.layerDisplayColor(index),
                                     isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
                                     isSelected: model.selectedLayerIndex == index,
-                                    isHoveredFromViewport: model.hoveredLayerIndex == index,
+                                    isHoveredFromViewport: model.hoveredLayerIndex == index || model.constructionProgress?.currentLayerIndex == index,
                                     canSolo: skp.layers.count > 1,
                                     indented: false,
                                     onToggle: { model.toggleLayer(index) },
@@ -2040,7 +2549,7 @@ struct SidebarView: View {
                                                 layerColor: model.layerDisplayColor(index),
                                                 isVisible: model.layerVisible.indices.contains(index) && model.layerVisible[index],
                                                 isSelected: model.selectedLayerIndex == index,
-                                                isHoveredFromViewport: model.hoveredLayerIndex == index,
+                                                isHoveredFromViewport: model.hoveredLayerIndex == index || model.constructionProgress?.currentLayerIndex == index,
                                                 canSolo: skp.layers.count > 1,
                                                 indented: true,
                                                 onToggle: { model.toggleLayer(index) },

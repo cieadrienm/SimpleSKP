@@ -14,15 +14,33 @@ final class SKPDocument: NSDocument {
     private var loadStarted = false
 
     override class var autosavesInPlace: Bool { false }
-    override class var readableTypes: [String] { [DocumentController.skpType, DocumentController.dwgType, DocumentController.dxfType] }
+    override class var readableTypes: [String] {
+        [
+            DocumentController.skpType,
+            DocumentController.dwgType,
+            DocumentController.dxfType,
+            DocumentController.daeType,
+            DocumentController.objType,
+            DocumentController.sskpType,
+        ]
+    }
     override class var writableTypes: [String] { [] }
     override class func isNativeType(_ type: String) -> Bool { false }
     override var isDocumentEdited: Bool { false }
 
     override func read(from url: URL, ofType typeName: String) throws {
         let info = try SKPFileInfo.read(url)
+        let project: SSKPProject? = url.pathExtension.lowercased() == "sskp"
+            ? (try? SSKPProject.read(from: url))
+            : nil
         // AppKit reads on the main thread: concurrent reading is off by default.
-        MainActor.assumeIsolated { model.info = info }
+        MainActor.assumeIsolated {
+            model.info = info
+            if let project {
+                model.sskpURL = url
+                model.pendingSSKPProject = project
+            }
+        }
     }
 
     override func makeWindowControllers() {
@@ -55,15 +73,19 @@ final class SKPDocument: NSDocument {
                         model.state = .loading(SKPReader.Progress(
                             phase: L("Assemblage de la géométrie GPU…", "Assembling GPU geometry…"),
                             faces: skp.stats.faces,
-                            fraction: 0.94
+                            fraction: 0.94,
+                            edges: skp.stats.edges,
+                            blocks: skp.stats.definitions,
+                            layers: skp.layers.count
                         ))
                     }
                 }
-                let scene = ViewportScene(model: skp)
+                let useProgressive = skp.layers.filter(\.isVisible).count > 1
+                let scene = ViewportScene(model: skp, deferInitialLayerBuild: useProgressive)
                 DispatchQueue.main.async {
                     guard !cancelled.withLock({ $0 }) else { return Self.removeTextures(of: skp) }
                     RemoteControlServer.shared.attachFeedbackIfNeeded(to: model)
-                    model.present(scene, seconds: Date().timeIntervalSince(start))
+                    model.present(scene, seconds: Date().timeIntervalSince(start), progressiveConstruction: useProgressive)
                 }
             } catch {
                 DispatchQueue.main.async { model.fail(error) }
@@ -73,6 +95,7 @@ final class SKPDocument: NSDocument {
 
     override func close() {
         cancelled.withLock { $0 = true }
+        model.cancelProgressiveConstruction()
         if let skp = model.skp { Self.removeTextures(of: skp) }
         super.close()
     }
@@ -85,6 +108,10 @@ final class SKPDocument: NSDocument {
 
     @objc func openInSketchUp(_ sender: Any?) { model.openInSketchUp() }
     @objc func revealInFinder(_ sender: Any?) { model.revealInFinder() }
+    @objc func saveSSKP(_ sender: Any?) { model.saveSSKPProject() }
+    @objc func saveSSKPAs(_ sender: Any?) { model.saveSSKPProjectAs() }
+    @objc func performUndo(_ sender: Any?) { model.undo() }
+    @objc func performRedo(_ sender: Any?) { model.redo() }
     @objc func copyImage(_ sender: Any?) { model.copyImage() }
     @objc func exportImage(_ sender: Any?) { model.exportImage() }
     @objc func exportVectorPDF(_ sender: Any?) { model.exportVectorPDF() }
@@ -97,6 +124,7 @@ final class SKPDocument: NSDocument {
     @objc func toggleShadows(_ sender: Any?) { model.toggleShadows() }
     @objc func toggleLightingMode(_ sender: Any?) { model.setLightingMode(model.lightingMode == .sun ? .point : .sun) }
     @objc func toggleAmbientOcclusion(_ sender: Any?) { model.toggleAmbientOcclusion() }
+    @objc func hideSelectedLayer(_ sender: Any?) { model.hideSelectedLayer() }
     @objc func toggleMeasureTool(_ sender: Any?) { model.toggleMeasureTool() }
     @objc func toggleFreeFlight(_ sender: Any?) { model.toggleFreeFlight() }
     @objc func previousScene(_ sender: Any?) { model.previousScene() }
@@ -122,6 +150,15 @@ final class SKPDocument: NSDocument {
         case #selector(openInSketchUp(_:)):
             item.isHidden = model.sketchUpApp == nil   // SketchUp is optional (D1)
             return !item.isHidden
+        case #selector(saveSSKP(_:)), #selector(saveSSKPAs(_:)):
+            item.isHidden = !model.showsHiddenFeaturesUI
+            return !item.isHidden && model.isReady && model.underlyingModelURL != nil
+        case #selector(performUndo(_:)):
+            item.title = model.undoMenuTitle
+            return !isEditingText && model.canUndo
+        case #selector(performRedo(_:)):
+            item.title = model.redoMenuTitle
+            return !isEditingText && model.canRedo
         case #selector(revealInFinder(_:)):
             return true
         case #selector(toggleSidebarPanel(_:)):
@@ -159,6 +196,9 @@ final class SKPDocument: NSDocument {
             return model.isReady
         case #selector(previousScene(_:)), #selector(nextScene(_:)), #selector(previousSceneSlow(_:)), #selector(nextSceneSlow(_:)):
             return model.isReady && !(model.skp?.scenes.isEmpty ?? true)
+        case #selector(hideSelectedLayer(_:)):
+            return model.isReady && model.isCAD && !isEditingText && !model.isFreeFlying
+                && (model.selectedLayerIndex != nil || model.selectedLayerGroupID != nil || model.hoveredLayerIndex != nil)
         case #selector(resetView(_:)), #selector(zoomExtents(_:)):
             return model.isReady && !isEditingText && !model.isFreeFlying
         case #selector(copyImage(_:)), #selector(exportImage(_:)), #selector(exportVectorPDF(_:)), #selector(lookStandard(_:)):

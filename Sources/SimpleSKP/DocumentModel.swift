@@ -17,6 +17,16 @@ final class DocumentModel {
         case failed(Error)
     }
 
+    struct ViewConstructionProgress {
+        var currentLayerIndex: Int
+        var currentLayerName: String
+        var completedLayers: Int
+        var totalLayers: Int
+        var edgesBuilt: Int
+        var facesBuilt: Int
+        var fraction: Double
+    }
+
     var info: SKPFileInfo? {
         didSet {
             thumbnail = info?.thumbnailPNG.flatMap(NSImage.init(data:))
@@ -47,12 +57,25 @@ final class DocumentModel {
     var ambientOcclusionEnabled = Preferences.ambientOcclusionEnabled
     var ambientOcclusionIntensity = Preferences.ambientOcclusionIntensity
     var shadingStyle: ShadingStyle = .textured
+    enum ProjectorPickMode: Equatable {
+        case none
+        case position
+        case target
+    }
+
     var backdropStyle: BackdropStyle = Preferences.backdropStyle
     var customBackdropColor: SIMD3<Float> = Preferences.customBackdropColor
     var lightingMode: LightingMode = .sun
     var pointLights: [ViewportPointLight] = []
     var selectedPointLightIndex: Int = 0
     var showsPointLightGizmo: Bool = true
+    var hiddenFeaturesEnabled: Bool = Preferences.hiddenFeatures
+    var videoProjectors: [VideoProjector] = []
+    var selectedVideoProjectorIndex: Int = 0
+    var projectorPickMode: ProjectorPickMode = .none
+    var sskpURL: URL? = nil
+    var pendingSSKPProject: SSKPProject? = nil
+    @ObservationIgnored private var hiddenFeaturesObserver: NSObjectProtocol?
     var sunAzimuthDegrees: Float = -135
     var sunElevationDegrees: Float = 45
     var sunIntensity: Float = Rendering.defaultSunIntensity
@@ -72,6 +95,9 @@ final class DocumentModel {
     var measureEnd: MeasureSnap? = nil
     var measureHoverSnap: MeasureSnap? = nil
     var loadSeconds: Double?
+    /// Didactic visual construction state shown while layers are progressively built and revealed in the viewport.
+    var constructionProgress: ViewConstructionProgress? = nil
+    @ObservationIgnored private var constructionTimer: Timer?
     /// Mirrors the viewport, which ends free fly itself (Esc, lost focus): the status bar shows how to get out.
     private(set) var isFreeFlying = false
     /// Short transient toast shown in the viewport header (e.g. "Image copiée").
@@ -81,11 +107,307 @@ final class DocumentModel {
     /// Callback invoked when the camera state changes so `RemoteControlServer` can emit OSC feedback if enabled.
     @ObservationIgnored var onCameraFeedback: ((DocumentModel) -> Void)?
 
+    // MARK: - Undo / Redo (100 levels)
+
+    static let maxUndoLevels = 100
+    private static let undoCoalesceWindow: TimeInterval = 0.85
+
+    struct UndoSnapshot: Equatable {
+        var selectedScene: Int?
+        var activeStandardView: StandardView?
+        var layerVisible: [Bool]
+        var selectedLayerIndex: Int?
+        var selectedLayerGroupID: String?
+        var showsEdges: Bool
+        var showsGrid: Bool
+        var isPerspective: Bool
+        var shadowsEnabled: Bool
+        var ambientOcclusionEnabled: Bool
+        var ambientOcclusionIntensity: Float
+        var shadingStyle: ShadingStyle
+        var backdropStyle: BackdropStyle
+        var customBackdropColor: SIMD3<Float>
+        var lightingMode: LightingMode
+        var pointLights: [ViewportPointLight]
+        var selectedPointLightIndex: Int
+        var showsPointLightGizmo: Bool
+        var sunAzimuthDegrees: Float
+        var sunElevationDegrees: Float
+        var sunIntensity: Float
+        var ambientIntensity: Float
+        var videoProjectors: [VideoProjector]
+        var selectedVideoProjectorIndex: Int
+        var isMeasuring: Bool
+        var measureStart: MeasureSnap?
+        var measureEnd: MeasureSnap?
+        var cameraPose: CameraRig.Pose
+        var cameraFOV: Float
+        var cameraExposure: Float
+        var cameraOrthoScale: Float
+    }
+
+    struct UndoEntry {
+        var actionName: String
+        var coalesceKey: String?
+        var timestamp: TimeInterval
+        var restoresCameraPose: Bool
+        var before: UndoSnapshot
+        var after: UndoSnapshot
+    }
+
+    private(set) var undoStack: [UndoEntry] = []
+    private(set) var redoStack: [UndoEntry] = []
+    @ObservationIgnored private var isRecordingOrApplyingUndo = false
+
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
+    var undoActionName: String? { undoStack.last?.actionName }
+    var redoActionName: String? { redoStack.last?.actionName }
+
+    var undoMenuTitle: String {
+        if let name = undoActionName, !name.isEmpty {
+            return L("Annuler \(name)", "Undo \(name)")
+        }
+        return L("Annuler", "Undo")
+    }
+
+    var redoMenuTitle: String {
+        if let name = redoActionName, !name.isEmpty {
+            return L("Rétablir \(name)", "Redo \(name)")
+        }
+        return L("Rétablir", "Redo")
+    }
+
+    func clearUndoHistory() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+    }
+
+    private func captureUndoSnapshot() -> UndoSnapshot {
+        let pose = isReady ? viewport.targetCameraPose : CameraRig.Pose(
+            position: cameraPosition,
+            yaw: cameraYaw,
+            pitch: cameraPitch,
+            distance: cameraDistance
+        )
+        let ortho = isReady ? viewport.targetOrthographicScale : cameraOrthoScale
+        let fov = isReady ? viewport.fieldOfView : cameraFOV
+        let exp = isReady ? viewport.exposureOffset : cameraExposure
+        return UndoSnapshot(
+            selectedScene: selectedScene,
+            activeStandardView: activeStandardView,
+            layerVisible: layerVisible,
+            selectedLayerIndex: selectedLayerIndex,
+            selectedLayerGroupID: selectedLayerGroupID,
+            showsEdges: showsEdges,
+            showsGrid: showsGrid,
+            isPerspective: isPerspective,
+            shadowsEnabled: shadowsEnabled,
+            ambientOcclusionEnabled: ambientOcclusionEnabled,
+            ambientOcclusionIntensity: ambientOcclusionIntensity,
+            shadingStyle: shadingStyle,
+            backdropStyle: backdropStyle,
+            customBackdropColor: customBackdropColor,
+            lightingMode: lightingMode,
+            pointLights: pointLights,
+            selectedPointLightIndex: selectedPointLightIndex,
+            showsPointLightGizmo: showsPointLightGizmo,
+            sunAzimuthDegrees: sunAzimuthDegrees,
+            sunElevationDegrees: sunElevationDegrees,
+            sunIntensity: sunIntensity,
+            ambientIntensity: ambientIntensity,
+            videoProjectors: videoProjectors,
+            selectedVideoProjectorIndex: selectedVideoProjectorIndex,
+            isMeasuring: isMeasuring,
+            measureStart: measureStart,
+            measureEnd: measureEnd,
+            cameraPose: pose,
+            cameraFOV: fov,
+            cameraExposure: exp,
+            cameraOrthoScale: ortho
+        )
+    }
+
+    func recordUndoable(
+        _ actionName: String,
+        coalesceKey: String? = nil,
+        restoresCameraPose: Bool = false,
+        _ body: () -> Void
+    ) {
+        guard !isRecordingOrApplyingUndo else {
+            body()
+            return
+        }
+        let before = captureUndoSnapshot()
+        isRecordingOrApplyingUndo = true
+        body()
+        isRecordingOrApplyingUndo = false
+        let after = captureUndoSnapshot()
+        guard before != after else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if let key = coalesceKey,
+           redoStack.isEmpty,
+           let last = undoStack.last,
+           last.coalesceKey == key,
+           now - last.timestamp <= Self.undoCoalesceWindow {
+            undoStack[undoStack.count - 1].after = after
+            undoStack[undoStack.count - 1].timestamp = now
+            undoStack[undoStack.count - 1].actionName = actionName
+            return
+        }
+
+        let entry = UndoEntry(
+            actionName: actionName,
+            coalesceKey: coalesceKey,
+            timestamp: now,
+            restoresCameraPose: restoresCameraPose,
+            before: before,
+            after: after
+        )
+        undoStack.append(entry)
+        if undoStack.count > Self.maxUndoLevels {
+            undoStack.removeFirst(undoStack.count - Self.maxUndoLevels)
+        }
+        redoStack.removeAll()
+    }
+
+    private func applyUndoSnapshot(_ snapshot: UndoSnapshot, restoresCameraPose: Bool) {
+        let wasRecording = isRecordingOrApplyingUndo
+        isRecordingOrApplyingUndo = true
+        defer { isRecordingOrApplyingUndo = wasRecording }
+
+        selectedScene = snapshot.selectedScene
+        activeStandardView = snapshot.activeStandardView
+
+        if layerVisible != snapshot.layerVisible {
+            layerVisible = snapshot.layerVisible
+            scene?.setLayers(layerVisible)
+            updateVisibleSize()
+        }
+        selectedLayerIndex = snapshot.selectedLayerIndex
+        selectedLayerGroupID = snapshot.selectedLayerGroupID
+
+        showsEdges = snapshot.showsEdges
+        Preferences.showsEdges = showsEdges
+        showsGrid = snapshot.showsGrid
+        Preferences.showsGrid = showsGrid
+        shadowsEnabled = snapshot.shadowsEnabled
+        Preferences.shadowsEnabled = shadowsEnabled
+        ambientOcclusionEnabled = snapshot.ambientOcclusionEnabled
+        Preferences.ambientOcclusionEnabled = ambientOcclusionEnabled
+        ambientOcclusionIntensity = snapshot.ambientOcclusionIntensity
+        Preferences.ambientOcclusionIntensity = ambientOcclusionIntensity
+        shadingStyle = snapshot.shadingStyle
+        backdropStyle = snapshot.backdropStyle
+        Preferences.backdropStyle = backdropStyle
+        customBackdropColor = snapshot.customBackdropColor
+        Preferences.customBackdropColor = customBackdropColor
+
+        lightingMode = snapshot.lightingMode
+        pointLights = snapshot.pointLights
+        selectedPointLightIndex = snapshot.selectedPointLightIndex
+        showsPointLightGizmo = snapshot.showsPointLightGizmo
+        sunAzimuthDegrees = snapshot.sunAzimuthDegrees
+        sunElevationDegrees = snapshot.sunElevationDegrees
+        sunIntensity = snapshot.sunIntensity
+        ambientIntensity = snapshot.ambientIntensity
+
+        if let scene {
+            scene.showsEdges = showsEdges
+            scene.showsGrid = showsGrid
+            scene.shadowsEnabled = shadowsEnabled
+            scene.shadingStyle = shadingStyle
+            scene.customBackdropColor = customBackdropColor
+            scene.backdropStyle = backdropStyle
+            scene.sunAzimuthDegrees = sunAzimuthDegrees
+            scene.sunElevationDegrees = sunElevationDegrees
+            scene.sunIntensity = sunIntensity
+            scene.ambientIntensity = ambientIntensity
+            scene.showsPointLightGizmo = showsPointLightGizmo
+            scene.pointLights = pointLights
+            scene.lightingMode = lightingMode
+        }
+
+        viewport.ambientOcclusionIntensity = CGFloat(ambientOcclusionIntensity)
+        viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
+
+        videoProjectors = snapshot.videoProjectors
+        selectedVideoProjectorIndex = snapshot.selectedVideoProjectorIndex
+        if videoProjectors.isEmpty {
+            cancelProjectorPick()
+        }
+        syncProjectorsToScene()
+
+        measureStart = snapshot.measureStart
+        measureEnd = snapshot.measureEnd
+        if isMeasuring != snapshot.isMeasuring {
+            isMeasuring = snapshot.isMeasuring
+            viewport.isMeasuring = snapshot.isMeasuring
+        }
+        syncMeasurementToScene()
+
+        if restoresCameraPose {
+            isPerspective = snapshot.isPerspective
+            Preferences.isPerspective = snapshot.isPerspective
+            cameraFOV = snapshot.cameraFOV
+            cameraExposure = snapshot.cameraExposure
+            cameraOrthoScale = snapshot.cameraOrthoScale
+            cameraPosition = snapshot.cameraPose.position
+            cameraYaw = snapshot.cameraPose.yaw
+            cameraPitch = snapshot.cameraPose.pitch
+            cameraDistance = snapshot.cameraPose.distance
+            if isReady {
+                viewport.restoreCameraState(
+                    pose: snapshot.cameraPose,
+                    isPerspective: snapshot.isPerspective,
+                    fovDegrees: snapshot.cameraFOV,
+                    orthographicScale: snapshot.cameraOrthoScale,
+                    exposureOffset: snapshot.cameraExposure,
+                    animated: true
+                )
+                syncCameraStateFromViewport()
+            }
+        }
+
+        viewport.requestRedraw()
+    }
+
+    func undo() {
+        guard let entry = undoStack.popLast() else { return }
+        applyUndoSnapshot(entry.before, restoresCameraPose: entry.restoresCameraPose)
+        redoStack.append(entry)
+        if redoStack.count > Self.maxUndoLevels {
+            redoStack.removeFirst(redoStack.count - Self.maxUndoLevels)
+        }
+        flash(L("Annuler : \(entry.actionName)", "Undo: \(entry.actionName)"))
+    }
+
+    func redo() {
+        guard let entry = redoStack.popLast() else { return }
+        applyUndoSnapshot(entry.after, restoresCameraPose: entry.restoresCameraPose)
+        undoStack.append(entry)
+        if undoStack.count > Self.maxUndoLevels {
+            undoStack.removeFirst(undoStack.count - Self.maxUndoLevels)
+        }
+        flash(L("Rétablir : \(entry.actionName)", "Redo: \(entry.actionName)"))
+    }
+
     init() {
+        hiddenFeaturesObserver = NotificationCenter.default.addObserver(
+            forName: .hiddenFeaturesChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.hiddenFeaturesEnabled = Preferences.hiddenFeatures
+            }
+        }
         viewport.onFreeFlyingChange = { [weak self] in
             guard let self else { return }
             self.isFreeFlying = $0
             if $0, self.isMeasuring { self.setMeasureTool(false) }
+            if $0, self.projectorPickMode != .none { self.cancelProjectorPick() }
         }
         viewport.onPoseChange = { [weak self] _, _, _ in
             guard let self else { return }
@@ -104,6 +426,9 @@ final class DocumentModel {
         viewport.onSelectLayer = { [weak self] index in
             self?.selectLayerFromViewport(index)
         }
+        viewport.onHideSelectedLayer = { [weak self] in
+            self?.hideSelectedLayer()
+        }
         viewport.onMeasureHover = { [weak self] snap, shift in
             self?.handleMeasureHover(snap, shiftLocked: shift)
         }
@@ -112,6 +437,12 @@ final class DocumentModel {
         }
         viewport.onMeasureEscape = { [weak self] in
             self?.handleMeasureEscape()
+        }
+        viewport.onPickProjectorPoint = { [weak self] snap in
+            self?.handleProjectorPointPick(snap)
+        }
+        viewport.onCancelProjectorPick = { [weak self] in
+            self?.cancelProjectorPick()
         }
     }
 
@@ -172,10 +503,18 @@ final class DocumentModel {
         let multiGroups = model.layerGroups.filter { !$0.isSingleLayer }
         expandedLayerGroups = model.layers.count <= 32 ? Set(multiGroups.map(\.id)) : []
         showSidebar = Preferences.showSidebar && (!model.scenes.isEmpty || model.layers.count > 1)
+        clearUndoHistory()
     }
 
     /// Main thread, once the scene is built off-main.
-    func present(_ scene: ViewportScene, seconds: Double) {
+    func present(_ scene: ViewportScene, seconds: Double, progressiveConstruction: Bool = false) {
+        cancelProgressiveConstruction()
+        let wasRecording = isRecordingOrApplyingUndo
+        isRecordingOrApplyingUndo = true
+        defer {
+            isRecordingOrApplyingUndo = wasRecording
+            clearUndoHistory()
+        }
         setModel(scene.model)
         loadSeconds = seconds
         // AutoCAD files (and pure-edge models) always display edges on load and default to a dark studio canvas for crisp CAD line contrast.
@@ -217,6 +556,98 @@ final class DocumentModel {
         }
         isPerspective = viewport.isPerspective
         syncCameraStateFromViewport()
+
+        if let project = pendingSSKPProject {
+            pendingSSKPProject = nil
+            scene.finishDeferredLayerBuild()
+            applySSKPProject(project)
+            return
+        }
+
+        if !videoProjectors.isEmpty {
+            scene.selectedVideoProjectorIndex = selectedVideoProjectorIndex
+            scene.videoProjectors = videoProjectors
+        }
+
+        if progressiveConstruction {
+            startProgressiveConstruction(for: scene)
+        }
+    }
+
+    private func startProgressiveConstruction(for scene: ViewportScene) {
+        let primaryLayers = scene.orderedVisiblePrimaryLayers
+        guard primaryLayers.count > 1 else {
+            scene.finishDeferredLayerBuild()
+            updateVisibleSize()
+            viewport.requestRedraw()
+            return
+        }
+        let targetSteps = min(max(primaryLayers.count, 4), 18)
+        let batchSize = max(1, (primaryLayers.count + targetSteps - 1) / targetSteps)
+        var batches: [[Int]] = []
+        var idx = 0
+        while idx < primaryLayers.count {
+            let end = min(idx + batchSize, primaryLayers.count)
+            batches.append(Array(primaryLayers[idx..<end]))
+            idx = end
+        }
+        var currentBatchIndex = 0
+        let totalLayers = primaryLayers.count
+        var completedLayers = 0
+
+        func stepBatch() {
+            guard self.scene === scene, currentBatchIndex < batches.count else {
+                finishProgressiveConstruction()
+                return
+            }
+            let batch = batches[currentBatchIndex]
+            currentBatchIndex += 1
+            completedLayers += batch.count
+            let built = scene.buildVisibleSets(forPrimaryLayers: Set(batch))
+            let repLayer = batch.last ?? 0
+            let layerName = scene.model.layers.indices.contains(repLayer) ? scene.model.layers[repLayer].name : "Layer0"
+            if hoveredLayerIndex == nil, scene.activePulseLayers.isEmpty {
+                scene.setHoveredLayers([repLayer])
+            }
+            constructionProgress = ViewConstructionProgress(
+                currentLayerIndex: repLayer,
+                currentLayerName: layerName,
+                completedLayers: completedLayers,
+                totalLayers: totalLayers,
+                edgesBuilt: built.edgesBuilt,
+                facesBuilt: built.facesBuilt,
+                fraction: Double(completedLayers) / Double(max(1, totalLayers))
+            )
+            viewport.requestRedraw()
+        }
+
+        // Build first batch immediately so the view is never completely empty on frame 1
+        stepBatch()
+        let timer = Timer(timeInterval: 0.028, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard self != nil else { return }
+                stepBatch()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        constructionTimer = timer
+    }
+
+    func finishProgressiveConstruction() {
+        cancelProgressiveConstruction()
+        guard let scene else { return }
+        scene.finishDeferredLayerBuild()
+        if hoveredLayerIndex == nil {
+            scene.setHoveredLayers([])
+        }
+        updateVisibleSize()
+        viewport.requestRedraw()
+    }
+
+    func cancelProgressiveConstruction() {
+        constructionTimer?.invalidate()
+        constructionTimer = nil
+        constructionProgress = nil
     }
 
     func fail(_ error: Error) {
@@ -231,19 +662,21 @@ final class DocumentModel {
 
     func selectScene(_ index: Int, slow: Bool? = nil) {
         guard let skp, skp.scenes.indices.contains(index) else { return }
-        selectedScene = index
-        activeStandardView = nil
-        if let hidden = skp.scenes[index].hiddenLayers.map(Set.init) {
-            layerVisible = layerVisible.indices.map { !hidden.contains($0) }
-            scene?.setLayers(layerVisible) // at once: no layer set visible only midway gets built
-            updateVisibleSize()
-        }
-        if isReady, let camera = skp.scenes[index].camera {
-            let useSlow = slow ?? Self.isShiftPressed
-            let duration = useSlow ? CameraRig.slowGlideDuration : CameraRig.defaultGlideDuration
-            viewport.apply(camera: camera, animated: true, duration: duration)
-            isPerspective = camera.isPerspective
-            syncCameraStateFromViewport()
+        recordUndoable(L("Scène", "Scene"), restoresCameraPose: true) {
+            selectedScene = index
+            activeStandardView = nil
+            if let hidden = skp.scenes[index].hiddenLayers.map(Set.init) {
+                layerVisible = layerVisible.indices.map { !hidden.contains($0) }
+                scene?.setLayers(layerVisible) // at once: no layer set visible only midway gets built
+                updateVisibleSize()
+            }
+            if isReady, let camera = skp.scenes[index].camera {
+                let useSlow = slow ?? Self.isShiftPressed
+                let duration = useSlow ? CameraRig.slowGlideDuration : CameraRig.defaultGlideDuration
+                viewport.apply(camera: camera, animated: true, duration: duration)
+                isPerspective = camera.isPerspective
+                syncCameraStateFromViewport()
+            }
         }
     }
 
@@ -259,16 +692,18 @@ final class DocumentModel {
 
     func toggleLayer(_ index: Int) {
         guard layerVisible.indices.contains(index) else { return }
-        layerVisible[index].toggle()
-        scene?.setLayer(index, visible: layerVisible[index])
-        updateVisibleSize()
-        viewport.requestRedraw()
+        recordUndoable(L("Visibilité du calque", "Layer Visibility")) {
+            layerVisible[index].toggle()
+            scene?.setLayer(index, visible: layerVisible[index])
+            updateVisibleSize()
+            viewport.requestRedraw()
+        }
     }
 
-    /// Updates the subtle hover highlight in the viewport and sidebar when the mouse moves over geometry.
+    /// Updates the subtle hover highlight in the viewport and sidebar when the mouse moves over geometry (AutoCAD mode only).
     func setHoveredLayer(_ index: Int?) {
         let validIndex: Int?
-        if let index, let skp, skp.layers.indices.contains(index) {
+        if isCAD, let index, let skp, skp.layers.indices.contains(index) {
             validIndex = index
         } else {
             validIndex = nil
@@ -306,9 +741,9 @@ final class DocumentModel {
         }
     }
 
-    /// Clicking an object directly in the viewport: reveals and expands its group in the hierarchy, scrolls to it, and selects + pulses it.
+    /// Clicking an object directly in the viewport (AutoCAD mode only): reveals and expands its group in the hierarchy, scrolls to it, and selects + pulses it.
     func selectLayerFromViewport(_ index: Int) {
-        guard let skp, skp.layers.indices.contains(index) else { return }
+        guard isCAD, let skp, skp.layers.indices.contains(index) else { return }
         if !showSidebar, skp.layers.count > 1 || !skp.scenes.isEmpty {
             withAnimation(.spring(duration: 0.22, bounce: 0.0)) {
                 showSidebar = true
@@ -328,6 +763,44 @@ final class DocumentModel {
         scrollToLayerTrigger &+= 1
     }
 
+    /// Pressing `H` in AutoCAD mode hides the currently selected object/layer (or selected layer group, or hovered layer if none is selected).
+    func hideSelectedLayer() {
+        guard isCAD, let skp else { return }
+        recordUndoable(L("Masquer le calque", "Hide Layer")) {
+            if let idx = selectedLayerIndex, layerVisible.indices.contains(idx), layerVisible[idx] {
+                layerVisible[idx] = false
+                scene?.setLayer(idx, visible: false)
+                if hoveredLayerIndex == idx {
+                    setHoveredLayer(nil)
+                }
+                updateVisibleSize()
+                viewport.requestRedraw()
+                flash(L("Calque « \(skp.layers[idx].name) » masqué (H)", "Layer “\(skp.layers[idx].name)” hidden (H)"))
+                return
+            }
+            if let groupID = selectedLayerGroupID,
+               let group = skp.layerGroups.first(where: { $0.id == groupID }),
+               isLayerGroupVisible(group) {
+                setLayerGroup(group, visible: false)
+                if let hoverIdx = hoveredLayerIndex, group.layerIndices.contains(hoverIdx) {
+                    setHoveredLayer(nil)
+                }
+                flash(L("Groupe « \(group.name) » masqué (H)", "Group “\(group.name)” hidden (H)"))
+                return
+            }
+            if let hoverIdx = hoveredLayerIndex, layerVisible.indices.contains(hoverIdx), layerVisible[hoverIdx] {
+                selectedLayerIndex = hoverIdx
+                selectedLayerGroupID = nil
+                layerVisible[hoverIdx] = false
+                scene?.setLayer(hoverIdx, visible: false)
+                setHoveredLayer(nil)
+                updateVisibleSize()
+                viewport.requestRedraw()
+                flash(L("Calque « \(skp.layers[hoverIdx].name) » masqué (H)", "Layer “\(skp.layers[hoverIdx].name)” hidden (H)"))
+            }
+        }
+    }
+
     /// Selects a layer group in the sidebar and triggers a brief brightness pulse on all visible layers in the group.
     func selectLayerGroup(_ group: SKPModel.LayerGroup) {
         selectedLayerGroupID = group.id
@@ -340,49 +813,58 @@ final class DocumentModel {
     /// Double-clicking a layer name in the sidebar: ensures it is visible, pulses it, and smoothly glides the camera to frame its geometry.
     func zoomToLayer(_ index: Int, animated: Bool = true) {
         guard let skp, skp.layers.indices.contains(index) else { return }
-        if layerVisible.indices.contains(index), !layerVisible[index] {
-            layerVisible[index] = true
-            scene?.setLayer(index, visible: true)
-            updateVisibleSize()
+        recordUndoable(L("Zoom sur le calque", "Zoom to Layer"), restoresCameraPose: true) {
+            if layerVisible.indices.contains(index), !layerVisible[index] {
+                layerVisible[index] = true
+                scene?.setLayer(index, visible: true)
+                updateVisibleSize()
+            }
+            selectLayer(index)
+            guard let bounds = scene?.bounds(forLayers: [index]) else { return }
+            activeStandardView = nil
+            viewport.frameBounds(min: bounds.min, max: bounds.max, animated: animated)
+            syncCameraStateFromViewport()
         }
-        selectLayer(index)
-        guard let bounds = scene?.bounds(forLayers: [index]) else { return }
-        activeStandardView = nil
-        viewport.frameBounds(min: bounds.min, max: bounds.max, animated: animated)
-        syncCameraStateFromViewport()
     }
 
     /// Double-clicking a layer group name in the sidebar: ensures its layers are visible, pulses them, and smoothly glides the camera to frame the group.
     func zoomToLayerGroup(_ group: SKPModel.LayerGroup, animated: Bool = true) {
-        if !isLayerGroupVisible(group) {
-            setLayerGroup(group, visible: true)
+        recordUndoable(L("Zoom sur le groupe", "Zoom to Group"), restoresCameraPose: true) {
+            if !isLayerGroupVisible(group) {
+                setLayerGroup(group, visible: true)
+            }
+            selectLayerGroup(group)
+            guard let bounds = scene?.bounds(forLayers: Set(group.layerIndices)) else { return }
+            activeStandardView = nil
+            viewport.frameBounds(min: bounds.min, max: bounds.max, animated: animated)
+            syncCameraStateFromViewport()
         }
-        selectLayerGroup(group)
-        guard let bounds = scene?.bounds(forLayers: Set(group.layerIndices)) else { return }
-        activeStandardView = nil
-        viewport.frameBounds(min: bounds.min, max: bounds.max, animated: animated)
-        syncCameraStateFromViewport()
     }
 
     func setAllLayers(visible: Bool) {
         guard !layerVisible.isEmpty else { return }
-        layerVisible = Array(repeating: visible, count: layerVisible.count)
-        scene?.setLayers(layerVisible)
-        updateVisibleSize()
-        viewport.requestRedraw()
+        let title = visible ? L("Afficher tous les calques", "Show All Layers") : L("Masquer tous les calques", "Hide All Layers")
+        recordUndoable(title) {
+            layerVisible = Array(repeating: visible, count: layerVisible.count)
+            scene?.setLayers(layerVisible)
+            updateVisibleSize()
+            viewport.requestRedraw()
+        }
     }
 
     /// Isolates a single layer (`Solo`), or restores all layers if it was already the only visible one.
     func soloLayer(_ index: Int) {
         guard layerVisible.indices.contains(index) else { return }
-        let isAlreadySolo = layerVisible.indices.allSatisfy { ($0 == index) == layerVisible[$0] }
-        if isAlreadySolo {
-            setAllLayers(visible: true)
-        } else {
-            layerVisible = layerVisible.indices.map { $0 == index }
-            scene?.setLayers(layerVisible)
-            updateVisibleSize()
-            viewport.requestRedraw()
+        recordUndoable(L("Isoler le calque", "Solo Layer")) {
+            let isAlreadySolo = layerVisible.indices.allSatisfy { ($0 == index) == layerVisible[$0] }
+            if isAlreadySolo {
+                setAllLayers(visible: true)
+            } else {
+                layerVisible = layerVisible.indices.map { $0 == index }
+                scene?.setLayers(layerVisible)
+                updateVisibleSize()
+                viewport.requestRedraw()
+            }
         }
     }
 
@@ -402,17 +884,19 @@ final class DocumentModel {
     }
 
     func setLayerGroup(_ group: SKPModel.LayerGroup, visible: Bool) {
-        var changed = false
-        for idx in group.layerIndices where layerVisible.indices.contains(idx) {
-            if layerVisible[idx] != visible {
-                layerVisible[idx] = visible
-                changed = true
+        recordUndoable(L("Visibilité du groupe", "Group Visibility")) {
+            var changed = false
+            for idx in group.layerIndices where layerVisible.indices.contains(idx) {
+                if layerVisible[idx] != visible {
+                    layerVisible[idx] = visible
+                    changed = true
+                }
             }
+            guard changed else { return }
+            scene?.setLayers(layerVisible)
+            updateVisibleSize()
+            viewport.requestRedraw()
         }
-        guard changed else { return }
-        scene?.setLayers(layerVisible)
-        updateVisibleSize()
-        viewport.requestRedraw()
     }
 
     func toggleLayerGroup(_ group: SKPModel.LayerGroup) {
@@ -423,14 +907,16 @@ final class DocumentModel {
     func soloLayerGroup(_ group: SKPModel.LayerGroup) {
         let memberSet = Set(group.layerIndices)
         guard !memberSet.isEmpty else { return }
-        let isAlreadySolo = layerVisible.indices.allSatisfy { memberSet.contains($0) == layerVisible[$0] }
-        if isAlreadySolo {
-            setAllLayers(visible: true)
-        } else {
-            layerVisible = layerVisible.indices.map { memberSet.contains($0) }
-            scene?.setLayers(layerVisible)
-            updateVisibleSize()
-            viewport.requestRedraw()
+        recordUndoable(L("Isoler le groupe", "Solo Group")) {
+            let isAlreadySolo = layerVisible.indices.allSatisfy { memberSet.contains($0) == layerVisible[$0] }
+            if isAlreadySolo {
+                setAllLayers(visible: true)
+            } else {
+                layerVisible = layerVisible.indices.map { memberSet.contains($0) }
+                scene?.setLayers(layerVisible)
+                updateVisibleSize()
+                viewport.requestRedraw()
+            }
         }
     }
 
@@ -461,13 +947,18 @@ final class DocumentModel {
 
     func resetView() {
         guard isReady else { return }
-        activeStandardView = nil
-        viewport.resetView(animated: true)
-        isPerspective = viewport.isPerspective
+        recordUndoable(L("Réinitialiser la vue", "Reset View"), restoresCameraPose: true) {
+            activeStandardView = nil
+            viewport.resetView(animated: true)
+            isPerspective = viewport.isPerspective
+        }
     }
 
     func zoomExtents() {
-        if isReady { viewport.zoomExtents(animated: true) }
+        guard isReady else { return }
+        recordUndoable(L("Zoom étendu", "Zoom Extents"), restoresCameraPose: true) {
+            viewport.zoomExtents(animated: true)
+        }
     }
 
     func zoomIn() {
@@ -480,8 +971,10 @@ final class DocumentModel {
 
     func look(_ view: StandardView) {
         guard isReady else { return }
-        activeStandardView = view
-        viewport.look(view, animated: true)
+        recordUndoable(L("Vue standard", "Standard View"), restoresCameraPose: true) {
+            activeStandardView = view
+            viewport.look(view, animated: true)
+        }
     }
 
     func togglePerspective() {
@@ -490,18 +983,22 @@ final class DocumentModel {
 
     func setPerspective(_ enabled: Bool) {
         guard isPerspective != enabled || (isReady && viewport.isPerspective != enabled) else { return }
-        isPerspective = enabled
-        Preferences.isPerspective = enabled
-        if isReady {
-            viewport.isPerspective = enabled
-            syncCameraStateFromViewport()
+        recordUndoable(L("Projection", "Projection"), restoresCameraPose: true) {
+            isPerspective = enabled
+            Preferences.isPerspective = enabled
+            if isReady {
+                viewport.isPerspective = enabled
+                syncCameraStateFromViewport()
+            }
         }
     }
 
     func setCameraFOV(_ degrees: Float) {
         let clamped = max(10.0, min(120.0, degrees))
-        cameraFOV = clamped
-        viewport.fieldOfView = clamped
+        recordUndoable(L("Focale caméra", "Camera FOV"), coalesceKey: "camera-fov", restoresCameraPose: true) {
+            cameraFOV = clamped
+            viewport.fieldOfView = clamped
+        }
     }
 
     func setCameraFocalLength(_ mm: Float) {
@@ -511,14 +1008,18 @@ final class DocumentModel {
 
     func setCameraExposure(_ ev: Float) {
         let clamped = max(-3.0, min(3.0, ev))
-        cameraExposure = clamped
-        viewport.exposureOffset = clamped
+        recordUndoable(L("Exposition caméra", "Camera Exposure"), coalesceKey: "camera-exposure", restoresCameraPose: true) {
+            cameraExposure = clamped
+            viewport.exposureOffset = clamped
+        }
     }
 
     func setCameraOrthoScale(_ scale: Float) {
         let clamped = max(0.05, min(10_000.0, scale))
-        cameraOrthoScale = clamped
-        viewport.orthographicScale = clamped
+        recordUndoable(L("Échelle orthographique", "Orthographic Scale"), coalesceKey: "camera-ortho", restoresCameraPose: true) {
+            cameraOrthoScale = clamped
+            viewport.orthographicScale = clamped
+        }
     }
 
     func setCameraSpeedScale(_ scale: Float) {
@@ -528,64 +1029,82 @@ final class DocumentModel {
     }
 
     func setCameraPosition(_ position: SIMD3<Float>) {
-        activeStandardView = nil
-        viewport.setCameraPose(position: position)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Position caméra", "Camera Position"), coalesceKey: "camera-pos", restoresCameraPose: true) {
+            activeStandardView = nil
+            viewport.setCameraPose(position: position)
+            syncCameraStateFromViewport()
+        }
     }
 
     func setCameraOrientation(yawDegrees: Float? = nil, pitchDegrees: Float? = nil) {
-        activeStandardView = nil
-        viewport.setCameraPose(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Orientation caméra", "Camera Orientation"), coalesceKey: "camera-orient", restoresCameraPose: true) {
+            activeStandardView = nil
+            viewport.setCameraPose(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
+            syncCameraStateFromViewport()
+        }
     }
 
     func setCameraDistance(_ distance: Float) {
-        viewport.setCameraPose(distance: max(0.05, distance))
-        syncCameraStateFromViewport()
+        recordUndoable(L("Distance cible caméra", "Camera Target Distance"), coalesceKey: "camera-dist", restoresCameraPose: true) {
+            viewport.setCameraPose(distance: max(0.05, distance))
+            syncCameraStateFromViewport()
+        }
     }
 
     func setCameraTarget(_ target: SIMD3<Float>, animated: Bool = false) {
-        activeStandardView = nil
-        viewport.setCameraTarget(target, animated: animated)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Cible caméra", "Camera Target"), coalesceKey: "camera-target", restoresCameraPose: true) {
+            activeStandardView = nil
+            viewport.setCameraTarget(target, animated: animated)
+            syncCameraStateFromViewport()
+        }
     }
 
     func setCameraLookAt(position: SIMD3<Float>, target: SIMD3<Float>, animated: Bool = false) {
-        activeStandardView = nil
-        viewport.setCameraLookAt(position: position, target: target, animated: animated)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Cadrage caméra", "Camera Framing"), restoresCameraPose: true) {
+            activeStandardView = nil
+            viewport.setCameraLookAt(position: position, target: target, animated: animated)
+            syncCameraStateFromViewport()
+        }
     }
 
     func orbitCameraByDegrees(yaw dYawDegrees: Float, pitch dPitchDegrees: Float) {
-        activeStandardView = nil
-        viewport.orbitByDegrees(yaw: dYawDegrees, pitch: dPitchDegrees)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Rotation caméra", "Camera Orbit"), coalesceKey: "camera-orbit", restoresCameraPose: true) {
+            activeStandardView = nil
+            viewport.orbitByDegrees(yaw: dYawDegrees, pitch: dPitchDegrees)
+            syncCameraStateFromViewport()
+        }
     }
 
     func levelCameraHorizon(animated: Bool = true) {
-        activeStandardView = nil
-        viewport.levelHorizon(animated: animated)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Horizon à niveau", "Level Horizon"), restoresCameraPose: true) {
+            activeStandardView = nil
+            viewport.levelHorizon(animated: animated)
+            syncCameraStateFromViewport()
+        }
     }
 
     /// Places the camera at human eye height (`1.70 m` above the model floor or Z=0) and levels the horizon.
     func setCameraEyeHeight(_ heightAboveFloor: Float = 1.70) {
-        activeStandardView = nil
-        let bMinZ = scene?.visibleBounds.min.z ?? skp?.boundsMin.z ?? 0
-        let bMaxZ = scene?.visibleBounds.max.z ?? skp?.boundsMax.z ?? 3
-        let floorZ = (bMinZ <= 0.2 && bMaxZ >= 1.5) ? 0.0 : bMinZ
-        var pos = viewport.cameraModelPosition
-        pos.z = floorZ + heightAboveFloor
-        viewport.setCameraPose(position: pos, pitchDegrees: 0)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Hauteur d'œil", "Eye Height"), restoresCameraPose: true) {
+            activeStandardView = nil
+            let bMinZ = scene?.visibleBounds.min.z ?? skp?.boundsMin.z ?? 0
+            let bMaxZ = scene?.visibleBounds.max.z ?? skp?.boundsMax.z ?? 3
+            let floorZ = (bMinZ <= 0.2 && bMaxZ >= 1.5) ? 0.0 : bMinZ
+            var pos = viewport.cameraModelPosition
+            pos.z = floorZ + heightAboveFloor
+            viewport.setCameraPose(position: pos, pitchDegrees: 0)
+            syncCameraStateFromViewport()
+        }
     }
 
     /// Places the camera at the geometric center of the model and levels the horizon.
     func centerCameraInModel() {
-        activeStandardView = nil
-        let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
-        viewport.setCameraPose(position: center, pitchDegrees: 0)
-        syncCameraStateFromViewport()
+        recordUndoable(L("Centrer la caméra", "Center Camera"), restoresCameraPose: true) {
+            activeStandardView = nil
+            let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
+            viewport.setCameraPose(position: center, pitchDegrees: 0)
+            syncCameraStateFromViewport()
+        }
     }
 
     var cameraCoordinateRange: ClosedRange<Double> {
@@ -599,144 +1118,172 @@ final class DocumentModel {
     }
 
     func setShadingStyle(_ style: ShadingStyle) {
-        shadingStyle = style
-        scene?.shadingStyle = style
-        if style == .wireframe, !showsEdges {
-            showsEdges = true
+        recordUndoable(L("Style de rendu", "Shading Style")) {
+            shadingStyle = style
+            scene?.shadingStyle = style
+            if style == .wireframe, !showsEdges {
+                showsEdges = true
+            }
+            viewport.requestRedraw()
         }
-        viewport.requestRedraw()
     }
 
     func setBackdropStyle(_ style: BackdropStyle) {
-        backdropStyle = style
-        Preferences.backdropStyle = style
-        scene?.backdropStyle = style
-        viewport.requestRedraw()
+        recordUndoable(L("Fond de scène", "Backdrop Style")) {
+            backdropStyle = style
+            Preferences.backdropStyle = style
+            scene?.backdropStyle = style
+            viewport.requestRedraw()
+        }
     }
 
     func setCustomBackdropColor(_ color: SIMD3<Float>) {
-        let clamped = simd_clamp(color, .zero, SIMD3(repeating: 1))
-        customBackdropColor = clamped
-        Preferences.customBackdropColor = clamped
-        scene?.customBackdropColor = clamped
-        if backdropStyle != .customColor {
-            backdropStyle = .customColor
-            Preferences.backdropStyle = .customColor
-            scene?.backdropStyle = .customColor
+        recordUndoable(L("Couleur de fond", "Backdrop Color"), coalesceKey: "backdrop-color") {
+            let clamped = simd_clamp(color, .zero, SIMD3(repeating: 1))
+            customBackdropColor = clamped
+            Preferences.customBackdropColor = clamped
+            scene?.customBackdropColor = clamped
+            if backdropStyle != .customColor {
+                backdropStyle = .customColor
+                Preferences.backdropStyle = .customColor
+                scene?.backdropStyle = .customColor
+            }
+            viewport.requestRedraw()
         }
-        viewport.requestRedraw()
     }
 
     func toggleGrid() {
-        showsGrid.toggle()
-        Preferences.showsGrid = showsGrid
-        scene?.showsGrid = showsGrid
-        viewport.requestRedraw()
+        recordUndoable(L("Grille et axes", "Grid and Axes")) {
+            showsGrid.toggle()
+            Preferences.showsGrid = showsGrid
+            scene?.showsGrid = showsGrid
+            viewport.requestRedraw()
+        }
     }
 
     func toggleShadows() {
-        shadowsEnabled.toggle()
-        Preferences.shadowsEnabled = shadowsEnabled
-        scene?.shadowsEnabled = shadowsEnabled
-        viewport.requestRedraw()
+        recordUndoable(L("Ombres", "Shadows")) {
+            shadowsEnabled.toggle()
+            Preferences.shadowsEnabled = shadowsEnabled
+            scene?.shadowsEnabled = shadowsEnabled
+            viewport.requestRedraw()
+        }
     }
 
     func toggleAmbientOcclusion() {
-        ambientOcclusionEnabled.toggle()
-        Preferences.ambientOcclusionEnabled = ambientOcclusionEnabled
-        if ambientOcclusionEnabled && ambientOcclusionIntensity <= 0.01 {
-            ambientOcclusionIntensity = Float(Rendering.defaultAmbientOcclusionIntensity)
-            Preferences.ambientOcclusionIntensity = ambientOcclusionIntensity
-            viewport.ambientOcclusionIntensity = CGFloat(ambientOcclusionIntensity)
+        recordUndoable(L("Occlusion ambiante", "Ambient Occlusion")) {
+            ambientOcclusionEnabled.toggle()
+            Preferences.ambientOcclusionEnabled = ambientOcclusionEnabled
+            if ambientOcclusionEnabled && ambientOcclusionIntensity <= 0.01 {
+                ambientOcclusionIntensity = Float(Rendering.defaultAmbientOcclusionIntensity)
+                Preferences.ambientOcclusionIntensity = ambientOcclusionIntensity
+                viewport.ambientOcclusionIntensity = CGFloat(ambientOcclusionIntensity)
+            }
+            viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
+            viewport.requestRedraw()
         }
-        viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
-        viewport.requestRedraw()
     }
 
     func setAmbientOcclusionIntensity(_ value: Float) {
-        let clamped = max(0, min(2.0, value))
-        ambientOcclusionIntensity = clamped
-        Preferences.ambientOcclusionIntensity = clamped
-        viewport.ambientOcclusionIntensity = CGFloat(clamped)
-        let shouldEnable = clamped > 0.01
-        if ambientOcclusionEnabled != shouldEnable {
-            ambientOcclusionEnabled = shouldEnable
-            Preferences.ambientOcclusionEnabled = shouldEnable
-            viewport.ambientOcclusionEnabled = shouldEnable
+        recordUndoable(L("Intensité AO", "AO Intensity"), coalesceKey: "ao-intensity") {
+            let clamped = max(0, min(2.0, value))
+            ambientOcclusionIntensity = clamped
+            Preferences.ambientOcclusionIntensity = clamped
+            viewport.ambientOcclusionIntensity = CGFloat(clamped)
+            let shouldEnable = clamped > 0.01
+            if ambientOcclusionEnabled != shouldEnable {
+                ambientOcclusionEnabled = shouldEnable
+                Preferences.ambientOcclusionEnabled = shouldEnable
+                viewport.ambientOcclusionEnabled = shouldEnable
+            }
+            viewport.requestRedraw()
         }
-        viewport.requestRedraw()
     }
 
     func setLightingMode(_ mode: LightingMode) {
-        lightingMode = mode
-        if mode == .point && pointLights.isEmpty {
-            if let detected = scene?.detectedSceneLights, !detected.isEmpty {
-                pointLights = detected
-            } else {
-                let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
-                pointLights = [ViewportPointLight(name: L("Lumière 1", "Light 1"), position: center, intensity: 1.0, isFromScene: false)]
+        recordUndoable(L("Mode d'éclairage", "Lighting Mode")) {
+            lightingMode = mode
+            if mode == .point && pointLights.isEmpty {
+                if let detected = scene?.detectedSceneLights, !detected.isEmpty {
+                    pointLights = detected
+                } else {
+                    let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
+                    pointLights = [ViewportPointLight(name: L("Lumière 1", "Light 1"), position: center, intensity: 1.0, isFromScene: false)]
+                }
+                selectedPointLightIndex = 0
             }
-            selectedPointLightIndex = 0
+            scene?.pointLights = pointLights
+            scene?.lightingMode = mode
+            viewport.requestRedraw()
         }
-        scene?.pointLights = pointLights
-        scene?.lightingMode = mode
-        viewport.requestRedraw()
     }
 
     func addPointLight() {
-        let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
-        let offset = Float(pointLights.count) * 0.25
-        let newLight = ViewportPointLight(
-            name: L("Lumière \(pointLights.count + 1)", "Light \(pointLights.count + 1)"),
-            position: center + SIMD3(offset, offset, 0),
-            intensity: 1.0,
-            isFromScene: false
-        )
-        pointLights.append(newLight)
-        selectedPointLightIndex = pointLights.count - 1
-        if lightingMode != .point {
-            lightingMode = .point
-            scene?.lightingMode = .point
+        recordUndoable(L("Ajout lumière", "Add Light")) {
+            let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
+            let offset = Float(pointLights.count) * 0.25
+            let newLight = ViewportPointLight(
+                name: L("Lumière \(pointLights.count + 1)", "Light \(pointLights.count + 1)"),
+                position: center + SIMD3(offset, offset, 0),
+                intensity: 1.0,
+                isFromScene: false
+            )
+            pointLights.append(newLight)
+            selectedPointLightIndex = pointLights.count - 1
+            if lightingMode != .point {
+                lightingMode = .point
+                scene?.lightingMode = .point
+            }
+            scene?.pointLights = pointLights
+            viewport.requestRedraw()
         }
-        scene?.pointLights = pointLights
-        viewport.requestRedraw()
     }
 
     func removeSelectedPointLight() {
         guard pointLights.indices.contains(selectedPointLightIndex), pointLights.count > 1 else { return }
-        pointLights.remove(at: selectedPointLightIndex)
-        selectedPointLightIndex = max(0, min(selectedPointLightIndex, pointLights.count - 1))
-        scene?.pointLights = pointLights
-        viewport.requestRedraw()
+        recordUndoable(L("Suppression lumière", "Remove Light")) {
+            pointLights.remove(at: selectedPointLightIndex)
+            selectedPointLightIndex = max(0, min(selectedPointLightIndex, pointLights.count - 1))
+            scene?.pointLights = pointLights
+            viewport.requestRedraw()
+        }
     }
 
     func centerSelectedPointLight() {
         guard pointLights.indices.contains(selectedPointLightIndex) else { return }
-        let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
-        pointLights[selectedPointLightIndex].position = center
-        scene?.pointLights = pointLights
-        viewport.requestRedraw()
+        recordUndoable(L("Centrer la lumière", "Center Light")) {
+            let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
+            pointLights[selectedPointLightIndex].position = center
+            scene?.pointLights = pointLights
+            viewport.requestRedraw()
+        }
     }
 
     func moveSelectedPointLightToCamera() {
         guard pointLights.indices.contains(selectedPointLightIndex), isReady else { return }
-        pointLights[selectedPointLightIndex].position = viewport.cameraModelPosition
-        scene?.pointLights = pointLights
-        viewport.requestRedraw()
+        recordUndoable(L("Lumière sur la caméra", "Move Light to Camera")) {
+            pointLights[selectedPointLightIndex].position = viewport.cameraModelPosition
+            scene?.pointLights = pointLights
+            viewport.requestRedraw()
+        }
     }
 
     func updateSelectedPointLight(position: SIMD3<Float>? = nil, intensity: Float? = nil) {
         guard pointLights.indices.contains(selectedPointLightIndex) else { return }
-        if let position { pointLights[selectedPointLightIndex].position = position }
-        if let intensity { pointLights[selectedPointLightIndex].intensity = max(0.0, min(3.0, intensity)) }
-        scene?.pointLights = pointLights
-        viewport.requestRedraw()
+        recordUndoable(L("Réglage lumière", "Adjust Light"), coalesceKey: "point-light-\(selectedPointLightIndex)") {
+            if let position { pointLights[selectedPointLightIndex].position = position }
+            if let intensity { pointLights[selectedPointLightIndex].intensity = max(0.0, min(3.0, intensity)) }
+            scene?.pointLights = pointLights
+            viewport.requestRedraw()
+        }
     }
 
     func togglePointLightGizmo() {
-        showsPointLightGizmo.toggle()
-        scene?.showsPointLightGizmo = showsPointLightGizmo
-        viewport.requestRedraw()
+        recordUndoable(L("Repère de lumière", "Light Gizmo")) {
+            showsPointLightGizmo.toggle()
+            scene?.showsPointLightGizmo = showsPointLightGizmo
+            viewport.requestRedraw()
+        }
     }
 
     var selectedPointLight: ViewportPointLight? {
@@ -754,35 +1301,43 @@ final class DocumentModel {
     }
 
     func setSun(azimuth: Float, elevation: Float) {
-        sunAzimuthDegrees = azimuth
-        sunElevationDegrees = elevation
-        scene?.sunAzimuthDegrees = azimuth
-        scene?.sunElevationDegrees = elevation
-        viewport.requestRedraw()
+        recordUndoable(L("Orientation du soleil", "Sun Orientation"), coalesceKey: "sun-orient") {
+            sunAzimuthDegrees = azimuth
+            sunElevationDegrees = elevation
+            scene?.sunAzimuthDegrees = azimuth
+            scene?.sunElevationDegrees = elevation
+            viewport.requestRedraw()
+        }
     }
 
     func setSunIntensity(_ intensity: Float) {
-        let clamped = max(0.0, min(3.0, intensity))
-        sunIntensity = clamped
-        scene?.sunIntensity = clamped
-        viewport.requestRedraw()
+        recordUndoable(L("Intensité du soleil", "Sun Intensity"), coalesceKey: "sun-intensity") {
+            let clamped = max(0.0, min(3.0, intensity))
+            sunIntensity = clamped
+            scene?.sunIntensity = clamped
+            viewport.requestRedraw()
+        }
     }
 
     func setAmbientIntensity(_ intensity: Float) {
-        let clamped = max(0.0, min(2.0, intensity))
-        ambientIntensity = clamped
-        scene?.ambientIntensity = clamped
-        viewport.requestRedraw()
+        recordUndoable(L("Lumière ambiante", "Ambient Light"), coalesceKey: "ambient-intensity") {
+            let clamped = max(0.0, min(2.0, intensity))
+            ambientIntensity = clamped
+            scene?.ambientIntensity = clamped
+            viewport.requestRedraw()
+        }
     }
 
     func resetSun() {
-        sunAzimuthDegrees = -135
-        sunElevationDegrees = 45
-        sunIntensity = Rendering.defaultSunIntensity
-        ambientIntensity = Rendering.defaultAmbientIntensity
-        scene?.resetSun()
-        scene?.ambientIntensity = ambientIntensity
-        viewport.requestRedraw()
+        recordUndoable(L("Réinitialiser l'éclairage", "Reset Lighting")) {
+            sunAzimuthDegrees = -135
+            sunElevationDegrees = 45
+            sunIntensity = Rendering.defaultSunIntensity
+            ambientIntensity = Rendering.defaultAmbientIntensity
+            scene?.resetSun()
+            scene?.ambientIntensity = ambientIntensity
+            viewport.requestRedraw()
+        }
     }
 
     func toggleFreeFlight() {
@@ -809,13 +1364,16 @@ final class DocumentModel {
             measureHoverSnap = nil
             viewport.measureFallbackZ = nil
         }
-        viewport.requestRedraw()
+        syncMeasurementToScene()
     }
 
     func clearMeasurement() {
-        measureStart = nil
-        measureEnd = nil
-        viewport.measureFallbackZ = nil
+        recordUndoable(L("Effacer la mesure", "Clear Measurement")) {
+            measureStart = nil
+            measureEnd = nil
+            viewport.measureFallbackZ = nil
+            syncMeasurementToScene()
+        }
     }
 
     func handleMeasureEscape() {
@@ -845,25 +1403,412 @@ final class DocumentModel {
     }
 
     func handleMeasureHover(_ snap: MeasureSnap?, shiftLocked: Bool) {
-        guard isMeasuring else { return }
+        guard isMeasuring || projectorPickMode != .none else { return }
         if let snap {
-            measureHoverSnap = resolvedMeasureSnap(snap, shiftLocked: shiftLocked)
+            measureHoverSnap = isMeasuring ? resolvedMeasureSnap(snap, shiftLocked: shiftLocked) : snap
         } else {
             measureHoverSnap = nil
         }
+        syncMeasurementToScene()
     }
 
     func handleMeasureClick(_ snap: MeasureSnap, shiftLocked: Bool) {
         guard isMeasuring else { return }
-        let resolved = resolvedMeasureSnap(snap, shiftLocked: shiftLocked)
-        if measureStart == nil || measureEnd != nil {
-            measureStart = resolved
-            measureEnd = nil
-            viewport.measureFallbackZ = resolved.position.z
-        } else {
-            measureEnd = resolved
+        recordUndoable(L("Mesure", "Measurement")) {
+            let resolved = resolvedMeasureSnap(snap, shiftLocked: shiftLocked)
+            if measureStart == nil || measureEnd != nil {
+                measureStart = resolved
+                measureEnd = nil
+                viewport.measureFallbackZ = resolved.position.z
+            } else {
+                measureEnd = resolved
+            }
+            measureHoverSnap = resolved
+            syncMeasurementToScene()
         }
-        measureHoverSnap = resolved
+    }
+
+    private func syncMeasurementToScene() {
+        guard let scene else { return }
+        viewport.refreshMeasurementCamera()
+        let endSnap = isMeasuring ? activeMeasureEnd : nil
+        let distText: String?
+        if isMeasuring, let start = measureStart, let end = endSnap {
+            let d = simd_distance(start.position, end.position)
+            distText = d > 1e-5 ? Self.formatDistance(d, compact: true) : nil
+        } else {
+            distText = nil
+        }
+        let hoverBadgeText: String?
+        if let hover = measureHoverSnap {
+            if projectorPickMode == .position {
+                hoverBadgeText = L("Position VP", "VP Position") + " · " + Self.snapKindLabel(hover.kind)
+            } else if projectorPickMode == .target {
+                hoverBadgeText = L("Cible VP", "VP Target") + " · " + Self.snapKindLabel(hover.kind)
+            } else {
+                hoverBadgeText = Self.snapKindLabel(hover.kind)
+            }
+        } else {
+            hoverBadgeText = nil
+        }
+        scene.updateMeasurement(
+            isActive: isMeasuring || projectorPickMode != .none,
+            start: isMeasuring ? measureStart : nil,
+            end: endSnap,
+            hover: measureHoverSnap,
+            distanceText: distText,
+            hoverBadgeText: hoverBadgeText
+        )
+        viewport.setNeedsDisplay(viewport.bounds)
+    }
+
+    // MARK: - Video Projectors & .sskp Project
+
+    /// Whether the hidden features UI (video projectors + `.sskp` save) is unlocked.
+    var showsHiddenFeaturesUI: Bool {
+        hiddenFeaturesEnabled || !videoProjectors.isEmpty || sskpURL != nil
+    }
+
+    var selectedVideoProjector: VideoProjector? {
+        guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else { return nil }
+        return videoProjectors[selectedVideoProjectorIndex]
+    }
+
+    func selectVideoProjector(_ index: Int) {
+        guard videoProjectors.indices.contains(index) else { return }
+        selectedVideoProjectorIndex = index
+        scene?.selectedVideoProjectorIndex = index
+        viewport.requestRedraw()
+    }
+
+    func addVideoProjector(spec: ProjectorSpec = .optomaZU920ST) {
+        recordUndoable(L("Ajout vidéoprojecteur", "Add Video Projector")) {
+            let count = videoProjectors.count + 1
+            let camPos = viewport.cameraModelPosition
+            let camTarget = viewport.cameraPose.target
+            let offsetRight = viewport.cameraPose.right * (Float(videoProjectors.count) * 0.65)
+            let pos: SIMD3<Float>
+            let tgt: SIMD3<Float>
+            if isReady, simd_distance(camPos, camTarget) > 0.3 {
+                // Place at 65% of the way from camera to target (or at least 3.5 m from target) so the projector is immediately visible in front of the camera
+                let toCamera = camPos - camTarget
+                let d = simd_length(toCamera)
+                let dir = toCamera / max(d, 1e-4)
+                let throwDist = min(max(d * 0.55, 2.5), max(d * 0.85, 4.0))
+                pos = camTarget + dir * throwDist + offsetRight
+                tgt = camTarget + offsetRight * 0.3
+            } else {
+                let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
+                pos = center + SIMD3<Float>(0, -5.0, 2.5)
+                tgt = center
+            }
+
+            let proj = VideoProjector(
+                name: "VP \(count) — \(spec.model)",
+                specID: spec.id,
+                isEnabled: true,
+                position: pos,
+                target: tgt,
+                rollDegrees: 0,
+                throwRatio: spec.defaultThrowRatio,
+                lensShiftH: 0,
+                lensShiftV: 0,
+                intensity: 1.0,
+                pattern: .testGrid,
+                showsFrustum: true
+            )
+            videoProjectors.append(proj)
+            selectedVideoProjectorIndex = videoProjectors.count - 1
+            syncProjectorsToScene()
+        }
+    }
+
+    func duplicateSelectedVideoProjector() {
+        guard var copy = selectedVideoProjector else { return }
+        recordUndoable(L("Duplication vidéoprojecteur", "Duplicate Video Projector")) {
+            copy.id = UUID()
+            copy.name = "\(copy.name) (\(videoProjectors.count + 1))"
+            let (right, _, _) = copy.opticalBasis()
+            copy.position += right * 1.0
+            copy.target += right * 1.0
+            videoProjectors.append(copy)
+            selectedVideoProjectorIndex = videoProjectors.count - 1
+            syncProjectorsToScene()
+        }
+    }
+
+    func removeSelectedVideoProjector() {
+        guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else { return }
+        recordUndoable(L("Suppression vidéoprojecteur", "Remove Video Projector")) {
+            videoProjectors.remove(at: selectedVideoProjectorIndex)
+            selectedVideoProjectorIndex = max(0, min(selectedVideoProjectorIndex, videoProjectors.count - 1))
+            if videoProjectors.isEmpty {
+                cancelProjectorPick()
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func updateSelectedVideoProjector(_ mutate: (inout VideoProjector) -> Void) {
+        guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else { return }
+        recordUndoable(L("Réglage vidéoprojecteur", "Adjust Video Projector"), coalesceKey: "vp-edit-\(selectedVideoProjectorIndex)") {
+            mutate(&videoProjectors[selectedVideoProjectorIndex])
+            syncProjectorsToScene()
+        }
+    }
+
+    func moveSelectedProjectorToCamera() {
+        guard videoProjectors.indices.contains(selectedVideoProjectorIndex), isReady else { return }
+        recordUndoable(L("Placer VP sur la caméra", "Place VP at Camera")) {
+            videoProjectors[selectedVideoProjectorIndex].position = viewport.cameraModelPosition
+            videoProjectors[selectedVideoProjectorIndex].target = viewport.cameraPose.target
+            syncProjectorsToScene()
+        }
+    }
+
+    func aimSelectedProjectorAtCameraTarget() {
+        guard videoProjectors.indices.contains(selectedVideoProjectorIndex), isReady else { return }
+        recordUndoable(L("Viser la cible caméra", "Aim VP at Camera Target")) {
+            videoProjectors[selectedVideoProjectorIndex].target = viewport.cameraPose.target
+            syncProjectorsToScene()
+        }
+    }
+
+    func lookThroughSelectedProjector() {
+        guard let proj = selectedVideoProjector, isReady else { return }
+        recordUndoable(L("Vue depuis le VP", "Look Through VP"), restoresCameraPose: true) {
+            setCameraLookAt(position: proj.position, target: proj.target, animated: true)
+        }
+    }
+
+    func startPickingProjectorPosition() {
+        guard isReady, selectedVideoProjector != nil else { return }
+        if isMeasuring { setMeasureTool(false) }
+        projectorPickMode = (projectorPickMode == .position) ? .none : .position
+        viewport.isPickingProjectorPoint = (projectorPickMode != .none)
+        syncMeasurementToScene()
+    }
+
+    func startPickingProjectorTarget() {
+        guard isReady, selectedVideoProjector != nil else { return }
+        if isMeasuring { setMeasureTool(false) }
+        projectorPickMode = (projectorPickMode == .target) ? .none : .target
+        viewport.isPickingProjectorPoint = (projectorPickMode != .none)
+        syncMeasurementToScene()
+    }
+
+    func cancelProjectorPick() {
+        guard projectorPickMode != .none || viewport.isPickingProjectorPoint else { return }
+        projectorPickMode = .none
+        viewport.isPickingProjectorPoint = false
+        measureHoverSnap = nil
+        syncMeasurementToScene()
+    }
+
+    private func handleProjectorPointPick(_ snap: MeasureSnap) {
+        guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else {
+            cancelProjectorPick()
+            return
+        }
+        let mode = projectorPickMode
+        cancelProjectorPick()
+        switch mode {
+        case .position:
+            recordUndoable(L("Position du vidéoprojecteur", "Projector Position")) {
+                videoProjectors[selectedVideoProjectorIndex].position = snap.position
+                syncProjectorsToScene()
+            }
+            flash(L("Position du vidéoprojecteur placée", "Projector position placed"))
+        case .target:
+            recordUndoable(L("Cible du vidéoprojecteur", "Projector Target")) {
+                videoProjectors[selectedVideoProjectorIndex].target = snap.position
+                syncProjectorsToScene()
+            }
+            flash(L("Cible du vidéoprojecteur visée", "Projector target aimed"))
+        case .none:
+            break
+        }
+    }
+
+    func chooseCustomImageForSelectedProjector() {
+        guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image, .png, .jpeg, .tiff]
+        panel.title = L("Choisir une image à projeter", "Choose an Image to Project")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        recordUndoable(L("Image du vidéoprojecteur", "Projector Image")) {
+            videoProjectors[selectedVideoProjectorIndex].customImagePath = url.path
+            videoProjectors[selectedVideoProjectorIndex].pattern = .customImage
+            syncProjectorsToScene()
+        }
+    }
+
+    func syncProjectorsToScene() {
+        guard let scene else { return }
+        scene.selectedVideoProjectorIndex = selectedVideoProjectorIndex
+        scene.videoProjectors = videoProjectors
+        viewport.requestRedraw()
+    }
+
+    /// URL of the underlying 3D geometry file (`.skp`, `.dwg`, `.dxf`, `.dae`, `.obj`).
+    var underlyingModelURL: URL? {
+        if let skpURL = skp?.fileInfo.url, skpURL.pathExtension.lowercased() != "sskp" {
+            return skpURL
+        }
+        if let infoURL = info?.url, infoURL.pathExtension.lowercased() != "sskp" {
+            return infoURL
+        }
+        return nil
+    }
+
+    func buildSSKPProject(relativeTo targetSSKPURL: URL? = nil) -> SSKPProject? {
+        guard let modelURL = underlyingModelURL else { return nil }
+        syncCameraStateFromViewport()
+        let relPath = targetSSKPURL.flatMap { SSKPProject.relativePath(from: $0.deletingLastPathComponent(), to: modelURL) }
+        let camState = SSKPProject.CameraState(
+            position: cameraPosition,
+            target: cameraTarget,
+            fovDegrees: cameraFOV,
+            isPerspective: isPerspective,
+            orthoScale: cameraOrthoScale,
+            exposureOffset: cameraExposure
+        )
+        let lightState = SSKPProject.LightingState(
+            lightingMode: lightingMode == .point ? "point" : "sun",
+            sunAzimuthDegrees: sunAzimuthDegrees,
+            sunElevationDegrees: sunElevationDegrees,
+            sunIntensity: sunIntensity,
+            ambientIntensity: ambientIntensity,
+            shadowsEnabled: shadowsEnabled,
+            shadingStyle: shadingStyle.rawValue,
+            backdropStyle: backdropStyle.rawValue,
+            customBackdropColor: customBackdropColor,
+            showsEdges: showsEdges,
+            showsGrid: showsGrid,
+            pointLights: pointLights.map {
+                SSKPProject.PointLightState(
+                    name: $0.name,
+                    position: $0.position,
+                    intensity: $0.intensity,
+                    isFromScene: $0.isFromScene
+                )
+            }
+        )
+        var hiddenNames: [String] = []
+        if let skp {
+            for (idx, layer) in skp.layers.enumerated() where layerVisible.indices.contains(idx) && !layerVisible[idx] {
+                hiddenNames.append(layer.name)
+            }
+        }
+        return SSKPProject(
+            modelPath: modelURL.path,
+            modelRelativePath: relPath,
+            projectors: videoProjectors,
+            camera: camState,
+            lighting: lightState,
+            hiddenLayerNames: hiddenNames
+        )
+    }
+
+    func applySSKPProject(_ project: SSKPProject) {
+        if let hiddenNames = project.hiddenLayerNames, let skp {
+            let hiddenSet = Set(hiddenNames)
+            layerVisible = skp.layers.map { !hiddenSet.contains($0.name) }
+            scene?.setLayers(layerVisible)
+            updateVisibleSize()
+        }
+        if let lighting = project.lighting {
+            showsEdges = lighting.showsEdges
+            showsGrid = lighting.showsGrid
+            shadowsEnabled = lighting.shadowsEnabled
+            sunAzimuthDegrees = lighting.sunAzimuthDegrees
+            sunElevationDegrees = lighting.sunElevationDegrees
+            sunIntensity = lighting.sunIntensity
+            ambientIntensity = lighting.ambientIntensity
+            customBackdropColor = lighting.customBackdropColor
+            if let style = ShadingStyle(rawValue: lighting.shadingStyle) {
+                shadingStyle = style
+            }
+            if let bg = BackdropStyle(rawValue: lighting.backdropStyle) {
+                backdropStyle = bg
+            }
+            if !lighting.pointLights.isEmpty {
+                pointLights = lighting.pointLights.map {
+                    ViewportPointLight(name: $0.name, position: $0.position, intensity: $0.intensity, isFromScene: $0.isFromScene)
+                }
+            }
+            lightingMode = (lighting.lightingMode == "point") ? .point : .sun
+            if let scene {
+                scene.showsEdges = showsEdges
+                scene.showsGrid = showsGrid
+                scene.shadowsEnabled = shadowsEnabled
+                scene.shadingStyle = shadingStyle
+                scene.customBackdropColor = customBackdropColor
+                scene.backdropStyle = backdropStyle
+                scene.sunAzimuthDegrees = sunAzimuthDegrees
+                scene.sunElevationDegrees = sunElevationDegrees
+                scene.sunIntensity = sunIntensity
+                scene.ambientIntensity = ambientIntensity
+                scene.pointLights = pointLights
+                scene.lightingMode = lightingMode
+            }
+        }
+        if let cam = project.camera, isReady {
+            setPerspective(cam.isPerspective)
+            setCameraFOV(cam.fovDegrees)
+            setCameraExposure(cam.exposureOffset)
+            if !cam.isPerspective {
+                setCameraOrthoScale(cam.orthoScale)
+            }
+            setCameraLookAt(position: cam.position, target: cam.target, animated: false)
+        }
+        videoProjectors = project.projectors
+        selectedVideoProjectorIndex = 0
+        syncProjectorsToScene()
+    }
+
+    func saveSSKPProject() {
+        if let existingURL = sskpURL {
+            writeSSKPProject(to: existingURL)
+        } else {
+            saveSSKPProjectAs()
+        }
+    }
+
+    func saveSSKPProjectAs() {
+        guard isReady, underlyingModelURL != nil else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [DocumentController.sskpContentType]
+        panel.allowsOtherFileTypes = false
+        let baseURL = sskpURL ?? underlyingModelURL ?? info?.url
+        let baseName = baseURL?.deletingPathExtension().lastPathComponent ?? "Scene"
+        if let dir = baseURL?.deletingLastPathComponent() {
+            panel.directoryURL = dir
+        }
+        panel.nameFieldStringValue = "\(baseName).sskp"
+        panel.title = L("Enregistrer le projet SimpleSKP (.sskp)", "Save SimpleSKP Project (.sskp)")
+        guard panel.runModal() == .OK, var url = panel.url else { return }
+        if url.pathExtension.lowercased() != "sskp" {
+            url = url.appendingPathExtension("sskp")
+        }
+        writeSSKPProject(to: url)
+    }
+
+    @discardableResult
+    func writeSSKPProject(to url: URL) -> Bool {
+        guard let project = buildSSKPProject(relativeTo: url) else { return false }
+        do {
+            try project.write(to: url)
+            sskpURL = url
+            flash(L("Projet enregistré : \(url.lastPathComponent)", "Project saved: \(url.lastPathComponent)"))
+            return true
+        } catch {
+            NSApp.presentError(error)
+            return false
+        }
     }
 
     var activeMeasureEnd: MeasureSnap? {
@@ -909,10 +1854,12 @@ final class DocumentModel {
     }
 
     func toggleEdges() {
-        showsEdges.toggle()
-        Preferences.showsEdges = showsEdges
-        scene?.showsEdges = showsEdges
-        viewport.setNeedsDisplay(viewport.bounds)
+        recordUndoable(L("Arêtes", "Edges")) {
+            showsEdges.toggle()
+            Preferences.showsEdges = showsEdges
+            scene?.showsEdges = showsEdges
+            viewport.setNeedsDisplay(viewport.bounds)
+        }
     }
 
     func toggleSidebar() {

@@ -53,6 +53,8 @@ enum MainMenu {
     private static func fileMenu() -> NSMenuItem {
         let menu = NSMenu(title: L("Fichier", "File"))
         menu.add(L("Ouvrir…", "Open…"), #selector(NSDocumentController.openDocument(_:)), key: "o")
+        menu.add(L("Enregistrer le projet .sskp", "Save .sskp Project"), #selector(SKPDocument.saveSSKP(_:)), key: "s")
+        menu.add(L("Enregistrer le projet .sskp sous…", "Save .sskp Project As…"), #selector(SKPDocument.saveSSKPAs(_:)), key: "s", modifiers: [.command, .shift])
         menu.addItem(.separator())
         menu.add(L("Exporter l'image PNG…", "Export PNG Image…"), #selector(SKPDocument.exportImage(_:)), key: "e", modifiers: [.command, .shift])
         menu.add(L("Exporter en PDF vectoriel…", "Export Vector PDF…"), #selector(SKPDocument.exportVectorPDF(_:)), key: "e", modifiers: [.command, .option])
@@ -65,6 +67,9 @@ enum MainMenu {
 
     private static func editMenu() -> NSMenuItem {
         let menu = NSMenu(title: L("Édition", "Edit"))
+        menu.add(L("Annuler", "Undo"), #selector(SKPDocument.performUndo(_:)), key: "z")
+        menu.add(L("Rétablir", "Redo"), #selector(SKPDocument.performRedo(_:)), key: "z", modifiers: [.command, .shift])
+        menu.addItem(.separator())
         menu.add(L("Copier l'image", "Copy Image"), #selector(SKPDocument.copyImage(_:)), key: "c")
         return menu.asItem()
     }
@@ -91,6 +96,7 @@ enum MainMenu {
         menu.addItem(.separator())
         menu.add(L("Réinitialiser la vue", "Reset View"), #selector(SKPDocument.resetView(_:)), key: "z", modifiers: [])
         menu.add(L("Zoom étendu", "Zoom Extents"), #selector(SKPDocument.zoomExtents(_:)), key: "z", modifiers: [.shift])
+        menu.add(L("Masquer l’objet sélectionné (CAD)", "Hide Selected Object (CAD)"), #selector(SKPDocument.hideSelectedLayer(_:)), key: "h", modifiers: [])
         menu.add(L("Outil de mesure (Règle)", "Measure Tool (Ruler)"), #selector(SKPDocument.toggleMeasureTool(_:)), key: "d", modifiers: [.command])
         menu.add(L("Mode vol libre", "Free Fly Mode"), #selector(SKPDocument.toggleFreeFlight(_:)), key: "f", modifiers: [.command, .option])
         menu.addItem(.separator())

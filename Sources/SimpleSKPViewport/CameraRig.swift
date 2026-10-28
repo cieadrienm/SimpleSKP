@@ -78,6 +78,12 @@ public final class CameraRig {
 
     init(node: SCNNode) { self.node = node }
 
+    /// The destination pose when a glide animation is in progress, otherwise the current `pose`.
+    public var targetPose: Pose { glide?.to ?? pose }
+
+    /// The destination orthographic scale when a glide animation is in progress, otherwise the camera's current `orthographicScale`.
+    public var targetOrthographicScale: Double { glide?.toScale ?? (node.camera?.orthographicScale ?? 1) }
+
     var isMoving: Bool {
         glide != nil
             || spin != .zero
@@ -164,7 +170,12 @@ public final class CameraRig {
 
     func set(_ target: Pose, orthographicScale: Double? = nil) {
         stop()
-        if let orthographicScale { node.camera?.orthographicScale = orthographicScale }
+        if let orthographicScale {
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
+            node.camera?.orthographicScale = orthographicScale
+            SCNTransaction.commit()
+        }
         pose = target
     }
 
@@ -211,7 +222,10 @@ public final class CameraRig {
             p.pitch = g.from.pitch + (g.to.pitch - g.from.pitch) * s
             p.position = g.from.position + (g.to.position - g.from.position) * s
             p.distance = g.from.distance + (g.to.distance - g.from.distance) * s
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
             node.camera?.orthographicScale = g.fromScale + (g.toScale - g.fromScale) * Double(s)
+            SCNTransaction.commit()
             glide = t < 1 ? g : nil
             pose = p
         }
@@ -269,8 +283,11 @@ public final class CameraRig {
     }
 
     private func write() {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
         node.simdPosition = pose.position
         node.simdOrientation = simd_quatf(pose.basis)
+        SCNTransaction.commit()
         onChange()
     }
 }

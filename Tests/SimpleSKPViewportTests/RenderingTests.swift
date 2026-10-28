@@ -404,4 +404,107 @@ final class RenderingTests: XCTestCase {
         XCTAssertTrue(redNode.geometry?.firstMaterial === baseRedMat)
         XCTAssertTrue(yellowNode.geometry?.firstMaterial === baseYellowMat)
     }
+
+    func testVideoProjectorIlluminatesFrontWallAndOccludesWallBehindObstacle() throws {
+        // Scene geometry:
+        // 1) Rear projection screen wall at y = 8 m, spanning x in [-4, +4], z in [-2, +2]
+        // 2) Opaque obstacle wall at y = 4 m, blocking ONLY the left side x in [-4, -0.2], z in [-2, +2]
+        let rearScreen = SKPModel.Mesh(
+            material: 0, layer: 0,
+            positions: [
+                SIMD3(-4, 8, -2), SIMD3(4, 8, -2), SIMD3(4, 8, 2), SIMD3(-4, 8, 2)
+            ],
+            normals: [
+                SIMD3(0, -1, 0), SIMD3(0, -1, 0), SIMD3(0, -1, 0), SIMD3(0, -1, 0)
+            ],
+            uvs: [.zero, .zero, .zero, .zero],
+            indices: [0, 1, 2, 0, 2, 3]
+        )
+        let leftObstacle = SKPModel.Mesh(
+            material: 0, layer: 0,
+            positions: [
+                SIMD3(-4, 4, -2), SIMD3(-0.2, 4, -2), SIMD3(-0.2, 4, 2), SIMD3(-4, 4, 2)
+            ],
+            normals: [
+                SIMD3(0, -1, 0), SIMD3(0, -1, 0), SIMD3(0, -1, 0), SIMD3(0, -1, 0)
+            ],
+            uvs: [.zero, .zero, .zero, .zero],
+            indices: [0, 1, 2, 0, 2, 3]
+        )
+        let model = SKPModel(
+            root: SKPModel.Definition(name: "", meshes: [rearScreen, leftObstacle], edges: [], children: []),
+            definitions: [],
+            materials: [SKPModel.Material(name: "Mat Wall", color: SIMD4(0.35, 0.35, 0.35, 1.0))],
+            layers: [SKPModel.Layer(name: "Layer0", isVisible: true)],
+            scenes: [],
+            camera: nil,
+            boundsMin: SIMD3(-4, 0, -2),
+            boundsMax: SIMD3(4, 8, 2),
+            fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/vp_occlusion.skp"), fileSize: 0, version: "test", versionLabel: "test", thumbnailPNG: nil)
+        )
+
+        let scene = ViewportScene(model: model)
+        scene.backdropStyle = .studioDark
+        scene.showsGrid = false
+        scene.showsEdges = false
+        // Dim scene lights so the projector's contribution is unmistakable
+        scene.sunIntensity = 0.0
+        scene.ambientIntensity = 0.05
+
+        // Place an Optoma ZU920ST at (0, 0, 0) aiming along +Y at (0, 8, 0) with whiteFrame pattern
+        var vp = VideoProjector(
+            name: "VP1 Optoma ZU920ST",
+            specID: ProjectorSpec.optomaZU920ST.id,
+            position: SIMD3<Float>(0, 0, 0),
+            target: SIMD3<Float>(0, 8, 0),
+            throwRatio: 0.70,
+            lensShiftH: 0.0,
+            lensShiftV: 0.0,
+            intensity: 1.5,
+            pattern: .whiteFrame,
+            showsFrustum: false
+        )
+        vp.isEnabled = true
+        scene.videoProjectors = [vp]
+
+        // 1. Verify geometric raycast occlusion helper:
+        // - Front face of the obstacle at (-1.5, 4, 0) IS illuminated
+        XCTAssertTrue(
+            scene.isPointIlluminatedByProjector(SIMD3<Float>(-1.5, 4.0, 0.0), projector: vp),
+            "Front obstacle surface directly facing the projector must be illuminated"
+        )
+        // - Unblocked right side of the rear screen at (+1.5, 8, 0) IS illuminated
+        XCTAssertTrue(
+            scene.isPointIlluminatedByProjector(SIMD3<Float>(1.5, 8.0, 0.0), projector: vp),
+            "Unblocked right half of the rear screen must be illuminated"
+        )
+        // - Blocked left side of the rear screen at (-1.5, 8, 0) behind the obstacle at y=4 MUST be occluded
+        XCTAssertFalse(
+            scene.isPointIlluminatedByProjector(SIMD3<Float>(-1.5, 8.0, 0.0), projector: vp),
+            "Rear screen behind the opaque obstacle wall must be occluded (projection never traverses matter)"
+        )
+
+        // 2. Verify Metal GPU shadow depth map + SceneKit surface shader occlusion:
+        // Place camera at (0, 5.0, 0) (between the y=4 obstacle and y=8 rear screen) looking at (0, 8, 0),
+        // so the camera sees the entire rear screen directly without the obstacle blocking the camera's view,
+        // while the projector at (0, 0, 0) IS blocked on the left side (x < -0.2) by the obstacle at y=4!
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        view.present(scene)
+        view.apply(camera: SKPModel.Camera(position: SIMD3<Float>(0, 5.0, 0), target: SIMD3<Float>(0, 8.0, 0), fovDegrees: 60), animated: false)
+
+        let rep = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        // Left side of image (x = 50, y = 100) corresponds to world x < 0 on rear screen (behind obstacle -> occluded)
+        // Right side of image (x = 150, y = 100) corresponds to world x > 0 on rear screen (unblocked -> lit by VP)
+        let occludedLeftColor = try XCTUnwrap(rep.colorAt(x: 50, y: 100)?.usingColorSpace(.sRGB))
+        let illuminatedRightColor = try XCTUnwrap(rep.colorAt(x: 150, y: 100)?.usingColorSpace(.sRGB))
+
+        XCTAssertGreaterThan(
+            illuminatedRightColor.greenComponent, 0.45,
+            "Unblocked right side of rear screen must be brightly illuminated by the Optoma ZU920ST (right RGB=(\(illuminatedRightColor.redComponent), \(illuminatedRightColor.greenComponent), \(illuminatedRightColor.blueComponent)), left RGB=(\(occludedLeftColor.redComponent), \(occludedLeftColor.greenComponent), \(occludedLeftColor.blueComponent)))"
+        )
+        XCTAssertLessThan(
+            occludedLeftColor.greenComponent, illuminatedRightColor.greenComponent * 0.35,
+            "Occluded left side of rear screen behind the obstacle must NOT receive projected light (occluded=\(occludedLeftColor.greenComponent), lit=\(illuminatedRightColor.greenComponent))"
+        )
+    }
 }

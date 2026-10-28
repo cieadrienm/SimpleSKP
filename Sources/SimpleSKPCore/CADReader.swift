@@ -98,21 +98,151 @@ public enum CADReader {
         var capacityAndFlag: UInt64
     }
 
+    private struct StdWStringView {
+        var data: UnsafePointer<UInt32>
+        var size: UInt64
+        var capacityAndFlag: UInt64
+    }
+
+    /// Reads a C++ `std::string` (`libc++` short/long string layout on macOS) passed as `const std::string&`.
+    private static func readCppStdString(_ ptr: UnsafeRawPointer) -> String {
+        let tag = Int8(bitPattern: ptr.load(fromByteOffset: 23, as: UInt8.self))
+        if tag < 0 {
+            let cPtr = ptr.load(fromByteOffset: 0, as: UnsafePointer<CChar>.self)
+            return String(cString: cPtr)
+        } else {
+            let cPtr = ptr.assumingMemoryBound(to: CChar.self)
+            return String(cString: cPtr)
+        }
+    }
+
+    /// C++ `SketchUpPluginProgressCallback` bridge whose first word is a vtable pointer matching `DWGImporter`'s ABI:
+    /// `[0]` `HasBeenCancelled()`, `[1]` `SetPercentDone(double)`, `[2]` `SetStepSize(double)`, `[3]` `Step()`, `[4]` `SetProgressMessage(const std::string&)`.
+    private final class ImporterProgressContext: @unchecked Sendable {
+        let importerBuf: UnsafeMutableRawPointer
+        let progress: (@Sendable (SKPReader.Progress) -> Void)?
+        let isCancelled: () -> Bool
+        var currentPhase: String = L("Lecture du fichier AutoCAD…", "Reading AutoCAD file…")
+        var currentItem: String? = nil
+        var lastFraction: Double = 0.08
+        var lastEmitTime: CFAbsoluteTime = 0
+
+        init(
+            importerBuf: UnsafeMutableRawPointer,
+            progress: (@Sendable (SKPReader.Progress) -> Void)?,
+            isCancelled: @escaping () -> Bool
+        ) {
+            self.importerBuf = importerBuf
+            self.progress = progress
+            self.isCancelled = isCancelled
+        }
+
+        func readLiveStats() -> (layers: Int, blocks: Int, edges: Int, faces: Int) {
+            let layers = Int(max(0, importerBuf.load(fromByteOffset: 0x2a4, as: Int32.self)))
+            let blocks = Int(max(0, importerBuf.load(fromByteOffset: 0x2ac, as: Int32.self)))
+            // Arcs (+0x2b0), Circles (+0x2b4), Ellipses (+0x2b8), Lines (+0x2c0), Points (+0x2c4), 2D Polylines (+0x2c8), 3D Polylines (+0x2cc)
+            let edgeEntities =
+                max(0, importerBuf.load(fromByteOffset: 0x2b0, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2b4, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2b8, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2c0, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2c4, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2c8, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2cc, as: Int32.self))
+            // 3D Poly-Meshes (+0x2d0), SubD Meshes (+0x2d4), Poly-Face Meshes (+0x2d8), 3D Faces (+0x2dc)
+            let faceEntities =
+                max(0, importerBuf.load(fromByteOffset: 0x2d0, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2d4, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2d8, as: Int32.self)) +
+                max(0, importerBuf.load(fromByteOffset: 0x2dc, as: Int32.self))
+            return (layers, blocks, Int(edgeEntities), Int(faceEntities))
+        }
+
+        func emit(force: Bool = false) {
+            guard let progress else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            guard force || (now - lastEmitTime) >= 0.025 else { return }
+            lastEmitTime = now
+            let stats = readLiveStats()
+            progress(SKPReader.Progress(
+                phase: currentPhase,
+                faces: stats.faces,
+                fraction: lastFraction,
+                edges: stats.edges,
+                blocks: stats.blocks,
+                layers: stats.layers,
+                currentItem: currentItem
+            ))
+        }
+
+        nonisolated(unsafe) static let vtable: UnsafePointer<UnsafeRawPointer> = {
+            typealias HasBeenCancelledFn = @convention(c) (UnsafeMutableRawPointer) -> Bool
+            typealias SetPercentDoneFn = @convention(c) (UnsafeMutableRawPointer, Double) -> Void
+            typealias SetStepSizeFn = @convention(c) (UnsafeMutableRawPointer, Double) -> Void
+            typealias StepFn = @convention(c) (UnsafeMutableRawPointer) -> Void
+            typealias SetProgressMessageFn = @convention(c) (UnsafeMutableRawPointer, UnsafeRawPointer) -> Void
+
+            let fnCancel: HasBeenCancelledFn = { thisPtr in
+                let ctxPtr = thisPtr.load(fromByteOffset: 8, as: UnsafeMutableRawPointer.self)
+                let ctx = Unmanaged<ImporterProgressContext>.fromOpaque(ctxPtr).takeUnretainedValue()
+                return ctx.isCancelled()
+            }
+            let fnPercent: SetPercentDoneFn = { thisPtr, pct in
+                let ctxPtr = thisPtr.load(fromByteOffset: 8, as: UnsafeMutableRawPointer.self)
+                let ctx = Unmanaged<ImporterProgressContext>.fromOpaque(ctxPtr).takeUnretainedValue()
+                guard ctx.progress != nil else { return }
+                let clamped = min(max(pct / 100.0, 0.0), 1.0)
+                ctx.lastFraction = 0.10 + clamped * 0.52
+                ctx.emit()
+            }
+            let fnStepSize: SetStepSizeFn = { _, _ in }
+            let fnStep: StepFn = { _ in }
+            let fnMessage: SetProgressMessageFn = { thisPtr, strPtr in
+                let ctxPtr = thisPtr.load(fromByteOffset: 8, as: UnsafeMutableRawPointer.self)
+                let ctx = Unmanaged<ImporterProgressContext>.fromOpaque(ctxPtr).takeUnretainedValue()
+                guard ctx.progress != nil else { return }
+                let now = CFAbsoluteTimeGetCurrent()
+                guard (now - ctx.lastEmitTime) >= 0.025 else { return }
+                let raw = CADReader.readCppStdString(strPtr).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !raw.isEmpty else { return }
+                if raw.hasPrefix("Importing Layers") {
+                    ctx.currentPhase = L("Lecture des calques AutoCAD…", "Reading AutoCAD layers…")
+                    ctx.currentItem = nil
+                } else if raw.hasPrefix("Importing Entities") {
+                    ctx.currentPhase = L("Lecture des entités du plan…", "Reading plan entities…")
+                } else if raw.hasPrefix("Importing Block") {
+                    var blockName = String(raw.dropFirst("Importing Block".count)).trimmingCharacters(in: .whitespaces)
+                    if blockName.hasSuffix("...") {
+                        blockName = String(blockName.dropLast(3)).trimmingCharacters(in: .whitespaces)
+                    }
+                    ctx.currentPhase = L("Importation des blocs AutoCAD…", "Importing AutoCAD blocks…")
+                    if !blockName.isEmpty, !blockName.hasPrefix("*") {
+                        ctx.currentItem = L("Bloc : \(blockName)", "Block: \(blockName)")
+                    }
+                }
+                ctx.emit(force: true)
+            }
+
+            let table = UnsafeMutablePointer<UnsafeRawPointer>.allocate(capacity: 5)
+            table[0] = unsafeBitCast(fnCancel, to: UnsafeRawPointer.self)
+            table[1] = unsafeBitCast(fnPercent, to: UnsafeRawPointer.self)
+            table[2] = unsafeBitCast(fnStepSize, to: UnsafeRawPointer.self)
+            table[3] = unsafeBitCast(fnStep, to: UnsafeRawPointer.self)
+            table[4] = unsafeBitCast(fnMessage, to: UnsafeRawPointer.self)
+            return UnsafePointer(table)
+        }()
+    }
+
     private final class LoadedPlugin: @unchecked Sendable {
         typealias Ctor = @convention(c) (UnsafeMutableRawPointer) -> Void
         typealias Dtor = @convention(c) (UnsafeMutableRawPointer) -> Void
-        typealias Convert = @convention(c) (
-            UnsafeMutableRawPointer,
-            UnsafeRawPointer,
-            UnsafeRawPointer,
-            UnsafeMutableRawPointer?,
-            UnsafeRawPointer
-        ) -> Bool
+        typealias OpenFile = @convention(c) (UnsafeMutableRawPointer, UnsafeRawPointer) -> Bool
+        typealias ReadAndProcess = @convention(c) (UnsafeMutableRawPointer, UnsafeMutableRawPointer?) -> Bool
 
         let ctor: Ctor
         let dtor: Dtor
-        let prefsCtor: Ctor
-        let convert: Convert
+        let openFile: OpenFile
+        let readAndProcess: ReadAndProcess
 
         init(location: PluginLocation) throws {
             Self.preloadFrameworks(at: location.frameworksDir.path)
@@ -121,15 +251,15 @@ public enum CADReader {
             }
             guard let pCtor = dlsym(handle, "_ZN8sketchup3dwg11CDDImporterC1Ev"),
                   let pDtor = dlsym(handle, "_ZN8sketchup3dwg11CDDImporterD1Ev"),
-                  let pPrefs = dlsym(handle, "_ZN8sketchup3dwg22DWGImporterPreferences11ImportPrefsC1Ev"),
-                  let pConv = dlsym(handle, "_ZN8sketchup3dwg11CDDImporter7ConvertERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEESA_P30SketchUpPluginProgressCallbackRKNS0_22DWGImporterPreferences11ImportPrefsE")
+                  let pOpen = dlsym(handle, "_ZN8sketchup3dwg11CDDImporter8OpenFileERKNSt3__112basic_stringIwNS2_11char_traitsIwEENS2_9allocatorIwEEEE"),
+                  let pRead = dlsym(handle, "_ZN8sketchup3dwg11CDDImporter14ReadAndProcessEP30SketchUpPluginProgressCallback")
             else {
                 throw SKPError.api(function: "dlsym(CDDImporter)", code: -1)
             }
             self.ctor = unsafeBitCast(pCtor, to: Ctor.self)
             self.dtor = unsafeBitCast(pDtor, to: Dtor.self)
-            self.prefsCtor = unsafeBitCast(pPrefs, to: Ctor.self)
-            self.convert = unsafeBitCast(pConv, to: Convert.self)
+            self.openFile = unsafeBitCast(pOpen, to: OpenFile.self)
+            self.readAndProcess = unsafeBitCast(pRead, to: ReadAndProcess.self)
         }
 
         private static func preloadFrameworks(at dir: String) {
@@ -178,45 +308,122 @@ public enum CADReader {
             }
         }
 
-        func convertFile(inputPath: String, outputPath: String, importUnits: Int32) -> Bool {
+        /// Imports a `.dwg`/`.dxf` file directly into an in-memory `SKPModel` in a single pass,
+        /// skipping `SUModelMergeCoplanarFaces`, `SUModelOrientFacesConsistently`, and disk `.skp` serialization.
+        func importInMemory(
+            url: URL,
+            fileInfo: SKPFileInfo,
+            progress: (@Sendable (SKPReader.Progress) -> Void)?,
+            isCancelled: @Sendable () -> Bool
+        ) throws -> (model: SKPModel, insunits: Int32) {
+            let f = try SketchUpAPI.functions()
+            SKPReader.lock.lock()
+            defer { SKPReader.lock.unlock() }
+            f.SUInitialize()
+
             let importerBuf = UnsafeMutableRawPointer.allocate(byteCount: 2048, alignment: 16)
             importerBuf.initializeMemory(as: UInt8.self, repeating: 0, count: 2048)
             defer { importerBuf.deallocate() }
 
-            let prefsBuf = UnsafeMutableRawPointer.allocate(byteCount: 128, alignment: 16)
-            prefsBuf.initializeMemory(as: UInt8.self, repeating: 0, count: 128)
-            defer { prefsBuf.deallocate() }
-
-            prefsCtor(prefsBuf)
-            // +0x08: int32_t import_units (0=Model Units, 1=Inches, 2=Feet, 5=mm, 6=cm, 7=Meters)
-            // +0x0c: bool orient_faces_consistently = 1
-            // +0x0d: bool import_materials = 1
-            // +0x0e: bool preserve_drawing_origin = 0
-            // +0x0f: bool merge_coplanar_faces = 1
-            // +0x10: bool break_edges = 0
-            prefsBuf.storeBytes(of: importUnits, toByteOffset: 0x08, as: Int32.self)
-            prefsBuf.storeBytes(of: UInt8(1), toByteOffset: 0x0c, as: UInt8.self)
-            prefsBuf.storeBytes(of: UInt8(1), toByteOffset: 0x0d, as: UInt8.self)
-            prefsBuf.storeBytes(of: UInt8(0), toByteOffset: 0x0e, as: UInt8.self)
-            prefsBuf.storeBytes(of: UInt8(1), toByteOffset: 0x0f, as: UInt8.self)
-            prefsBuf.storeBytes(of: UInt8(0), toByteOffset: 0x10, as: UInt8.self)
-
             ctor(importerBuf)
-            let ok = inputPath.withCString { inPtr in
-                outputPath.withCString { outPtr in
-                    let inLen = UInt64(strlen(inPtr))
-                    let outLen = UInt64(strlen(outPtr))
-                    var sIn = StdStringView(data: inPtr, size: inLen, capacityAndFlag: (inLen + 1) | (1 << 63))
-                    var sOut = StdStringView(data: outPtr, size: outLen, capacityAndFlag: (outLen + 1) | (1 << 63))
-                    return withUnsafePointer(to: &sIn) { pIn in
-                        withUnsafePointer(to: &sOut) { pOut in
-                            convert(importerBuf, pIn, pOut, nil, prefsBuf)
-                        }
-                    }
+            defer { dtor(importerBuf) }
+
+            // Configure CDDImporter fields directly:
+            // +0x378: import_units = 7 (Meters -> 1 drawing unit = 39.37007874" = 1.0 m in SUModelRef so SketchUp's
+            //         0.001" merge tolerance never collapses millimeter/centimeter details)
+            // +0x288: m_bInitialized = 1
+            // +0x3f9: orient_faces_consistently = 0 (skip expensive topological face orientation pass)
+            // +0x3fd: import_materials = 1 (preserve AutoCAD ACI / TrueColor layer materials)
+            // +0x3fa: 0
+            // +0x3fb: preserve_drawing_origin = 0
+            importerBuf.storeBytes(of: Int32(7), toByteOffset: 0x378, as: Int32.self)
+            importerBuf.storeBytes(of: UInt8(1), toByteOffset: 0x288, as: UInt8.self)
+            importerBuf.storeBytes(of: UInt8(0), toByteOffset: 0x3f9, as: UInt8.self)
+            importerBuf.storeBytes(of: UInt8(1), toByteOffset: 0x3fd, as: UInt8.self)
+            importerBuf.storeBytes(of: UInt8(0), toByteOffset: 0x3fa, as: UInt8.self)
+            importerBuf.storeBytes(of: UInt8(0), toByteOffset: 0x3fb, as: UInt8.self)
+
+            var utf32 = url.path.unicodeScalars.map { UInt32($0.value) }
+            utf32.append(0)
+            let opened = utf32.withUnsafeBufferPointer { buf -> Bool in
+                let len = UInt64(buf.count - 1)
+                var wStr = StdWStringView(data: buf.baseAddress!, size: len, capacityAndFlag: (len + 1) | (1 << 63))
+                return withUnsafePointer(to: &wStr) { pWStr in
+                    openFile(importerBuf, pWStr)
                 }
             }
-            dtor(importerBuf)
-            return ok
+            guard opened else { throw SKPError.unreadable(url) }
+            if isCancelled() { throw SKPError.cancelled }
+
+            // Read $INSUNITS directly from OdDbDatabase* at [importerBuf + 0x3d8] (vtable + 0x568: getINSUNITS())
+            var insunits: Int32 = 0
+            if let dbPtr = importerBuf.load(fromByteOffset: 0x3d8, as: UnsafeMutableRawPointer?.self) {
+                let vtable = dbPtr.load(as: UnsafeRawPointer.self)
+                typealias GetInsunitsFn = @convention(c) (UnsafeMutableRawPointer) -> Int32
+                let fnPtr = vtable.load(fromByteOffset: 0x568, as: UnsafeRawPointer.self)
+                let getInsunits = unsafeBitCast(fnPtr, to: GetInsunitsFn.self)
+                insunits = getInsunits(dbPtr)
+            }
+
+            // Create the destination SUModelRef at [importerBuf + 0x290]
+            var modelRef: Ref = nil
+            guard f.SUModelCreate(&modelRef) == 0, let validModelRef = modelRef else {
+                throw SKPError.unreadable(url)
+            }
+            importerBuf.storeBytes(of: validModelRef, toByteOffset: 0x290, as: UnsafeMutableRawPointer.self)
+            defer {
+                var refToRelease: Ref = importerBuf.load(fromByteOffset: 0x290, as: UnsafeMutableRawPointer?.self)
+                if refToRelease != nil {
+                    _ = f.SUModelRelease(&refToRelease)
+                    importerBuf.storeBytes(of: nil as UnsafeMutableRawPointer?, toByteOffset: 0x290, as: UnsafeMutableRawPointer?.self)
+                }
+            }
+
+            // Run ReadAndProcess with live progress & cancellation callback
+            let processed: Bool = withoutActuallyEscaping(isCancelled) { escapableCancel in
+                let ctx = ImporterProgressContext(importerBuf: importerBuf, progress: progress, isCancelled: escapableCancel)
+                let callbackObj = UnsafeMutableRawPointer.allocate(byteCount: 16, alignment: 8)
+                defer { callbackObj.deallocate() }
+                callbackObj.storeBytes(of: UnsafeRawPointer(ImporterProgressContext.vtable), toByteOffset: 0, as: UnsafeRawPointer.self)
+                callbackObj.storeBytes(of: Unmanaged.passUnretained(ctx).toOpaque(), toByteOffset: 8, as: UnsafeMutableRawPointer.self)
+                return withExtendedLifetime(ctx) {
+                    readAndProcess(importerBuf, callbackObj)
+                }
+            }
+
+            // Release OdDbDatabase* early now that ReadAndProcess has finished
+            if let dbPtr = importerBuf.load(fromByteOffset: 0x3d8, as: UnsafeMutableRawPointer?.self) {
+                let vtable = dbPtr.load(as: UnsafeRawPointer.self)
+                typealias ReleaseFn = @convention(c) (UnsafeMutableRawPointer) -> Void
+                let fnPtr = vtable.load(fromByteOffset: 0x30, as: UnsafeRawPointer.self)
+                unsafeBitCast(fnPtr, to: ReleaseFn.self)(dbPtr)
+                importerBuf.storeBytes(of: nil as UnsafeMutableRawPointer?, toByteOffset: 0x3d8, as: UnsafeMutableRawPointer?.self)
+            }
+
+            if isCancelled() { throw SKPError.cancelled }
+            guard processed else { throw SKPError.unreadable(url) }
+
+            let liveModelRef: Ref = importerBuf.load(fromByteOffset: 0x290, as: UnsafeMutableRawPointer?.self)
+            let model = try SKPReader.readModelRef(
+                liveModelRef,
+                f: f,
+                fileInfo: fileInfo,
+                checkCancelBeforeConvert: false,
+                progress: { p in
+                    let mapped = p.fraction.map { 0.62 + $0 * 0.28 } ?? 0.75
+                    progress?(SKPReader.Progress(
+                        phase: p.phase,
+                        faces: p.faces,
+                        fraction: mapped,
+                        edges: p.edges,
+                        blocks: p.blocks,
+                        layers: p.layers,
+                        currentItem: p.currentItem
+                    ))
+                },
+                isCancelled: isCancelled
+            )
+            return (model, insunits)
         }
     }
 
@@ -232,6 +439,22 @@ public enum CADReader {
         return loaded
     }
 
+    /// Meters per drawing unit according to AutoCAD `$INSUNITS` (`OdDb::UnitsValue`), matching `CDDImporter::ReadHeaderInfo`.
+    private static func metersPerDrawingUnit(forInsunits insunits: Int32) -> Float {
+        switch insunits {
+        case 2: return 0.3048        // Feet
+        case 3: return 1609.344      // Miles
+        case 4: return 0.001         // Millimeters
+        case 5: return 0.01          // Centimeters
+        case 6: return 1.0           // Meters
+        case 7: return 1000.0        // Kilometers
+        case 8: return 0.0254e-6     // Microinches
+        case 9: return 0.0254e-3     // Mils
+        case 10: return 0.9144       // Yards
+        default: return 0.0254       // 0 (Unitless) or 1 (Inches) -> 1 inch
+        }
+    }
+
     private static func loadViaPlugin(
         url: URL,
         fileInfo: SKPFileInfo,
@@ -240,44 +463,37 @@ public enum CADReader {
         isCancelled: @Sendable () -> Bool
     ) throws -> SKPModel {
         let plugin = try getPlugin(location)
-        let tempDir = FileManager.default.temporaryDirectory
-        let tempSKP = tempDir.appendingPathComponent("SimpleSKP-CAD-\(UUID().uuidString).skp")
-        defer { try? FileManager.default.removeItem(at: tempSKP) }
+        var (model, insunits) = try plugin.importInMemory(
+            url: url,
+            fileInfo: fileInfo,
+            progress: progress,
+            isCancelled: isCancelled
+        )
 
-        func runConversion(units: Int32) throws -> SKPModel {
-            if isCancelled() { throw SKPError.cancelled }
-            try? FileManager.default.removeItem(at: tempSKP)
-            SKPReader.lock.lock()
-            let ok = plugin.convertFile(inputPath: url.path, outputPath: tempSKP.path, importUnits: units)
-            SKPReader.lock.unlock()
-            guard ok, FileManager.default.fileExists(atPath: tempSKP.path) else {
-                throw SKPError.unreadable(url)
+        // Because `importInMemory` imports with `import_units = 7` (1 drawing unit = 1.0 m),
+        // `rawMaxDim` is the drawing's span in raw AutoCAD drawing units.
+        let rawMaxDim = max(model.size.x, model.size.y, model.size.z)
+        let headerUnitScale = metersPerDrawingUnit(forInsunits: insunits)
+        let headerMetricMaxDim = rawMaxDim * headerUnitScale
+
+        if headerMetricMaxDim >= 1.0 {
+            if headerUnitScale != 1.0 {
+                model = scaleModel(model, by: headerUnitScale)
             }
-            return try SKPReader.loadSkpFile(tempSKP, fileInfo: fileInfo, progress: { p in
-                let mapped = p.fraction.map { 0.35 + $0 * 0.50 } ?? 0.50
-                progress?(SKPReader.Progress(phase: p.phase, faces: p.faces, fraction: mapped))
-            }, isCancelled: isCancelled)
+        } else if rawMaxDim > 350.0 {
+            // Drawing has $INSUNITS=0 (Unitless) or $INSUNITS=4 (mm) while authored in centimeters or decimeters
+            let scale: Float = rawMaxDim > 3_500.0 ? 0.001 : 0.1
+            model = scaleModel(model, by: scale)
         }
 
-        // Pass 1: Model Units (0)
-        var model = try runConversion(units: 0)
-        let maxDim = max(model.size.x, model.size.y, model.size.z)
-
-        // When a metric drawing has $INSUNITS=0 (Unitless -> 1 inch) or $INSUNITS=4 (mm) while drawn in meters/cm,
-        // its imported size is < 1 m and SketchUp's 0.001" merge tolerance collapses fine edges.
-        // Re-converting with importUnits = 7 (Meters) preserves all fine geometry.
-        if maxDim > 0 && maxDim < 1.0 {
-            if let oldTex = model.textureDirectory { try? FileManager.default.removeItem(at: oldTex) }
-            model = try runConversion(units: 7)
-            let meterMaxDim = max(model.size.x, model.size.y, model.size.z)
-            if meterMaxDim > 350.0 {
-                // Drawn in centimeters (e.g. 430 cm -> 43.0 m) or decimeters
-                let scale: Float = meterMaxDim > 3_500.0 ? 0.001 : 0.1
-                model = scaleModel(model, by: scale)
-            }
-        }
-
-        progress?(SKPReader.Progress(phase: L("Calibrage des unités…", "Calibrating units…"), faces: model.stats.faces, fraction: 0.90))
+        progress?(SKPReader.Progress(
+            phase: L("Calibrage des unités…", "Calibrating units…"),
+            faces: model.stats.faces,
+            fraction: 0.92,
+            edges: model.stats.edges,
+            blocks: model.stats.definitions,
+            layers: model.layers.count
+        ))
         return normalizeCADModel(model)
     }
 
@@ -596,7 +812,15 @@ enum DXFNativeParser {
                 if pairIndex % 25_000 == 0 {
                     if isCancelled() { throw SKPError.cancelled }
                     let frac = totalPairs > 0 ? min(0.86, 0.15 + 0.70 * Double(pairIndex) / Double(totalPairs)) : 0.5
-                    progress?(SKPReader.Progress(phase: L("Lecture des entités DXF…", "Reading DXF entities…"), faces: 0, fraction: frac))
+                    let edgeCount = geo.edgesByLayer.values.reduce(0) { $0 + $1.count / 2 }
+                    progress?(SKPReader.Progress(
+                        phase: L("Lecture des entités DXF…", "Reading DXF entities…"),
+                        faces: 0,
+                        fraction: frac,
+                        edges: edgeCount,
+                        blocks: blocks.count,
+                        layers: layers.count
+                    ))
                 }
                 guard code == 0 else { continue }
                 let entity = val.uppercased()

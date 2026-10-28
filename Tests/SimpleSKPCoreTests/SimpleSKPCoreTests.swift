@@ -471,6 +471,118 @@ final class SimpleSKPCoreTests: XCTestCase {
         XCTAssertEqual(mursLayer?.color?.y ?? 1, 0.0, accuracy: 0.01)
     }
 
+    func testOBJAndMTLLoadWithLayersMaterialsAndEdges() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("simpleskp-obj-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let mtlURL = tempDir.appendingPathComponent("scene.mtl")
+        let mtlText = """
+        newmtl Brique
+        Kd 0.85 0.25 0.18
+        d 1.0
+        newmtl Verre
+        Kd 0.30 0.70 0.90
+        d 0.45
+        """
+        try mtlText.write(to: mtlURL, atomically: true, encoding: .utf8)
+
+        let objURL = tempDir.appendingPathComponent("scene.obj")
+        let objText = """
+        # Wavefront OBJ test
+        mtllib scene.mtl
+        o Mur_Principal
+        usemtl Brique
+        v 0.0 0.0 0.0
+        v 4.0 0.0 0.0
+        v 4.0 3.0 0.0
+        v 0.0 3.0 0.0
+        f 1 2 3 4
+        o Fenetre
+        usemtl Verre
+        v 1.0 1.0 -2.0
+        v 3.0 1.0 -2.0
+        v 3.0 2.5 -2.0
+        f 5 6 7
+        l 1 5
+        """
+        try objText.write(to: objURL, atomically: true, encoding: .utf8)
+
+        let model = try SKPReader.load(objURL)
+        XCTAssertTrue(model.fileInfo.isOBJ)
+        XCTAssertEqual(model.fileInfo.versionLabel, "Wavefront OBJ")
+        XCTAssertEqual(model.stats.faces, 2)
+        XCTAssertEqual(model.stats.triangles, 3)
+        XCTAssertGreaterThan(model.stats.edges, 4)
+        XCTAssertTrue(model.layers.contains { $0.name == "Mur_Principal" })
+        XCTAssertTrue(model.layers.contains { $0.name == "Fenetre" })
+        XCTAssertEqual(model.materials.count, 2)
+        let verre = try XCTUnwrap(model.materials.first { $0.name == "Verre" })
+        XCTAssertTrue(verre.isTransparent)
+        XCTAssertEqual(verre.opacity, 0.45, accuracy: 0.01)
+        // Y-up (0..3 in Y) becomes Z-up (0..3 in Z)
+        XCTAssertEqual(model.size.x, 4.0, accuracy: 0.01)
+        XCTAssertEqual(model.size.z, 3.0, accuracy: 0.01)
+    }
+
+    func testColladaDAELoadsGeometryAndUnits() throws {
+        let daeURL = FileManager.default.temporaryDirectory.appendingPathComponent("simpleskp-test-\(UUID().uuidString).dae")
+        defer { try? FileManager.default.removeItem(at: daeURL) }
+
+        let daeXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+          <asset>
+            <unit name="meter" meter="1.0"/>
+            <up_axis>Z_UP</up_axis>
+          </asset>
+          <library_geometries>
+            <geometry id=" PlateauGeom" name="Plateau">
+              <mesh>
+                <source id="pos">
+                  <float_array id="pos-array" count="12">0 0 0 6 0 0 6 4 0 0 4 2</float_array>
+                  <technique_common>
+                    <accessor source="#pos-array" count="4" stride="3">
+                      <param name="X" type="float"/>
+                      <param name="Y" type="float"/>
+                      <param name="Z" type="float"/>
+                    </accessor>
+                  </technique_common>
+                </source>
+                <vertices id="verts">
+                  <input semantic="POSITION" source="#pos"/>
+                </vertices>
+                <triangles count="2">
+                  <input semantic="VERTEX" source="#verts" offset="0"/>
+                  <p>0 1 2 0 2 3</p>
+                </triangles>
+              </mesh>
+            </geometry>
+          </library_geometries>
+          <library_visual_scenes>
+            <visual_scene id="Scene" name="Scene">
+              <node id="PlateauNode" name="Plateau_Scene" type="NODE">
+                <instance_geometry url="#PlateauGeom"/>
+              </node>
+            </visual_scene>
+          </library_visual_scenes>
+          <scene>
+            <instance_visual_scene url="#Scene"/>
+          </scene>
+        </COLLADA>
+        """
+        try daeXML.write(to: daeURL, atomically: true, encoding: .utf8)
+
+        let model = try SKPReader.load(daeURL)
+        defer { if let dir = model.textureDirectory { try? FileManager.default.removeItem(at: dir) } }
+        XCTAssertTrue(model.fileInfo.isDAE)
+        XCTAssertEqual(model.fileInfo.versionLabel, "Collada DAE 1.4.1")
+        XCTAssertEqual(model.stats.triangles, 2)
+        XCTAssertGreaterThan(model.stats.edges, 0)
+        XCTAssertTrue(model.layers.contains { $0.name == "Plateau_Scene" })
+        XCTAssertGreaterThan(model.size.x, 1.0)
+    }
+
     func testRealAutoCADDWGFilesLoadAndCalibrate() throws {
         guard CADReader.locatePlugin() != nil else { throw XCTSkip("DWGImporter.plugin not available") }
         let userFiles = [
@@ -503,6 +615,132 @@ final class SimpleSKPCoreTests: XCTestCase {
             let xyOffset = simd_length(SIMD2<Float>(model.center.x, model.center.y))
             XCTAssertLessThan(xyOffset, maxSpan * 3.0, "geodetic offset not recentered for \(url.lastPathComponent): center=\(model.center)")
         }
+    }
+
+    // MARK: - Optoma ZU920ST Video Projector & .sskp Project
+
+    func testOptomaZU920STOpticalFrustumAndLensShift() {
+        let spec = ProjectorSpec.optomaZU920ST
+        XCTAssertEqual(spec.nativeWidth, 1920)
+        XCTAssertEqual(spec.nativeHeight, 1200)
+        XCTAssertEqual(spec.aspectRatio, 1.6, accuracy: 1e-4)
+        XCTAssertEqual(spec.minThrowRatio, 0.65, accuracy: 1e-4)
+        XCTAssertEqual(spec.maxThrowRatio, 0.75, accuracy: 1e-4)
+        XCTAssertEqual(spec.maxLensShiftH, 0.25, accuracy: 1e-4)
+        XCTAssertEqual(spec.maxLensShiftV, 0.55, accuracy: 1e-4)
+
+        // Centered projector at (0, 0, 2) aiming +Y to a screen at (0, 7, 2) -> throw distance D = 7.0 m
+        var vp = VideoProjector(
+            name: "VP Face",
+            specID: spec.id,
+            position: SIMD3<Float>(0, 0, 2),
+            target: SIMD3<Float>(0, 7, 2),
+            throwRatio: 0.70,
+            lensShiftH: 0.0,
+            lensShiftV: 0.0
+        )
+        XCTAssertEqual(vp.throwDistance, 7.0, accuracy: 1e-4)
+        // W = D / TR = 7.0 / 0.70 = 10.0 m; H = 10.0 / 1.6 = 6.25 m
+        XCTAssertEqual(vp.projectedWidth(), 10.0, accuracy: 1e-3)
+        XCTAssertEqual(vp.projectedHeight(), 6.25, accuracy: 1e-3)
+
+        // Optical axis center (0, 7, 2) must project to UV (0.5, 0.5) at depth 7.0 m
+        let centerProj = vp.projectPoint(SIMD3<Float>(0, 7, 2))
+        XCTAssertTrue(centerProj.isInsideFrustum)
+        XCTAssertEqual(centerProj.uv.x, 0.5, accuracy: 1e-3)
+        XCTAssertEqual(centerProj.uv.y, 0.5, accuracy: 1e-3)
+        XCTAssertEqual(centerProj.eyeDepth, 7.0, accuracy: 1e-3)
+
+        // Apply +25% horizontal lens shift (+2.5 m along +X) and -50% vertical shift (-3.125 m along +Z)
+        vp.lensShiftH = 0.25
+        vp.lensShiftV = -0.50
+        let shiftedCenter = SIMD3<Float>(2.5, 7.0, 2.0 - 3.125)
+        let shiftedProj = vp.projectPoint(shiftedCenter)
+        XCTAssertTrue(shiftedProj.isInsideFrustum)
+        XCTAssertEqual(shiftedProj.uv.x, 0.5, accuracy: 1e-3)
+        XCTAssertEqual(shiftedProj.uv.y, 0.5, accuracy: 1e-3)
+        XCTAssertEqual(shiftedProj.eyeDepth, 7.0, accuracy: 1e-3)
+
+        // Point behind projector must not be inside frustum
+        let behindProj = vp.projectPoint(SIMD3<Float>(0, -2, 2))
+        XCTAssertFalse(behindProj.isInsideFrustum)
+    }
+
+    func testSSKPProjectRoundTripAndReaderResolution() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("sskp-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let objURL = tmpDir.appendingPathComponent("plateau.obj")
+        let objText = """
+        v -5 0 0
+        v  5 0 0
+        v  5 8 0
+        v -5 8 0
+        f 1 2 3 4
+        """
+        try objText.write(to: objURL, atomically: true, encoding: .utf8)
+
+        let sskpURL = tmpDir.appendingPathComponent("implantation.sskp")
+        let relPath = SSKPProject.relativePath(from: tmpDir, to: objURL)
+        XCTAssertEqual(relPath, "plateau.obj")
+
+        let vp = VideoProjector(
+            name: "VP1 Optoma ZU920ST",
+            specID: ProjectorSpec.optomaZU920ST.id,
+            position: SIMD3<Float>(0, -6, 5),
+            target: SIMD3<Float>(0, 4, 1.5),
+            throwRatio: 0.68,
+            lensShiftH: 0.10,
+            lensShiftV: -0.35,
+            pattern: .testGrid
+        )
+        let project = SSKPProject(
+            modelPath: objURL.path,
+            modelRelativePath: relPath,
+            projectors: [vp],
+            camera: SSKPProject.CameraState(
+                position: SIMD3<Float>(0, -12, 6),
+                target: SIMD3<Float>(0, 2, 1),
+                fovDegrees: 42,
+                isPerspective: true,
+                orthoScale: 10,
+                exposureOffset: 0
+            ),
+            lighting: SSKPProject.LightingState(
+                lightingMode: "sun",
+                sunAzimuthDegrees: 135,
+                sunElevationDegrees: 45,
+                sunIntensity: 1.0,
+                ambientIntensity: 0.5,
+                shadowsEnabled: true,
+                shadingStyle: "shaded",
+                backdropStyle: "studioDark",
+                customBackdropColor: SIMD3<Float>(0.1, 0.1, 0.12),
+                showsEdges: true,
+                showsGrid: true,
+                pointLights: []
+            ),
+            hiddenLayerNames: ["Cote"]
+        )
+
+        try project.write(to: sskpURL)
+
+        let decoded = try SSKPProject.read(from: sskpURL)
+        XCTAssertEqual(decoded.projectors.count, 1)
+        XCTAssertEqual(decoded.projectors.first?.name, "VP1 Optoma ZU920ST")
+        XCTAssertEqual(decoded.projectors.first?.specID, ProjectorSpec.optomaZU920ST.id)
+        XCTAssertEqual(Double(decoded.projectors.first?.throwRatio ?? 0), 0.68, accuracy: 1e-4)
+        XCTAssertEqual(Double(decoded.projectors.first?.lensShiftH ?? 0), 0.10, accuracy: 1e-4)
+        XCTAssertEqual(Double(decoded.projectors.first?.lensShiftV ?? 0), -0.35, accuracy: 1e-4)
+        XCTAssertEqual(decoded.resolveModelURL(relativeTo: sskpURL).standardizedFileURL, objURL.standardizedFileURL)
+
+        // SKPFileInfo identifies .sskp files, and SKPReader.load transparently loads the referenced 3D model
+        let sskpInfo = try SKPFileInfo.read(sskpURL)
+        XCTAssertTrue(sskpInfo.isSSKP)
+        let loadedModel = try SKPReader.load(sskpURL)
+        XCTAssertEqual(loadedModel.fileInfo.url.standardizedFileURL, objURL.standardizedFileURL)
+        XCTAssertEqual(loadedModel.stats.faces, 1)
     }
 }
 

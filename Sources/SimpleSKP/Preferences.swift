@@ -22,6 +22,7 @@ enum Preferences {
         static let oscFeedbackEnabled = "oscFeedbackEnabled"
         static let oscOutHost = "oscOutHost"
         static let oscOutPort = "oscOutPort"
+        static let hiddenFeatures = "hiddenFeatures"
     }
 
     static let defaults: [String: Any] = [
@@ -40,6 +41,7 @@ enum Preferences {
         Key.oscFeedbackEnabled: true,
         Key.oscOutHost: "127.0.0.1",
         Key.oscOutPort: Int(kSimpleSKPDefaultOSCOutPort),
+        Key.hiddenFeatures: false,
     ]
 
     @MainActor static func register() {
@@ -154,4 +156,16 @@ enum Preferences {
         }
         set { UserDefaults.standard.set(Int(newValue), forKey: Key.oscOutPort) }
     }
+
+    static var hiddenFeatures: Bool {
+        get { bool(Key.hiddenFeatures) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Key.hiddenFeatures)
+            NotificationCenter.default.post(name: .hiddenFeaturesChanged, object: nil)
+        }
+    }
+}
+
+extension Notification.Name {
+    static let hiddenFeaturesChanged = Notification.Name("SimpleSKP.hiddenFeaturesChanged")
 }

@@ -26,6 +26,7 @@ extension SketchUpAPI {
         let SUStringGetUTF8Length: Count
         let SUStringGetUTF8: @convention(c) (Ref, Int, UnsafeMutablePointer<CChar>, UnsafeMutablePointer<Int>) -> Int32
         let SUStringRelease: Release
+        let SUModelCreate: Release
         let SUModelCreateFromFileWithStatus: @convention(c) (OutRef, UnsafePointer<CChar>, UnsafeMutablePointer<Int32>) -> Int32
         let SUModelRelease: Release
         let SUModelGetEntities: GetRef
@@ -115,6 +116,7 @@ extension SketchUpAPI {
             SUStringGetUTF8Length = try sym(handle, "SUStringGetUTF8Length")
             SUStringGetUTF8 = try sym(handle, "SUStringGetUTF8")
             SUStringRelease = try sym(handle, "SUStringRelease")
+            SUModelCreate = try sym(handle, "SUModelCreate")
             SUModelCreateFromFileWithStatus = try sym(handle, "SUModelCreateFromFileWithStatus")
             SUModelRelease = try sym(handle, "SUModelRelease")
             SUModelGetEntities = try sym(handle, "SUModelGetEntities")

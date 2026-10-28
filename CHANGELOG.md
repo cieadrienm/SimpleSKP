@@ -1,5 +1,27 @@
 # Changelog — SimpleSKP
 
+## 1.4.0 — 2026-10-28
+- **Ouverture native des fichiers Collada (`.dae`) et Wavefront (`.obj`)** :
+  - Lecteurs directs sans dépendance externe (`Mesh3DReader`) avec prise en charge des matériaux et textures `.mtl` ainsi que des scènes et transformations Collada, conversion automatique d'unités et d'axe vertical (`Y-up` / `Z-up`).
+- **Simulation optique de vidéoprojecteurs (`VP`) & Projets `.sskp` (`hiddenFeatures`)** :
+  - Activation par `⌘⌥-clic` sur `Adrien Mondot` dans la fenêtre *À propos* (badge vert `hiddenFeatures`).
+  - Modèle optique précis (**Optoma ZU920ST** WUXGA `1920 × 1200` `16:10`, rapport `0.65–0.75:1`, *Lens Shift* H `±25 %` et V `±55 %`, `9 800 lm`, ainsi qu'**Optoma ZU920T** et **Optoma ZU725TST**) avec calcul exact du frustum asymétrique hors-axe.
+  - Occlusion géométrique réelle par passe de profondeur métrique Metal hors-écran (`r32Float`, `1024 × 1024` par VP) et *shader modifier* SceneKit : l'image projetée s'arrête sur le premier obstacle et ne traverse jamais la matière.
+  - Placement et visée 3D au clic sur la géométrie, mires de calage intégrées (*Grille 16:10*, *Barres de couleur*, *Cadre blanc*, *Image personnalisée*) et sauvegarde/ouverture de projets `.sskp` (`⌘S` / `⇧⌘S`).
+- **Annuler / Rétablir sur 100 niveaux (`⌘Z` / `⇧⌘Z`)** :
+  - Historique à 100 niveaux avec fusion automatique des glissages continus de curseurs couvrant les vidéoprojecteurs, les calques, l'éclairage, les styles de rendu, les mesures et la caméra.
+- **Ergonomie AutoCAD & Mesures (`⌘D`)** :
+  - Raccourci `H` en mode AutoCAD pour masquer rapidement l'objet ou le calque sélectionné/survolé, construction visuelle didactique calque par calque au chargement, désactivation du survol sur les fichiers `.skp` pour préserver la lisibilité, et synchronisation immédiate de l'outil de mesure (`⌘D`) avec la caméra.
+
+## 1.3.0 — 2026-10-26
+- **Import AutoCAD `.dwg` / `.dxf` direct en mémoire & construction progressive** :
+  - Lecture directe en mémoire des fichiers `.dwg` et `.dxf` en une seule passe (sans sérialisation `.skp` intermédiaire sur disque), mise à l'échelle automatique selon `$INSUNITS`, couleurs de calques et d'entités AutoCAD, et suivi de progression en direct (blocs, calques, arêtes, faces).
+  - Construction progressive calque par calque dans le viewport avec affichage immédiat.
+- **Outil de mesure interactif (`⌘D`) intégré dans la passe Metal SceneKit** :
+  - Magnétisme sur les sommets, milieux et arêtes, affichage de la distance 3D et des composantes $\Delta X / \Delta Y / \Delta Z$ directement dans le graphe SceneKit (`modelRoot`) pour suivre le panoramique, le zoom et l'orbite sans aucun retard de trame.
+- **Sélection et survol dans la vue 3D/2D** :
+  - Surlignage au survol, clic pour sélectionner le calque correspondant dans l'arborescence, raccourci `⌫` pour masquer rapidement le calque sélectionné et inertie fluide du défilement/zoom 2D et 3D.
+
 ## 1.2.0 — 2026-10-25
 - **Pilotage OSC, OSCQuery (`OSCScore`), API HTTP `/v1` & serveur MCP (`simpleskp-mcp`)** :
   - Serveur **OSC UDP** sur le port **`9150`** (`SIMPLESKP_OSC_IN_PORT`) et retour OSC en direct sur **`127.0.0.1:9151`** (`SIMPLESKP_OSC_OUT_PORT`, activable dans les Réglages).

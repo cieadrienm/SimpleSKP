@@ -20,13 +20,14 @@ struct AboutView: View {
     private let location = SketchUpAPI.locate()
     @State private var copiedVersion = false
     @State private var hoverWebsite = false
+    @State private var hiddenFeatures = Preferences.hiddenFeatures
 
     private static var features: [(icon: String, title: String, subtitle: String)] {
         [
             ("cube.transparent",
-             L("Lecture directe .skp, .dwg & .dxf", "Direct .skp, .dwg & .dxf reading"),
-             L("Ouverture asynchrone SketchUp et AutoCAD, calibration métrique automatique, SDK C embarqué et fusion Metal par matériaux.",
-               "Asynchronous SketchUp and AutoCAD loading, automatic metric calibration, embedded C SDK, and Metal material merging.")),
+             L("Lecture directe .skp, .dwg, .dxf, .dae & .obj", "Direct .skp, .dwg, .dxf, .dae & .obj reading"),
+             L("Ouverture asynchrone SketchUp, AutoCAD, Collada et Wavefront OBJ, calibration métrique automatique, SDK C embarqué et fusion Metal par matériaux.",
+               "Asynchronous SketchUp, AutoCAD, Collada and Wavefront OBJ loading, automatic metric calibration, embedded C SDK, and Metal material merging.")),
             ("sun.max.trianglebadge.exclamationmark",
              L("Rendu architectural doux", "Soft architectural rendering"),
              L("Matériaux PBR, soleil orientable à cascades d'ombres, contre-jour céleste et styles Maquette / Rayons X.",
@@ -86,8 +87,8 @@ struct AboutView: View {
                         .help(L("Cliquer pour copier le numéro de version", "Click to copy version number"))
                     }
 
-                    Text(L("Visualiseur 3D natif et léger de fichiers SketchUp (.skp) et AutoCAD (.dwg, .dxf) pour macOS.",
-                           "Lightweight native 3D viewer for SketchUp (.skp) and AutoCAD (.dwg, .dxf) files on macOS."))
+                    Text(L("Visualiseur 3D natif et léger de fichiers SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae) et Wavefront (.obj) pour macOS.",
+                           "Lightweight native 3D viewer for SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), and Wavefront (.obj) files on macOS."))
                         .font(.system(size: 12.5))
                         .foregroundStyle(Theme.textDim.swiftUI)
                         .fixedSize(horizontal: false, vertical: true)
@@ -97,6 +98,9 @@ struct AboutView: View {
                         statusPill("Metal 3D PBR", color: Theme.accent.swiftUI)
                         statusPill("OSC :\(RemoteControlServer.shared.oscInPort)", color: Color(red: 0.78, green: 0.57, blue: 0.92))
                         statusPill("OSCQuery / MCP :\(RemoteControlServer.shared.httpPort)", color: Color(red: 0.36, green: 0.88, blue: 0.90))
+                        if hiddenFeatures {
+                            statusPill("hiddenFeatures", color: Theme.alive.swiftUI)
+                        }
                     }
                     .padding(.top, 2)
                 }
@@ -146,26 +150,48 @@ struct AboutView: View {
             // Footer with clickable company link & actions
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Button {
-                        if let url = URL(string: "https://adrien-m.net") {
-                            NSWorkspace.shared.open(url)
+                    HStack(spacing: 8) {
+                        Button {
+                            let flags = NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
+                            if flags.contains([.command, .option]) {
+                                Preferences.hiddenFeatures.toggle()
+                                hiddenFeatures = Preferences.hiddenFeatures
+                            } else if let url = URL(string: "https://adrien-m.net") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text("Adrien Mondot · cie Adrien M")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(hoverWebsite ? Theme.text.swiftUI : Theme.accent.swiftUI)
+                                Text("— adrien-m.net")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(hoverWebsite ? Theme.accent.swiftUI : Theme.textDim.swiftUI)
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Theme.accent.swiftUI)
+                            }
                         }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Text("Adrien Mondot · cie Adrien M")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(hoverWebsite ? Theme.text.swiftUI : Theme.accent.swiftUI)
-                            Text("— adrien-m.net")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(hoverWebsite ? Theme.accent.swiftUI : Theme.textDim.swiftUI)
-                            Image(systemName: "arrow.up.right.square")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Theme.accent.swiftUI)
+                        .buttonStyle(.plain)
+                        .onHover { hoverWebsite = $0 }
+                        .help(L("Ouvrir https://adrien-m.net dans le navigateur", "Open https://adrien-m.net in browser"))
+
+                        if hiddenFeatures {
+                            Text("hiddenFeatures")
+                                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                .foregroundStyle(Theme.alive.swiftUI)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(
+                                    Capsule()
+                                        .fill(Theme.alive.swiftUI.opacity(0.16))
+                                        .overlay(
+                                            Capsule()
+                                                .strokeBorder(Theme.alive.swiftUI.opacity(0.45), lineWidth: 1)
+                                        )
+                                )
                         }
                     }
-                    .buttonStyle(.plain)
-                    .onHover { hoverWebsite = $0 }
-                    .help(L("Ouvrir https://adrien-m.net dans le navigateur", "Open https://adrien-m.net in browser"))
 
                     Text(L("SDK C SketchUp (Trimble) embarqué sous licence SDK SketchUp · Code SimpleSKP sous licence GPL v3.",
                            "SketchUp C SDK (Trimble) embedded under SketchUp SDK licence · SimpleSKP code under GPL v3."))
@@ -468,12 +494,12 @@ struct HelpView: View {
     private func sectionContent(_ section: Section) -> some View {
         switch section {
         case .overview:
-            heading(L("Ouvrir et inspecter un modèle SketchUp ou AutoCAD", "Opening and inspecting a SketchUp or AutoCAD model"))
-            paragraph(L("SimpleSKP ouvre directement les fichiers SketchUp (.skp) et AutoCAD (.dwg, .dxf) en lecture seule. Les plans et modèles CAD bénéficient d'une calibration métrique automatique, d'un recentrage des coordonnées géodésiques et d'un cadrage automatique en vue de dessus pour les plans 2D.",
-                        "SimpleSKP opens SketchUp (.skp) and AutoCAD (.dwg, .dxf) files directly in read-only mode. CAD plans and models feature automatic metric unit calibration, geodetic origin recentering, and automatic top-view framing for 2D plans."))
+            heading(L("Ouvrir et inspecter un modèle 3D ou un plan CAD", "Opening and inspecting a 3D model or CAD plan"))
+            paragraph(L("SimpleSKP ouvre directement les fichiers SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae) et Wavefront (.obj) en lecture seule. Les plans et modèles CAD bénéficient d'une calibration métrique automatique, d'un recentrage des coordonnées géodésiques et d'un cadrage automatique en vue de dessus pour les plans 2D.",
+                        "SimpleSKP opens SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), and Wavefront (.obj) files directly in read-only mode. CAD plans and models feature automatic metric unit calibration, geodetic origin recentering, and automatic top-view framing for 2D plans."))
             step(1, L("Ouvrir un fichier", "Open a file"),
-                 L("Double-cliquer un fichier .skp, .dwg ou .dxf dans le Finder, le glisser dans la fenêtre ou utiliser ⌘O.",
-                   "Double-click a .skp, .dwg, or .dxf file in Finder, drag it into the window, or press ⌘O."))
+                 L("Double-cliquer un fichier .skp, .dwg, .dxf, .dae ou .obj dans le Finder, le glisser dans la fenêtre ou utiliser ⌘O.",
+                   "Double-click a .skp, .dwg, .dxf, .dae, or .obj file in Finder, drag it into the window, or press ⌘O."))
             step(2, L("Choisir l'angle et le style", "Choose angle and style"),
                  L("Utiliser la barre d'outils supérieure pour basculer entre les vues standard (Iso, Dessus, Face, Droite…), la projection (Perspective / Parallèle) et les styles de rendu (PBR, Blanc, Rayons X, Filaire).",
                    "Use the top toolbar to switch between standard views (Iso, Top, Front, Right…), projection (Perspective / Parallel), and shading styles (PBR, Clay, X-Ray, Wireframe)."))

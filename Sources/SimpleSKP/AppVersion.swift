@@ -3,7 +3,7 @@ import Foundation
 /// Version and build reported by SimpleSKP (status bar, About window, `--version`).
 /// Both are stamped into the bundle's `Info.plist` by `Scripts/bundle.sh`.
 struct AppVersion: Equatable, CustomStringConvertible, Sendable {
-    static let defaultVersion = "1.1.0"
+    static let defaultVersion = "1.4.0"
     static let bundleIdentifier = "net.cieadrienm.simpleskp"
 
     let version: String

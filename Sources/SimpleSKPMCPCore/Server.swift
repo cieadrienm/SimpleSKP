@@ -5,7 +5,7 @@ public final class SimpleSKPMCPServer {
     let apiBase: String
     let version: String
 
-    public init(transport: @escaping Transport, apiBase: String = "http://127.0.0.1:17950", version: String = "1.2.0") {
+    public init(transport: @escaping Transport, apiBase: String = "http://127.0.0.1:17950", version: String = "1.4.0") {
         self.transport = transport
         self.apiBase = apiBase
         self.version = version

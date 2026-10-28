@@ -567,6 +567,9 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         model.handleMeasureClick(snapB, shiftLocked: true)
         XCTAssertEqual(model.measureEnd, snapB)
         XCTAssertEqual(DocumentModel.formatDistance(simd_distance(snapA.position, snapB.position)), "5.000 m")
+        XCTAssertTrue(scene.measureRoot.parent === scene.modelRoot, "measurement nodes live inside modelRoot for zero-lag camera sync")
+        XCTAssertFalse(scene.measureRoot.isHidden)
+        XCTAssertFalse(scene.measureRoot.childNodes.isEmpty)
 
         // First Escape clears the active points while keeping the tool active; second Escape exits the tool
         model.handleMeasureEscape()
@@ -575,5 +578,119 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         XCTAssertNil(model.measureEnd)
         model.handleMeasureEscape()
         XCTAssertFalse(model.isMeasuring)
+        XCTAssertTrue(scene.measureRoot.isHidden)
+
+        // Pressing H in CAD mode hides the selected layer
+        model.selectLayer(1)
+        scene.cancelLayerPulse()
+        XCTAssertTrue(model.layerVisible[1])
+        model.hideSelectedLayer()
+        XCTAssertFalse(model.layerVisible[1], "H hides the selected layer in CAD mode")
+        model.toggleLayer(1)
+        XCTAssertTrue(model.layerVisible[1])
+
+        // Progressive didactic view construction on multi-layer CAD scene
+        let deferredScene = ViewportScene(model: skp, deferInitialLayerBuild: true)
+        model.present(deferredScene, seconds: 0.1, progressiveConstruction: true)
+        XCTAssertNotNil(model.constructionProgress, "progressive construction starts with first batch")
+        model.finishProgressiveConstruction()
+        XCTAssertNil(model.constructionProgress)
+
+        // SketchUp (.skp) models disable viewport hover highlight and click-to-select for clean visual readability
+        let skpCube = SyntheticModel.cube()
+        let skpModel = DocumentModel()
+        let skpScene = ViewportScene(model: skpCube)
+        skpModel.present(skpScene, seconds: 0.1)
+        XCTAssertFalse(skpModel.isCAD)
+        skpModel.setHoveredLayer(1)
+        XCTAssertNil(skpModel.hoveredLayerIndex, "hover highlight is disabled on .skp models")
+        XCTAssertTrue(skpScene.hoveredLayers.isEmpty)
+        skpModel.selectLayerFromViewport(1)
+        XCTAssertNil(skpModel.selectedLayerIndex, "viewport click-to-select is disabled on .skp models")
+
+        // Hidden features (⌘⌥-clic on Adrien Mondot in About): toggles NSUserDefaults "hiddenFeatures",
+        // unlocks VideoProjector tool (Optoma ZU920ST) and .sskp project serialization
+        let previousHidden = Preferences.hiddenFeatures
+        defer { Preferences.hiddenFeatures = previousHidden }
+        Preferences.hiddenFeatures = true
+        XCTAssertTrue(UserDefaults.standard.bool(forKey: "hiddenFeatures"))
+        XCTAssertTrue(skpModel.hiddenFeaturesEnabled)
+
+        skpModel.addVideoProjector(spec: .optomaZU920ST)
+        XCTAssertEqual(skpModel.videoProjectors.count, 1)
+        XCTAssertEqual(skpModel.videoProjectors.first?.specID, ProjectorSpec.optomaZU920ST.id)
+        XCTAssertEqual(skpScene.videoProjectors.count, 1)
+
+        if let sskp = skpModel.buildSSKPProject(relativeTo: URL(fileURLWithPath: "/tmp/test_scene.sskp")) {
+            XCTAssertEqual(sskp.projectors.count, 1)
+            XCTAssertEqual(sskp.projectors.first?.specID, ProjectorSpec.optomaZU920ST.id)
+        } else {
+            XCTFail("buildSSKPProject must succeed when a model is loaded")
+        }
+    }
+
+    func testUndoRedoHundredLevels() {
+        let model = DocumentModel()
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        model.present(scene, seconds: 0.05)
+        XCTAssertFalse(model.canUndo)
+        XCTAssertFalse(model.canRedo)
+        XCTAssertEqual(DocumentModel.maxUndoLevels, 100)
+
+        // 1. Add a projector, adjust it, toggle a layer, then undo and redo each step
+        model.addVideoProjector(spec: .optomaZU920ST)
+        XCTAssertEqual(model.videoProjectors.count, 1)
+        XCTAssertTrue(model.canUndo)
+
+        model.updateSelectedVideoProjector { $0.lensShiftV = 0.40 }
+        XCTAssertEqual(model.videoProjectors[0].lensShiftV, 0.40, accuracy: 1e-5)
+
+        model.toggleLayer(0)
+        XCTAssertFalse(model.layerVisible[0])
+
+        model.undo() // undo toggleLayer(0)
+        XCTAssertTrue(model.layerVisible[0])
+        XCTAssertTrue(model.canRedo)
+
+        model.undo() // undo lensShiftV = 0.40
+        XCTAssertEqual(model.videoProjectors[0].lensShiftV, 0.0, accuracy: 1e-5)
+
+        model.undo() // undo addVideoProjector
+        XCTAssertEqual(model.videoProjectors.count, 0)
+        XCTAssertFalse(model.canUndo)
+
+        model.redo() // redo addVideoProjector
+        XCTAssertEqual(model.videoProjectors.count, 1)
+        model.redo() // redo lensShiftV = 0.40
+        XCTAssertEqual(model.videoProjectors[0].lensShiftV, 0.40, accuracy: 1e-5)
+        model.redo() // redo toggleLayer(0)
+        XCTAssertFalse(model.layerVisible[0])
+        XCTAssertFalse(model.canRedo)
+
+        // 2. Push 115 distinct actions and verify the stack is capped at 100 levels
+        model.clearUndoHistory()
+        for step in 1...115 {
+            model.recordUndoable("Step \(step)") {
+                model.videoProjectors[0].rollDegrees = Float(step)
+            }
+        }
+        XCTAssertEqual(model.undoStack.count, 100, "Undo stack must be capped at 100 levels")
+        XCTAssertEqual(model.videoProjectors[0].rollDegrees, 115.0, accuracy: 1e-4)
+
+        // Undo all 100 levels (from 115 down to 15)
+        for _ in 0..<100 {
+            model.undo()
+        }
+        XCTAssertFalse(model.canUndo)
+        XCTAssertEqual(model.redoStack.count, 100)
+        XCTAssertEqual(model.videoProjectors[0].rollDegrees, 15.0, accuracy: 1e-4)
+
+        // Redo all 100 levels (from 15 back to 115)
+        for _ in 0..<100 {
+            model.redo()
+        }
+        XCTAssertFalse(model.canRedo)
+        XCTAssertEqual(model.undoStack.count, 100)
+        XCTAssertEqual(model.videoProjectors[0].rollDegrees, 115.0, accuracy: 1e-4)
     }
 }

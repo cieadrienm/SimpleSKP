@@ -11,10 +11,31 @@ public enum SKPReader {
         public var faces: Int
         /// Estimated completion fraction (`0.0 ... 1.0`), or `nil` if indeterminate.
         public var fraction: Double?
-        public init(phase: String, faces: Int, fraction: Double? = nil) {
+        /// Edges converted so far.
+        public var edges: Int
+        /// Component definitions / CAD blocks converted so far.
+        public var blocks: Int
+        /// Layers read so far.
+        public var layers: Int
+        /// Didactic detail of the element currently being processed (e.g. block name, layer name, or section).
+        public var currentItem: String?
+
+        public init(
+            phase: String,
+            faces: Int,
+            fraction: Double? = nil,
+            edges: Int = 0,
+            blocks: Int = 0,
+            layers: Int = 0,
+            currentItem: String? = nil
+        ) {
             self.phase = phase
             self.faces = faces
             self.fraction = fraction
+            self.edges = edges
+            self.blocks = blocks
+            self.layers = layers
+            self.currentItem = currentItem
         }
     }
 
@@ -23,9 +44,22 @@ public enum SKPReader {
         progress: (@Sendable (Progress) -> Void)? = nil,
         isCancelled: @Sendable () -> Bool = { false }
     ) throws -> SKPModel {
+        if url.pathExtension.lowercased() == "sskp" {
+            let project: SSKPProject
+            do {
+                project = try SSKPProject.read(from: url)
+            } catch {
+                throw SKPError.unreadable(url)
+            }
+            let modelURL = project.resolveModelURL(relativeTo: url)
+            return try load(modelURL, progress: progress, isCancelled: isCancelled)
+        }
         let fileInfo = try SKPFileInfo.read(url)
         if fileInfo.isCAD {
             return try CADReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
+        }
+        if fileInfo.is3DMesh {
+            return try Mesh3DReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
         }
         return try loadSkpFile(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
     }
@@ -54,6 +88,30 @@ public enum SKPReader {
         defer { _ = f.SUModelRelease(&model) }
         if isCancelled() { throw SKPError.cancelled }
 
+        return try readModelRef(
+            model,
+            f: f,
+            fileInfo: fileInfo,
+            status: status,
+            start: start,
+            checkCancelBeforeConvert: false,
+            progress: progress,
+            isCancelled: isCancelled
+        )
+    }
+
+    /// Reads an already-created in-memory `SUModelRef` (caller holds `SKPReader.lock`).
+    static func readModelRef(
+        _ model: Ref,
+        f: SketchUpAPI.Functions,
+        fileInfo: SKPFileInfo,
+        status: Int32 = 0,
+        start: Date = Date(),
+        checkCancelBeforeConvert: Bool = true,
+        progress: (@Sendable (Progress) -> Void)? = nil,
+        isCancelled: @Sendable () -> Bool = { false }
+    ) throws -> SKPModel {
+        if checkCancelBeforeConvert, isCancelled() { throw SKPError.cancelled }
         return try withoutActuallyEscaping(isCancelled) { isCancelled in
             let c = Converter(f: f, progress: progress, isCancelled: isCancelled)
             progress?(Progress(phase: L("Lecture des matériaux et calques", "Reading materials and layers"), faces: 0, fraction: 0.20))
@@ -81,7 +139,14 @@ public enum SKPReader {
             }
             c.stats.definitions = c.definitions.count
             c.stats.loadSeconds = Date().timeIntervalSince(start)
-            progress?(Progress(phase: L("Construction de la scène", "Building scene"), faces: c.stats.faces, fraction: 0.88))
+            progress?(Progress(
+                phase: L("Construction de la scène", "Building scene"),
+                faces: c.stats.faces,
+                fraction: 0.88,
+                edges: c.stats.edges,
+                blocks: c.definitions.count,
+                layers: c.layers.count
+            ))
             return SKPModel(
                 root: root, definitions: c.definitions, materials: c.materials, layers: c.layers, scenes: scenes,
                 camera: c.ref(f.SUModelGetCamera, model).flatMap(c.camera),
@@ -291,7 +356,15 @@ public enum SKPReader {
                 if stats.faces % 2000 == 0 {
                     if isCancelled() { throw SKPError.cancelled }
                     let frac = 0.24 + 0.60 * (1.0 - 1.0 / (1.0 + Double(stats.faces) / 40_000.0))
-                    progress?(Progress(phase: L("Conversion des faces", "Converting faces"), faces: stats.faces, fraction: frac))
+                    progress?(Progress(
+                        phase: L("Conversion des faces", "Converting faces"),
+                        faces: stats.faces,
+                        fraction: frac,
+                        edges: stats.edges,
+                        blocks: definitions.count,
+                        layers: layers.count,
+                        currentItem: name.isEmpty ? nil : name
+                    ))
                 }
                 stats.faces += 1
                 var helper: Ref = nil
@@ -357,6 +430,19 @@ public enum SKPReader {
                 def.edges[slot].positions.append(pb)
                 box.add(pa); box.add(pb)
                 stats.edges += 1
+                if stats.edges % 5000 == 0 {
+                    let frac = 0.26 + 0.58 * (1.0 - 1.0 / (1.0 + Double(stats.edges) / 60_000.0))
+                    let layerName = layers.indices.contains(edgeKey.layer) ? layers[edgeKey.layer].name : nil
+                    progress?(Progress(
+                        phase: L("Conversion des arêtes…", "Converting edges…"),
+                        faces: stats.faces,
+                        fraction: frac,
+                        edges: stats.edges,
+                        blocks: definitions.count,
+                        layers: layers.count,
+                        currentItem: !name.isEmpty ? name : layerName
+                    ))
+                }
             }
 
             if def.meshes.isEmpty && def.edges.isEmpty,

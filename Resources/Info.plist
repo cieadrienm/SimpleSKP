@@ -92,6 +92,69 @@
 				<string>com.autodesk.dxf</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Modèle 3D Collada DAE</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.khronos.collada.digital-asset-exchange</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Modèle 3D Wavefront OBJ</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.geometry-definition-format</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Projet SimpleSKP</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>net.cieadrienm.sskp</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>net.cieadrienm.sskp</string>
+			<key>UTTypeDescription</key>
+			<string>Projet SimpleSKP</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>sskp</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
@@ -143,6 +206,42 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>dxf</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.khronos.collada.digital-asset-exchange</string>
+			<key>UTTypeDescription</key>
+			<string>Modèle 3D Collada DAE</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.xml</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dae</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>public.geometry-definition-format</string>
+			<key>UTTypeDescription</key>
+			<string>Modèle 3D Wavefront OBJ</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.text</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>obj</string>
 				</array>
 			</dict>
 		</dict>

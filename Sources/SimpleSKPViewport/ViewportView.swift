@@ -26,6 +26,8 @@ public final class ViewportView: SCNView {
     public var onHoverLayer: ((Int?) -> Void)?
     /// Called when the user clicks an object in the viewport to select its layer in the hierarchy.
     public var onSelectLayer: ((Int) -> Void)?
+    /// Called when the user presses `H` in CAD mode to hide the selected object/layer.
+    public var onHideSelectedLayer: (() -> Void)?
     /// Currently hovered layer index in `model.layers`, if any.
     public private(set) var hoveredLayer: Int? = nil
 
@@ -47,6 +49,21 @@ public final class ViewportView: SCNView {
     public var onMeasureClick: ((MeasureSnap, Bool) -> Void)?
     /// Called when the user presses `Esc` while `isMeasuring == true`.
     public var onMeasureEscape: (() -> Void)?
+
+    /// `true` when the user is clicking a 3D point in the viewport to place or aim a video projector.
+    public var isPickingProjectorPoint: Bool = false {
+        didSet {
+            guard isPickingProjectorPoint != oldValue else { return }
+            window?.invalidateCursorRects(for: self)
+            if !isPickingProjectorPoint, !isMeasuring {
+                onMeasureHover?(nil, false)
+            }
+        }
+    }
+    /// Called when the user clicks a point in the viewport while `isPickingProjectorPoint == true`.
+    public var onPickProjectorPoint: ((MeasureSnap) -> Void)?
+    /// Called when the user presses `Esc` while `isPickingProjectorPoint == true`.
+    public var onCancelProjectorPick: (() -> Void)?
 
     /// `true` when viewing a 2D AutoCAD plan: left-drag & trackpad scroll translate, wheel/pinch zoom, and `⌥`-drag rotates the 2D plan in-plane.
     public var is2DNavigationMode: Bool { rig.is2DMode }
@@ -89,6 +106,7 @@ public final class ViewportView: SCNView {
         cameraNode.camera = camera
         cameraNode.name = "camera"
         rig.onChange = { [unowned self] in
+            refreshMeasurementCamera()
             setNeedsDisplay(bounds)
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
@@ -132,7 +150,11 @@ public final class ViewportView: SCNView {
         get { Float(camera.fieldOfView) }
         set {
             let clamped = max(10.0, min(120.0, newValue))
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
             camera.fieldOfView = CGFloat(clamped)
+            SCNTransaction.commit()
+            refreshMeasurementCamera()
             requestRedraw()
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
@@ -153,7 +175,11 @@ public final class ViewportView: SCNView {
     public var orthographicScale: Float {
         get { Float(camera.orthographicScale) }
         set {
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
             camera.orthographicScale = Double(max(0.01, min(10_000.0, newValue)))
+            SCNTransaction.commit()
+            refreshMeasurementCamera()
             requestRedraw()
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
@@ -220,6 +246,40 @@ public final class ViewportView: SCNView {
         }
     }
 
+    /// Destination camera pose (if a smooth glide is in progress) or current camera pose.
+    public var targetCameraPose: CameraRig.Pose {
+        rig.targetPose
+    }
+
+    /// Destination orthographic scale (if a smooth glide is in progress) or current orthographic scale.
+    public var targetOrthographicScale: Float {
+        Float(rig.targetOrthographicScale)
+    }
+
+    /// Restores a complete camera pose and projection state (used by Undo/Redo).
+    public func restoreCameraState(
+        pose: CameraRig.Pose,
+        isPerspective persp: Bool,
+        fovDegrees: Float,
+        orthographicScale orthoScale: Float,
+        exposureOffset exposure: Float,
+        animated: Bool = true
+    ) {
+        camera.fieldOfView = CGFloat(max(10.0, min(120.0, fovDegrees)))
+        camera.exposureOffset = CGFloat(max(-3.0, min(3.0, exposure)))
+        if isPerspective != persp {
+            isPerspective = persp
+        }
+        let scale: Double? = persp ? nil : Double(max(0.01, min(10_000.0, orthoScale)))
+        if animated {
+            rig.glide(to: pose, orthographicScale: scale)
+        } else {
+            rig.set(pose, orthographicScale: scale)
+        }
+        refreshMeasurementCamera()
+        requestRedraw()
+    }
+
     /// Aims the camera from its current position towards `target`.
     public func setCameraTarget(_ target: SIMD3<Float>, animated: Bool = false) {
         setCameraLookAt(position: rig.pose.position, target: target, animated: animated)
@@ -236,8 +296,26 @@ public final class ViewportView: SCNView {
         }
     }
 
+    /// Synchronizes the camera parameters with `viewportScene.measureRoot` so measurements stay at constant screen thickness with zero lag.
+    public func refreshMeasurementCamera() {
+        guard let scene = viewportScene else { return }
+        let ortho = camera.usesOrthographicProjection ? Float(camera.orthographicScale) : nil
+        scene.updateMeasurementCamera(
+            pose: rig.pose,
+            orthoScale: ortho,
+            tanHalfFOV: tanHalfFOV,
+            viewportHeight: Float(max(1, bounds.height))
+        )
+    }
+
+    public override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        refreshMeasurementCamera()
+    }
+
     /// Forces an immediate on-demand SceneKit redraw even when only light or camera post-processing properties changed.
     public func requestRedraw() {
+        refreshMeasurementCamera()
         let pos = cameraNode.simdPosition
         cameraNode.simdPosition = pos
         SCNTransaction.flush()
@@ -266,6 +344,7 @@ public final class ViewportView: SCNView {
         } else {
             look(scene.model.isPlanar2D ? .top : .iso, animated: false)
         }
+        refreshMeasurementCamera()
     }
 
     public func zoomExtents(animated: Bool) {
@@ -361,6 +440,7 @@ public final class ViewportView: SCNView {
             }
             camera.usesOrthographicProjection = !isPerspective
             Rendering.setAmbientOcclusion(ambientOcclusionEnabled, intensity: ambientOcclusionIntensity, on: camera)
+            refreshMeasurementCamera()
             setNeedsDisplay(bounds)
         }
     }
@@ -426,7 +506,7 @@ public final class ViewportView: SCNView {
 
     public override func resetCursorRects() {
         super.resetCursorRects()
-        if isMeasuring {
+        if isMeasuring || isPickingProjectorPoint {
             addCursorRect(bounds, cursor: .crosshair)
         }
     }
@@ -443,7 +523,7 @@ public final class ViewportView: SCNView {
         guard drag == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
         updateHoveredLayer(at: point)
-        if isMeasuring {
+        if isMeasuring || isPickingProjectorPoint {
             onMeasureHover?(pickSnapPoint(at: point), event.modifierFlags.contains(.shift))
         }
     }
@@ -453,7 +533,7 @@ public final class ViewportView: SCNView {
             hoveredLayer = nil
             onHoverLayer?(nil)
         }
-        if isMeasuring {
+        if isMeasuring || isPickingProjectorPoint {
             onMeasureHover?(nil, false)
         }
         super.mouseExited(with: event)
@@ -465,7 +545,7 @@ public final class ViewportView: SCNView {
             && event.clickCount == 1
             && !isFreeFlying
             && !event.modifierFlags.contains(.option)
-            && (!shiftPressed || isMeasuring)
+            && (!shiftPressed || isMeasuring || isPickingProjectorPoint)
         if drag == .orbit || drag == .rotate2D {
             rig.release(time: event.timestamp)
         } else if drag == .pan {
@@ -474,6 +554,12 @@ public final class ViewportView: SCNView {
         drag = nil
         if wasSingleClick {
             let point = convert(event.locationInWindow, from: nil)
+            if isPickingProjectorPoint {
+                if let snap = pickSnapPoint(at: point) {
+                    onPickProjectorPoint?(snap)
+                }
+                return
+            }
             if isMeasuring {
                 if let snap = pickSnapPoint(at: point) {
                     onMeasureHover?(snap, shiftPressed)
@@ -481,7 +567,7 @@ public final class ViewportView: SCNView {
                 }
                 return
             }
-            if let picked = pickLayer(at: point) {
+            if viewportScene?.model.fileInfo.isCAD == true, let picked = pickLayer(at: point) {
                 hoveredLayer = picked
                 onHoverLayer?(picked)
                 onSelectLayer?(picked)
@@ -613,9 +699,17 @@ public final class ViewportView: SCNView {
         allowScrollMomentum = false
         rig.stop()
         if event.keyCode == 53, isFreeFlying { isFreeFlying = false; return } // Esc
+        if event.keyCode == 53, isPickingProjectorPoint { onCancelProjectorPick?(); return } // Esc in projector pick
         if event.keyCode == 53, isMeasuring { onMeasureEscape?(); return } // Esc in measure tool
         if press(event) { return }
-        if event.charactersIgnoringModifiers?.lowercased() == "z",
+        let chars = event.charactersIgnoringModifiers?.lowercased()
+        if chars == "h",
+           event.modifierFlags.isDisjoint(with: [.command, .option, .control]),
+           viewportScene?.model.fileInfo.isCAD == true {
+            onHideSelectedLayer?()
+            return
+        }
+        if chars == "z",
            event.modifierFlags.isDisjoint(with: [.command, .option, .control]) {
             if event.modifierFlags.contains(.shift) {
                 zoomExtents(animated: true)
@@ -784,8 +878,18 @@ public final class ViewportView: SCNView {
         if camera.usesOrthographicProjection {
             let metresPerPoint = visibleHeight / Float(max(1, bounds.height))
             let dx = Float(point.x - bounds.midX) * metresPerPoint, dy = Float(point.y - bounds.midY) * metresPerPoint
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
             camera.orthographicScale *= Double(ratio)
-            rig.pose.position += (rig.pose.right * dx + rig.pose.up * dy) * (1 - ratio)
+            SCNTransaction.commit()
+            let delta = (rig.pose.right * dx + rig.pose.up * dy) * (1 - ratio)
+            if simd_length_squared(delta) > 0 {
+                rig.pose.position += delta
+            } else {
+                refreshMeasurementCamera()
+                setNeedsDisplay(bounds)
+                onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
+            }
         } else {
             if newGesture { zoomAnchor = hit(point) }
             let pose = rig.pose
@@ -898,6 +1002,13 @@ public final class ViewportView: SCNView {
     }
 
     func updateHoveredLayer(at point: CGPoint) {
+        guard viewportScene?.model.fileInfo.isCAD == true else {
+            if hoveredLayer != nil {
+                hoveredLayer = nil
+                onHoverLayer?(nil)
+            }
+            return
+        }
         let picked = pickLayer(at: point)
         guard picked != hoveredLayer else { return }
         hoveredLayer = picked
