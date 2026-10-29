@@ -113,6 +113,54 @@ public struct ProjectorSpec: Identifiable, Codable, Equatable, Sendable {
         lumens: 7500,
         bodySize: SIMD3<Float>(0.486, 0.4325, 0.176)
     )
+
+    /// Optoma ZU606TSTE — Short-throw WUXGA DuraCore laser projector (`6 300 lm`, fixed `0.79:1`, vertical lens shift `100–120 %` offset / `V ±60 %`).
+    public static let optomaZU606TSTE = ProjectorSpec(
+        id: "optoma-zu606tste",
+        manufacturer: "Optoma",
+        model: "ZU606TSTE",
+        nativeWidth: 1920,
+        nativeHeight: 1200,
+        minThrowRatio: 0.79,
+        maxThrowRatio: 0.79,
+        defaultThrowRatio: 0.79,
+        maxLensShiftH: 0.15,
+        maxLensShiftV: 0.60,
+        lumens: 6300,
+        bodySize: SIMD3<Float>(0.374, 0.302, 0.117)
+    )
+
+    /// Optoma ZH450ST — Compact short-throw Full HD 1080p DuraCore laser projector (`4 200 lm`, fixed `0.496:1`, native offset `116 %` / `V ±66 %`).
+    public static let optomaZH450ST = ProjectorSpec(
+        id: "optoma-zh450st",
+        manufacturer: "Optoma",
+        model: "ZH450ST",
+        nativeWidth: 1920,
+        nativeHeight: 1080,
+        minThrowRatio: 0.496,
+        maxThrowRatio: 0.496,
+        defaultThrowRatio: 0.496,
+        maxLensShiftH: 0.15,
+        maxLensShiftV: 0.66,
+        lumens: 4200,
+        bodySize: SIMD3<Float>(0.274, 0.216, 0.114)
+    )
+
+    /// Optoma ZH406ST — Short-throw Full HD 1080p DuraCore laser projector (`4 200 lm`, fixed `0.50:1`, native offset `115 %` / `V ±65 %`).
+    public static let optomaZH406ST = ProjectorSpec(
+        id: "optoma-zh406st",
+        manufacturer: "Optoma",
+        model: "ZH406ST",
+        nativeWidth: 1920,
+        nativeHeight: 1080,
+        minThrowRatio: 0.50,
+        maxThrowRatio: 0.50,
+        defaultThrowRatio: 0.50,
+        maxLensShiftH: 0.15,
+        maxLensShiftV: 0.65,
+        lumens: 4200,
+        bodySize: SIMD3<Float>(0.337, 0.265, 0.1225)
+    )
 }
 
 /// Extensible catalog of video projector models.
@@ -121,6 +169,9 @@ public enum ProjectorCatalog {
         .optomaZU920ST,
         .optomaZU920T,
         .optomaZU725TST,
+        .optomaZU606TSTE,
+        .optomaZH450ST,
+        .optomaZH406ST,
     ]
 
     public static func spec(for id: String) -> ProjectorSpec {
@@ -156,12 +207,18 @@ public struct VideoProjector: Identifiable, Codable, Equatable, Sendable {
     public var lensShiftV: Float
     /// Light output multiplier (`0.0 ... 3.0`, default `1.0`).
     public var intensity: Float
+    /// Indirect reverberation / bounce multiplier (`0.0 ... 2.5`, default `1.0`).
+    public var reverbIntensity: Float
     /// Selected projection pattern or custom image.
     public var pattern: ProjectionPattern
     /// File path to a custom projected image when `pattern == .customImage`.
     public var customImagePath: String?
     /// Whether to draw the 3D projector body and wireframe frustum in the viewport.
     public var showsFrustum: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, specID, isEnabled, position, target, rollDegrees, throwRatio, lensShiftH, lensShiftV, intensity, reverbIntensity, pattern, customImagePath, showsFrustum
+    }
 
     public init(
         id: UUID = UUID(),
@@ -175,6 +232,7 @@ public struct VideoProjector: Identifiable, Codable, Equatable, Sendable {
         lensShiftH: Float = 0,
         lensShiftV: Float = 0,
         intensity: Float = 1.0,
+        reverbIntensity: Float = 1.0,
         pattern: ProjectionPattern = .testGrid,
         customImagePath: String? = nil,
         showsFrustum: Bool = true
@@ -192,9 +250,58 @@ public struct VideoProjector: Identifiable, Codable, Equatable, Sendable {
         self.lensShiftH = simd_clamp(lensShiftH, -resolvedSpec.maxLensShiftH, resolvedSpec.maxLensShiftH)
         self.lensShiftV = simd_clamp(lensShiftV, -resolvedSpec.maxLensShiftV, resolvedSpec.maxLensShiftV)
         self.intensity = max(0, min(3.0, intensity))
+        self.reverbIntensity = max(0, min(2.5, reverbIntensity))
         self.pattern = pattern
         self.customImagePath = customImagePath
         self.showsFrustum = showsFrustum
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try c.decode(UUID.self, forKey: .id)
+        let name = try c.decode(String.self, forKey: .name)
+        let specID = try c.decode(String.self, forKey: .specID)
+        let isEnabled = try c.decode(Bool.self, forKey: .isEnabled)
+        let position = try c.decode(SIMD3<Float>.self, forKey: .position)
+        let target = try c.decode(SIMD3<Float>.self, forKey: .target)
+        let rollDegrees = try c.decodeIfPresent(Float.self, forKey: .rollDegrees) ?? 0
+        let throwRatio = try c.decode(Float.self, forKey: .throwRatio)
+        let lensShiftH = try c.decode(Float.self, forKey: .lensShiftH)
+        let lensShiftV = try c.decode(Float.self, forKey: .lensShiftV)
+        let intensity = try c.decode(Float.self, forKey: .intensity)
+        let reverbIntensity = try c.decodeIfPresent(Float.self, forKey: .reverbIntensity) ?? 1.0
+        let pattern = try c.decode(ProjectionPattern.self, forKey: .pattern)
+        let customImagePath = try c.decodeIfPresent(String.self, forKey: .customImagePath)
+        let showsFrustum = try c.decode(Bool.self, forKey: .showsFrustum)
+        self.init(
+            id: id,
+            name: name,
+            specID: specID,
+            isEnabled: isEnabled,
+            position: position,
+            target: target,
+            rollDegrees: rollDegrees,
+            throwRatio: throwRatio,
+            lensShiftH: lensShiftH,
+            lensShiftV: lensShiftV,
+            intensity: intensity,
+            reverbIntensity: reverbIntensity,
+            pattern: pattern,
+            customImagePath: customImagePath,
+            showsFrustum: showsFrustum
+        )
+    }
+
+    /// Luminous flux attenuation factor in `[0, 1]` as a function of the cosine of the incidence angle
+    /// (`cosTheta = dot(surfaceNormal, toProjectorUnitRay)`):
+    /// - `cosTheta = 1.0` (`0°`, surface normal to the beam): returns `1.0` (100% optimal flux).
+    /// - `cosTheta -> 0.0` (`90°`, grazing incidence): smoothly approaches `0.0` via Lambert's cosine law + grazing obliquity falloff.
+    public static func incidenceFluxFactor(cosTheta: Float) -> Float {
+        guard cosTheta > 0.01 else { return 0.0 }
+        let clamped = min(max(cosTheta, 0.0), 1.0)
+        let t = min(max(clamped / 0.16, 0.0), 1.0)
+        let smoothGrazing = t * t * (3.0 - 2.0 * t)
+        return pow(clamped, 1.35) * smoothGrazing
     }
 
     public var spec: ProjectorSpec {
@@ -202,8 +309,16 @@ public struct VideoProjector: Identifiable, Codable, Equatable, Sendable {
     }
 
     public mutating func applySpec(_ newSpec: ProjectorSpec) {
+        let oldModel = spec.model
         specID = newSpec.id
-        throwRatio = simd_clamp(throwRatio, newSpec.minThrowRatio, newSpec.maxThrowRatio)
+        if name.hasSuffix("— \(oldModel)") {
+            name = String(name.dropLast("— \(oldModel)".count)) + "— \(newSpec.model)"
+        }
+        if throwRatio < newSpec.minThrowRatio || throwRatio > newSpec.maxThrowRatio {
+            throwRatio = newSpec.defaultThrowRatio
+        } else {
+            throwRatio = simd_clamp(throwRatio, newSpec.minThrowRatio, newSpec.maxThrowRatio)
+        }
         lensShiftH = simd_clamp(lensShiftH, -newSpec.maxLensShiftH, newSpec.maxLensShiftH)
         lensShiftV = simd_clamp(lensShiftV, -newSpec.maxLensShiftV, newSpec.maxLensShiftV)
     }

@@ -507,4 +507,115 @@ final class RenderingTests: XCTestCase {
             "Occluded left side of rear screen behind the obstacle must NOT receive projected light (occluded=\(occludedLeftColor.greenComponent), lit=\(illuminatedRightColor.greenComponent))"
         )
     }
+
+    func testVideoProjectorIncidenceAngleAndIndirectReverberation() throws {
+        // 1. Incidence-angle test:
+        // - Right panel at x in [0.2, 2.5], y = 6: normal to the beam (normal = (0, -1, 0), theta ≈ 0°)
+        // - Left panel at x in [-2.5, -0.2]: steeply angled (grazing incidence theta ≈ 82° to the beam from origin)
+        // - Side wall at x = -4.2, y in [2.5, 5.8], z in [-2, 2] (outside direct frustum, facing +X toward the screen)
+        let normalRightPanel = SKPModel.Mesh(
+            material: 0, layer: 0,
+            positions: [
+                SIMD3(0.2, 6.0, -1.5), SIMD3(2.5, 6.0, -1.5), SIMD3(2.5, 6.0, 1.5), SIMD3(0.2, 6.0, 1.5)
+            ],
+            normals: [
+                SIMD3(0, -1, 0), SIMD3(0, -1, 0), SIMD3(0, -1, 0), SIMD3(0, -1, 0)
+            ],
+            uvs: [.zero, .zero, .zero, .zero],
+            indices: [0, 1, 2, 0, 2, 3]
+        )
+        // Left panel at x around -1.2, y = 6.0, with surface normal almost perpendicular to the ray from (0,0,0)
+        // Ray from (0,0,0) to (-1.2, 6.0, 0) has unit direction d ≈ (-0.196, 0.981, 0).
+        // A normal n = (0.985, -0.174, 0) has dot(n, -d) = 0.985*0.196 + (-0.174)*(-0.981) ≈ 0.36,
+        // or n = (0.96, 0.08, 0) has dot(n, -d) = 0.96*0.196 - 0.08*0.981 ≈ 0.11 (theta ≈ 83.7° grazing!).
+        let grazingN = simd_normalize(SIMD3<Float>(0.96, 0.08, 0.0))
+        let grazingLeftPanel = SKPModel.Mesh(
+            material: 0, layer: 0,
+            positions: [
+                SIMD3(-2.5, 6.0, -1.5), SIMD3(-0.2, 6.0, -1.5), SIMD3(-0.2, 6.0, 1.5), SIMD3(-2.5, 6.0, 1.5)
+            ],
+            normals: [grazingN, grazingN, grazingN, grazingN],
+            uvs: [.zero, .zero, .zero, .zero],
+            indices: [0, 1, 2, 0, 2, 3]
+        )
+        let sideBounceWall = SKPModel.Mesh(
+            material: 0, layer: 0,
+            positions: [
+                SIMD3(-4.2, 2.5, -2.0), SIMD3(-4.2, 5.8, -2.0), SIMD3(-4.2, 5.8, 2.0), SIMD3(-4.2, 2.5, 2.0)
+            ],
+            normals: [
+                SIMD3(1, 0, 0), SIMD3(1, 0, 0), SIMD3(1, 0, 0), SIMD3(1, 0, 0)
+            ],
+            uvs: [.zero, .zero, .zero, .zero],
+            indices: [0, 1, 2, 0, 2, 3]
+        )
+
+        let model = SKPModel(
+            root: SKPModel.Definition(name: "", meshes: [normalRightPanel, grazingLeftPanel, sideBounceWall], edges: [], children: []),
+            definitions: [],
+            materials: [SKPModel.Material(name: "Mat Wall", color: SIMD4(0.65, 0.65, 0.65, 1.0))],
+            layers: [SKPModel.Layer(name: "Layer0", isVisible: true)],
+            scenes: [],
+            camera: nil,
+            boundsMin: SIMD3(-4.5, 0, -2),
+            boundsMax: SIMD3(3.0, 6.5, 2),
+            fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/vp_incidence_reverb.skp"), fileSize: 0, version: "test", versionLabel: "test", thumbnailPNG: nil)
+        )
+
+        let scene = ViewportScene(model: model)
+        scene.backdropStyle = .studioDark
+        scene.showsGrid = false
+        scene.showsEdges = false
+        scene.sunIntensity = 0.0
+        scene.ambientIntensity = 0.02
+
+        var vp = VideoProjector(
+            name: "VP1 Optoma ZU920ST",
+            specID: ProjectorSpec.optomaZU920ST.id,
+            position: SIMD3<Float>(0, 0, 0),
+            target: SIMD3<Float>(0, 6, 0),
+            throwRatio: 0.75,
+            lensShiftH: 0.0,
+            lensShiftV: 0.0,
+            intensity: 1.4,
+            reverbIntensity: 0.0,
+            pattern: .whiteFrame,
+            showsFrustum: false
+        )
+        scene.videoProjectors = [vp]
+
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        view.present(scene)
+        // Part A: Look at the two front panels from (0, 2.5, 0) -> (0, 6.0, 0)
+        view.apply(camera: SKPModel.Camera(position: SIMD3<Float>(0, 2.5, 0), target: SIMD3<Float>(0, 6.0, 0), fovDegrees: 60), animated: false)
+        let repPanels = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        let grazingLeftColor = try XCTUnwrap(repPanels.colorAt(x: 55, y: 100)?.usingColorSpace(.sRGB))
+        let normalRightColor = try XCTUnwrap(repPanels.colorAt(x: 145, y: 100)?.usingColorSpace(.sRGB))
+
+        XCTAssertGreaterThan(
+            normalRightColor.greenComponent, 0.50,
+            "Normal-incidence panel (theta ≈ 0°) must render at full projected brightness"
+        )
+        XCTAssertLessThan(
+            grazingLeftColor.greenComponent, normalRightColor.greenComponent * 0.30,
+            "Grazing-incidence panel (theta ≈ 84°) must be strongly attenuated compared to normal incidence (grazing=\(grazingLeftColor.greenComponent), normal=\(normalRightColor.greenComponent))"
+        )
+
+        // Part B: Indirect Reverberation (QuestVR 4-quadrant bounce) on the side wall at x = -4.2 (outside direct frustum)
+        // Camera at (0.5, 4.2, 0) looking at (-4.2, 4.2, 0) (directly facing the side wall)
+        view.apply(camera: SKPModel.Camera(position: SIMD3<Float>(0.5, 4.2, 0), target: SIMD3<Float>(-4.2, 4.2, 0), fovDegrees: 50), animated: false)
+        let repNoReverb = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        let sideWallNoReverb = try XCTUnwrap(repNoReverb.colorAt(x: 100, y: 100)?.usingColorSpace(.sRGB))
+
+        vp.reverbIntensity = 1.8
+        scene.videoProjectors = [vp]
+        let repWithReverb = try XCTUnwrap(view.snapshot().cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:)))
+        let sideWallWithReverb = try XCTUnwrap(repWithReverb.colorAt(x: 100, y: 100)?.usingColorSpace(.sRGB))
+
+        XCTAssertGreaterThan(
+            sideWallWithReverb.greenComponent,
+            sideWallNoReverb.greenComponent + 0.08,
+            "Side wall outside the direct projector frustum must receive indirect bounce light from the illuminated screen (noReverb=\(sideWallNoReverb.greenComponent), withReverb=\(sideWallWithReverb.greenComponent))"
+        )
+    }
 }

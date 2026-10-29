@@ -38,6 +38,16 @@ final class VideoProjectorRenderer: @unchecked Sendable {
     private(set) var colorProperty: SCNMaterialProperty?
 
     private var cachedPatternKeys: [Int: String] = [:]
+    /// Cached 4-quadrant bounce tints (`0 = HG`, `1 = HD`, `2 = BG`, `3 = BD`) per projector slot,
+    /// computed via QuestVR's 12×12 quadrant probe (`moyenne_quadrant_12x12`).
+    private var cachedQuadrantTints: [Int: [SIMD3<Float>]] = [:]
+
+    func quadrantBounceTint(forSlot slot: Int, quadrant: Int) -> SIMD3<Float> {
+        guard let tints = cachedQuadrantTints[slot], quadrant >= 0, quadrant < tints.count else {
+            return SIMD3<Float>(repeating: 0.5)
+        }
+        return tints[quadrant]
+    }
 
     init(device: MTLDevice) {
         self.device = device
@@ -269,6 +279,44 @@ final class VideoProjectorRenderer: @unchecked Sendable {
             guard let baseAddress = rawBuf.baseAddress else { return }
             texture.replace(region: region, mipmapLevel: 0, withBytes: baseAddress, bytesPerRow: bytesPerRow)
         }
+        cachedQuadrantTints[slot] = Self.computeQuadrantBounceTints(pixels: pixels, width: w, height: h)
+    }
+
+    /// Computes the 4 quadrant bounce tints (`0 = HG`, `1 = HD`, `2 = BG`, `3 = BD`) from an RGBA8 pattern tile
+    /// using QuestVR Seine Musicale Auditorium's `moyenne_quadrant_12x12` probe (`sonde_rebond_ndi.gdshader`):
+    /// - 4 overlapping quadrants (`0.04..0.56` and `0.44..0.96`) with a staggered 12×12 = 144-sample grid per quadrant
+    /// - Chroma boost (`1.32`) and perceptual luma curve (`pow(luma, 0.72)`)
+    private static func computeQuadrantBounceTints(pixels: [UInt8], width w: Int, height h: Int) -> [SIMD3<Float>] {
+        var result: [SIMD3<Float>] = []
+        result.reserveCapacity(4)
+        let span: Float = 0.52
+        for q in 0..<4 {
+            let u0: Float = (q & 1) == 1 ? 0.44 : 0.04
+            let v0: Float = (q >= 2) ? 0.44 : 0.04
+            var sum = SIMD3<Float>.zero
+            for iy in 0..<12 {
+                let v = v0 + (Float(iy) + 0.5) * (span / 12.0)
+                let decal: Float = (iy & 1) == 1 ? 0.009 : -0.009
+                let py = min(max(Int(v * Float(h)), 0), h - 1)
+                let rowOffset = py * w * 4
+                for ix in 0..<12 {
+                    let u = u0 + (Float(ix) + 0.5) * (span / 12.0) + decal
+                    let px = min(max(Int(u * Float(w)), 0), w - 1)
+                    let idx = rowOffset + px * 4
+                    let r = Float(pixels[idx]) / 255.0
+                    let g = Float(pixels[idx + 1]) / 255.0
+                    let b = Float(pixels[idx + 2]) / 255.0
+                    sum += SIMD3<Float>(r, g, b)
+                }
+            }
+            let moy = sum * (1.0 / 144.0)
+            let luma = simd_dot(moy, SIMD3<Float>(0.299, 0.587, 0.114))
+            let chroma = simd_max(simd_mix(SIMD3<Float>(repeating: luma), moy, SIMD3<Float>(repeating: 1.32)), .zero)
+            let lumaGalbe = pow(min(max(luma, 0.0), 1.0), 0.72)
+            let teinte = luma > 0.0005 ? chroma * (lumaGalbe / luma) : .zero
+            result.append(teinte)
+        }
+        return result
     }
 
     private func drawPattern(for projector: VideoProjector, in ctx: CGContext, width w: CGFloat, height h: CGFloat) {
@@ -445,6 +493,18 @@ final class VideoProjectorRenderer: @unchecked Sendable {
     float4 sskp_projPI1;
     float4 sskp_projPI2;
     float4 sskp_projPI3;
+    float4x4 sskp_projBPos0;
+    float4x4 sskp_projBPos1;
+    float4x4 sskp_projBPos2;
+    float4x4 sskp_projBPos3;
+    float4x4 sskp_projBNorm0;
+    float4x4 sskp_projBNorm1;
+    float4x4 sskp_projBNorm2;
+    float4x4 sskp_projBNorm3;
+    float4x4 sskp_projBCol0;
+    float4x4 sskp_projBCol1;
+    float4x4 sskp_projBCol2;
+    float4x4 sskp_projBCol3;
     texture2d<float, access::sample> sskp_projDepth;
     texture2d<float, access::sample> sskp_projColor;
 
@@ -461,6 +521,7 @@ final class VideoProjectorRenderer: @unchecked Sendable {
         float3 sskp_mPos = float3(sskp_wPos.x, -sskp_wPos.z, sskp_wPos.y);
         float3 sskp_mNorm = float3(sskp_wNorm.x, -sskp_wNorm.z, sskp_wNorm.y);
         float3 sskp_totalProj = float3(0.0);
+        float3 sskp_totalRebond = float3(0.0);
 
         constexpr sampler sskp_depthSampler(coord::normalized, filter::nearest, address::clamp_to_edge);
         constexpr sampler sskp_colorSampler(coord::normalized, filter::linear, address::clamp_to_edge);
@@ -472,6 +533,32 @@ final class VideoProjectorRenderer: @unchecked Sendable {
             float sskp_intensity = sskp_pi.w;
             if (sskp_intensity <= 0.0001) { continue; }
 
+            // 1. Indirect Light Reverberation (QuestVR Seine Musicale 4-Quadrant Bounce)
+            float4x4 sskp_bPosMat = (sskp_i == 0) ? sskp_projBPos0 : ((sskp_i == 1) ? sskp_projBPos1 : ((sskp_i == 2) ? sskp_projBPos2 : sskp_projBPos3));
+            float4x4 sskp_bNormMat = (sskp_i == 0) ? sskp_projBNorm0 : ((sskp_i == 1) ? sskp_projBNorm1 : ((sskp_i == 2) ? sskp_projBNorm2 : sskp_projBNorm3));
+            float4x4 sskp_bColMat = (sskp_i == 0) ? sskp_projBCol0 : ((sskp_i == 1) ? sskp_projBCol1 : ((sskp_i == 2) ? sskp_projBCol2 : sskp_projBCol3));
+            float3 sskp_projRebond = float3(0.0);
+            for (int sskp_q = 0; sskp_q < 4; ++sskp_q) {
+                float4 sskp_bp = sskp_bPosMat[sskp_q];
+                float sskp_rad = sskp_bp.w;
+                if (sskp_rad <= 0.05) { continue; }
+                float3 sskp_bNorm = sskp_bNormMat[sskp_q].xyz;
+                float3 sskp_bCol = sskp_bColMat[sskp_q].xyz;
+                float3 sskp_versImpact = sskp_bp.xyz - sskp_mPos;
+                float sskp_d2 = dot(sskp_versImpact, sskp_versImpact);
+                float3 sskp_dir = sskp_versImpact * rsqrt(max(sskp_d2, 2.25));
+                float sskp_prox = 1.0 / (1.0 + sskp_d2 / (sskp_rad * sskp_rad));
+                float sskp_cosRecv = dot(sskp_mNorm, sskp_dir);
+                float sskp_orient = smoothstep(-0.20, 0.15, sskp_cosRecv) * (0.50 + 0.50 * clamp(sskp_cosRecv * 0.5 + 0.5, 0.0, 1.0));
+                float sskp_cosEmit = dot(-sskp_dir, sskp_bNorm);
+                float sskp_hemi = smoothstep(0.03, 0.35, sskp_cosEmit) * (0.55 + 0.45 * clamp(sskp_cosEmit * 0.5 + 0.5, 0.0, 1.0));
+                float sskp_roomEnv = 1.0 / (1.0 + sskp_d2 / (sskp_rad * sskp_rad * 3.5));
+                float sskp_poids = mix(0.28 * sskp_roomEnv, 1.0, sskp_prox * sskp_orient) * sskp_hemi;
+                sskp_projRebond += sskp_bCol * sskp_poids;
+            }
+            sskp_totalRebond += sskp_projRebond * 0.25;
+
+            // 2. Direct Optical Frustum Projection & Depth-Map Occlusion
             float4 sskp_clip = sskp_vp * float4(sskp_mPos, 1.0);
             float sskp_w = sskp_clip.w;
             if (sskp_w <= 0.15) { continue; }
@@ -501,12 +588,21 @@ final class VideoProjectorRenderer: @unchecked Sendable {
             sskp_vis *= 0.2;
             if (sskp_vis <= 0.001) { continue; }
 
+            // Incidence-angle luminous flux attenuation:
+            // - Surface normal to beam (theta = 0 deg -> ndotl = 1.0) gives 100% optimal flux (sskp_inc = 1.0)
+            // - Grazing incidence (theta -> 90 deg -> ndotl -> 0.0) attenuates smoothly to 0
+            float sskp_tInc = clamp(sskp_ndotl / 0.16, 0.0, 1.0);
+            float sskp_smoothGrazing = sskp_tInc * sskp_tInc * (3.0 - 2.0 * sskp_tInc);
+            float sskp_inc = pow(sskp_ndotl, 1.35) * sskp_smoothGrazing;
+
             float3 sskp_img = sskp_projColor.sample(sskp_colorSampler, sskp_atlasUV).rgb;
-            float sskp_inc = pow(sskp_ndotl, 0.55);
             float3 sskp_albedo = mix(float3(1.0), _surface.diffuse.rgb, 0.30);
             sskp_totalProj += sskp_img * sskp_albedo * (sskp_intensity * sskp_vis * sskp_inc * 1.45);
         }
-        _surface.emission.rgb = sskp_totalProj;
+        // Soft Reinhard compression on accumulated indirect bounce (as in QuestVR rebond_video.gdshaderinc)
+        sskp_totalRebond = sskp_totalRebond / (float3(1.0) + sskp_totalRebond * 0.45);
+        float3 sskp_rebondAlbedo = mix(float3(0.32), _surface.diffuse.rgb, 0.68);
+        _surface.emission.rgb = sskp_totalProj + sskp_rebondAlbedo * sskp_totalRebond;
     }
     """
 }

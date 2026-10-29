@@ -127,6 +127,35 @@ final class SimpleSKPCoreTests: XCTestCase {
     }
 
     func testReadFixture() throws {
+        let seineURL = URL(fileURLWithPath: "/Users/adrien/Dropbox/AM-VW - Seine musicale/Plans/La Seine Musicale - Auditorium.skp")
+        if FileManager.default.fileExists(atPath: seineURL.path) {
+            let model = try SKPReader.load(seineURL)
+            print("=== SEINE MUSICALE AUDITORIUM ===")
+            print("Bounds Min: \(model.boundsMin)")
+            print("Bounds Max: \(model.boundsMax)")
+            print("Size: \(model.size)")
+            print("Center: \(model.center)")
+            print("Scenes (\(model.scenes.count)):")
+            for (i, s) in model.scenes.enumerated() {
+                if let cam = s.camera {
+                    print("  Scene \(i): '\(s.name)' pos=\(cam.position) tgt=\(cam.target) fov=\(cam.fovDegrees) persp=\(cam.isPerspective)")
+                } else {
+                    print("  Scene \(i): '\(s.name)' (no camera)")
+                }
+            }
+            print("Layers (\(model.layers.count)):")
+            for (i, l) in model.layers.enumerated() {
+                print("  Layer \(i): '\(l.name)' visible=\(l.visible)")
+            }
+            if let defCam = model.camera {
+                print("Default Camera: pos=\(defCam.position) tgt=\(defCam.target) fov=\(defCam.fovDegrees)")
+            }
+            print("Top definitions (\(model.definitions.count)):")
+            for (i, d) in model.definitions.prefix(20).enumerated() {
+                print("  Def \(i): '\(d.name)' meshes=\(d.meshes.count) children=\(d.children.count)")
+            }
+            print("================================")
+        }
         guard SketchUpAPI.locate() != nil else { throw XCTSkip("SketchUp not installed") }
         let model = try SKPReader.load(Self.fixture)
         XCTAssertEqual(model.stats.faces, 18)
@@ -664,6 +693,24 @@ final class SimpleSKPCoreTests: XCTestCase {
         // Point behind projector must not be inside frustum
         let behindProj = vp.projectPoint(SIMD3<Float>(0, -2, 2))
         XCTAssertFalse(behindProj.isInsideFrustum)
+
+        // Verify Optoma ZH450ST (0.496:1, 1080p 16:9), ZH406ST (0.50:1, 1080p 16:9), and ZU606TSTE (0.79:1, WUXGA 16:10)
+        var vpSwitch = vp
+        vpSwitch.name = "VP 1 — ZU920ST"
+        vpSwitch.applySpec(.optomaZH450ST)
+        XCTAssertEqual(vpSwitch.name, "VP 1 — ZH450ST")
+        XCTAssertEqual(vpSwitch.throwRatio, 0.496, accuracy: 1e-4)
+        XCTAssertEqual(vpSwitch.spec.aspectRatio, 16.0 / 9.0, accuracy: 1e-4)
+
+        vpSwitch.applySpec(.optomaZH406ST)
+        XCTAssertEqual(vpSwitch.name, "VP 1 — ZH406ST")
+        XCTAssertEqual(vpSwitch.throwRatio, 0.50, accuracy: 1e-4)
+        XCTAssertEqual(vpSwitch.spec.aspectRatio, 16.0 / 9.0, accuracy: 1e-4)
+
+        vpSwitch.applySpec(.optomaZU606TSTE)
+        XCTAssertEqual(vpSwitch.name, "VP 1 — ZU606TSTE")
+        XCTAssertEqual(vpSwitch.throwRatio, 0.79, accuracy: 1e-4)
+        XCTAssertEqual(vpSwitch.spec.aspectRatio, 1.6, accuracy: 1e-4)
     }
 
     func testSSKPProjectRoundTripAndReaderResolution() throws {
@@ -741,6 +788,34 @@ final class SimpleSKPCoreTests: XCTestCase {
         let loadedModel = try SKPReader.load(sskpURL)
         XCTAssertEqual(loadedModel.fileInfo.url.standardizedFileURL, objURL.standardizedFileURL)
         XCTAssertEqual(loadedModel.stats.faces, 1)
+    }
+
+    func testVideoProjectorIncidenceFluxFactor() {
+        // 0° incidence (surface normal to beam -> cosTheta = 1.0) -> 100% flux
+        let f0 = VideoProjector.incidenceFluxFactor(cosTheta: cos(0.0 * .pi / 180.0))
+        XCTAssertEqual(Double(f0), 1.0, accuracy: 1e-5)
+
+        // 45° incidence -> ~62.6%
+        let f45 = VideoProjector.incidenceFluxFactor(cosTheta: cos(45.0 * .pi / 180.0))
+        XCTAssertLessThan(f45, f0)
+        XCTAssertGreaterThan(f45, 0.50)
+
+        // 60° incidence -> ~39.2%
+        let f60 = VideoProjector.incidenceFluxFactor(cosTheta: cos(60.0 * .pi / 180.0))
+        XCTAssertLessThan(f60, f45)
+
+        // 80° grazing incidence -> < 12%
+        let f80 = VideoProjector.incidenceFluxFactor(cosTheta: cos(80.0 * .pi / 180.0))
+        XCTAssertLessThan(f80, 0.12)
+        XCTAssertGreaterThan(f80, 0.01)
+
+        // 87° extreme grazing -> < 1%
+        let f87 = VideoProjector.incidenceFluxFactor(cosTheta: cos(87.0 * .pi / 180.0))
+        XCTAssertLessThan(f87, 0.01)
+
+        // 90° tangent to beam -> 0%
+        let f90 = VideoProjector.incidenceFluxFactor(cosTheta: cos(90.0 * .pi / 180.0))
+        XCTAssertEqual(Double(f90), 0.0, accuracy: 1e-6)
     }
 }
 

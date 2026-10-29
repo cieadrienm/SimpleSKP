@@ -1604,39 +1604,46 @@ struct ProjectorPopover: View {
 
                 // Throw Ratio
                 VStack(alignment: .leading, spacing: 3) {
+                    let isFixedLens = (spec.maxThrowRatio - spec.minThrowRatio) < 0.001
                     HStack {
-                        Text(L("Rapport de projection (Zoom)", "Throw ratio (Zoom)"))
+                        Text(isFixedLens
+                             ? L("Rapport de projection (Focale fixe)", "Throw ratio (Fixed lens)")
+                             : L("Rapport de projection (Zoom)", "Throw ratio (Zoom)"))
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textDim.swiftUI)
                         Spacer()
-                        Text(String(format: "%.2f : 1  (%.2f–%.2f)", proj.throwRatio, spec.minThrowRatio, spec.maxThrowRatio))
+                        Text(isFixedLens
+                             ? String(format: "%.3g : 1", spec.defaultThrowRatio)
+                             : String(format: "%.2f : 1  (%.2f–%.2f)", proj.throwRatio, spec.minThrowRatio, spec.maxThrowRatio))
                             .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(Theme.text.swiftUI)
                     }
-                    HStack(spacing: 6) {
-                        Slider(
-                            value: Binding(
-                                get: { Double(proj.throwRatio) },
-                                set: { val in
+                    if !isFixedLens {
+                        HStack(spacing: 6) {
+                            Slider(
+                                value: Binding(
+                                    get: { Double(simd_clamp(proj.throwRatio, spec.minThrowRatio, spec.maxThrowRatio)) },
+                                    set: { val in
+                                        model.updateSelectedVideoProjector {
+                                            $0.throwRatio = simd_clamp(Float(val), spec.minThrowRatio, spec.maxThrowRatio)
+                                        }
+                                    }
+                                ),
+                                in: Double(spec.minThrowRatio)...Double(max(spec.maxThrowRatio, spec.minThrowRatio + 0.01))
+                            )
+                            .controlSize(.small)
+                            .tint(Theme.alive.swiftUI)
+
+                            HStack(spacing: 2) {
+                                stepButton("minus") {
                                     model.updateSelectedVideoProjector {
-                                        $0.throwRatio = simd_clamp(Float(val), spec.minThrowRatio, spec.maxThrowRatio)
+                                        $0.throwRatio = simd_clamp($0.throwRatio - 0.01, spec.minThrowRatio, spec.maxThrowRatio)
                                     }
                                 }
-                            ),
-                            in: Double(spec.minThrowRatio)...Double(spec.maxThrowRatio)
-                        )
-                        .controlSize(.small)
-                        .tint(Theme.alive.swiftUI)
-
-                        HStack(spacing: 2) {
-                            stepButton("minus") {
-                                model.updateSelectedVideoProjector {
-                                    $0.throwRatio = simd_clamp($0.throwRatio - 0.01, spec.minThrowRatio, spec.maxThrowRatio)
-                                }
-                            }
-                            stepButton("plus") {
-                                model.updateSelectedVideoProjector {
-                                    $0.throwRatio = simd_clamp($0.throwRatio + 0.01, spec.minThrowRatio, spec.maxThrowRatio)
+                                stepButton("plus") {
+                                    model.updateSelectedVideoProjector {
+                                        $0.throwRatio = simd_clamp($0.throwRatio + 0.01, spec.minThrowRatio, spec.maxThrowRatio)
+                                    }
                                 }
                             }
                         }
@@ -1893,6 +1900,25 @@ struct ProjectorPopover: View {
                 )
                 .controlSize(.small)
                 .tint(Theme.alive.swiftUI)
+
+                HStack {
+                    Text(L("Réverbération indirecte", "Indirect reverberation"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textDim.swiftUI)
+                    Spacer()
+                    Text("\(Int((proj.reverbIntensity * 100).rounded())) %")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Theme.text.swiftUI)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(proj.reverbIntensity) },
+                        set: { val in model.updateSelectedVideoProjector { $0.reverbIntensity = Float(val) } }
+                    ),
+                    in: 0.0...2.0
+                )
+                .controlSize(.small)
+                .tint(Theme.accent.swiftUI)
 
                 HStack {
                     Toggle(isOn: Binding(

@@ -272,6 +272,7 @@ public final class ViewportScene: @unchecked Sendable {
     private lazy var projectorRenderer = VideoProjectorRenderer(device: Self.device)
     private var baseSurfaceModifiers: [ObjectIdentifier: String] = [:]
     private var projectorsShaderActive = false
+    private var cachedBounceMatrices: [(bPos: SCNMatrix4, bNorm: SCNMatrix4, bCol: SCNMatrix4)] = []
     /// Root node for 3D/2D measurement overlays (`⌘D`), living directly inside `modelRoot` so measurements pan, zoom, and orbit in the exact same Metal pass as the scene geometry with zero frame lag.
     public let measureRoot = SCNNode()
     private var measureIsActive = false
@@ -2405,8 +2406,12 @@ public final class ViewportScene: @unchecked Sendable {
                 zNear: zNear,
                 zFar: zFar
             )
+            cachedBounceMatrices = active.enumerated().map { slot, proj in
+                computeProjectorBounceMatrices(for: proj, slot: slot, diag: diag)
+            }
             projectorsShaderActive = true
         } else if projectorsShaderActive {
+            cachedBounceMatrices = []
             projectorsShaderActive = false
         }
 
@@ -2455,6 +2460,13 @@ public final class ViewportScene: @unchecked Sendable {
         material.setValue(depthProp, forKey: "sskp_projDepth")
         material.setValue(colorProp, forKey: "sskp_projColor")
 
+        let zeroMat = SCNMatrix4(simd_float4x4(
+            SIMD4<Float>.zero,
+            SIMD4<Float>.zero,
+            SIMD4<Float>.zero,
+            SIMD4<Float>.zero
+        ))
+
         for i in 0..<VideoProjectorRenderer.maxActiveProjectors {
             if i < active.count {
                 let p = active[i]
@@ -2462,11 +2474,79 @@ public final class ViewportScene: @unchecked Sendable {
                 material.setValue(NSValue(scnMatrix4: SCNMatrix4(vp)), forKey: "sskp_projVP\(i)")
                 let pi = SCNVector4(CGFloat(p.position.x), CGFloat(p.position.y), CGFloat(p.position.z), CGFloat(p.intensity))
                 material.setValue(NSValue(scnVector4: pi), forKey: "sskp_projPI\(i)")
+                let bounce = i < cachedBounceMatrices.count ? cachedBounceMatrices[i] : (bPos: zeroMat, bNorm: zeroMat, bCol: zeroMat)
+                material.setValue(NSValue(scnMatrix4: bounce.bPos), forKey: "sskp_projBPos\(i)")
+                material.setValue(NSValue(scnMatrix4: bounce.bNorm), forKey: "sskp_projBNorm\(i)")
+                material.setValue(NSValue(scnMatrix4: bounce.bCol), forKey: "sskp_projBCol\(i)")
             } else {
                 material.setValue(NSValue(scnMatrix4: SCNMatrix4Identity), forKey: "sskp_projVP\(i)")
                 material.setValue(NSValue(scnVector4: SCNVector4Zero), forKey: "sskp_projPI\(i)")
+                material.setValue(NSValue(scnMatrix4: zeroMat), forKey: "sskp_projBPos\(i)")
+                material.setValue(NSValue(scnMatrix4: zeroMat), forKey: "sskp_projBNorm\(i)")
+                material.setValue(NSValue(scnMatrix4: zeroMat), forKey: "sskp_projBCol\(i)")
             }
         }
+    }
+
+    /// Computes the 4-quadrant indirect reverberation matrices (`bPos`, `bNorm`, `bCol`) for `projector` at `slot`,
+    /// inspired by QuestVR Seine Musicale Auditorium's `rebond_video.gdshaderinc` (`_apport_projecteur_4quadrants`).
+    private func computeProjectorBounceMatrices(
+        for projector: VideoProjector,
+        slot: Int,
+        diag: Float
+    ) -> (bPos: SCNMatrix4, bNorm: SCNMatrix4, bCol: SCNMatrix4) {
+        let zeroMat = SCNMatrix4(simd_float4x4(.zero, .zero, .zero, .zero))
+        guard projector.isEnabled,
+              projector.intensity > 0.001,
+              projector.reverbIntensity > 0.001
+        else {
+            return (zeroMat, zeroMat, zeroMat)
+        }
+
+        let throwDist = projector.throwDistance
+        let maxRayReach = max(throwDist * 2.5, diag * 1.5)
+        let corners = projector.frustumCorners(atDistance: throwDist)
+        let lumenScale = pow(max(Float(projector.spec.lumens) / 6000.0, 0.35), 0.45)
+        let baseGain = pow(min(max(projector.intensity, 0.0), 2.5), 0.75) * 0.48 * projector.reverbIntensity * lumenScale
+
+        var posCols = [SIMD4<Float>](repeating: .zero, count: 4)
+        var normCols = [SIMD4<Float>](repeating: .zero, count: 4)
+        var colCols = [SIMD4<Float>](repeating: .zero, count: 4)
+
+        // 4 quadrants: 0 = HG (top-left), 1 = HD (top-right), 2 = BG (bottom-left), 3 = BD (bottom-right)
+        for q in 0..<4 {
+            let u: Float = (q & 1) == 1 ? 0.72 : 0.28
+            let v: Float = (q >= 2) ? 0.72 : 0.28
+            let topPt = corners.topLeft + (corners.topRight - corners.topLeft) * u
+            let botPt = corners.bottomLeft + (corners.bottomRight - corners.bottomLeft) * u
+            let targetPt = topPt + (botPt - topPt) * v
+            let rayVec = targetPt - projector.position
+            let rayDist = max(simd_length(rayVec), 0.05)
+            let rayDir = rayVec / rayDist
+
+            if let hit = raycastModelHit(from: projector.position, direction: rayDir, maxDistance: maxRayReach) {
+                let cosTheta = max(0.0, simd_dot(hit.normal, -rayDir))
+                let incFactor = VideoProjector.incidenceFluxFactor(cosTheta: cosTheta)
+                guard incFactor > 0.005 else { continue }
+
+                let projW = projector.projectedWidth(atDistance: hit.distance)
+                let bounceRadius = max(projW * 2.4, min(max(hit.distance * 1.4, 6.0), 18.0))
+                let quadTint = projectorRenderer.quadrantBounceTint(forSlot: slot, quadrant: q)
+                let surfReflectance = simd_mix(SIMD3<Float>(repeating: 1.0), hit.albedo, SIMD3<Float>(repeating: 0.45))
+                let bounceRGB = quadTint * surfReflectance * (baseGain * incFactor)
+
+                // Offset impact position slightly (2 cm) along the bounce normal so points on the wall plane have cosEmit <= 0
+                let impactPt = hit.point + hit.normal * 0.02
+                posCols[q] = SIMD4<Float>(impactPt.x, impactPt.y, impactPt.z, bounceRadius)
+                normCols[q] = SIMD4<Float>(hit.normal.x, hit.normal.y, hit.normal.z, 0.0)
+                colCols[q] = SIMD4<Float>(bounceRGB.x, bounceRGB.y, bounceRGB.z, 1.0)
+            }
+        }
+
+        let bPos = SCNMatrix4(simd_float4x4(posCols[0], posCols[1], posCols[2], posCols[3]))
+        let bNorm = SCNMatrix4(simd_float4x4(normCols[0], normCols[1], normCols[2], normCols[3]))
+        let bCol = SCNMatrix4(simd_float4x4(colCols[0], colCols[1], colCols[2], colCols[3]))
+        return (bPos, bNorm, bCol)
     }
 
     /// Tests whether `point` in model space is visible to `projector` (inside its optical frustum and NOT occluded by any closer scene surface).
@@ -2491,10 +2571,21 @@ public final class ViewportScene: @unchecked Sendable {
 
     /// Raycasts a segment in model space (`modelRoot`) against visible opaque face geometry and returns the closest hit distance along `direction`.
     public func raycastModelDistance(from origin: SIMD3<Float>, direction: SIMD3<Float>, maxDistance: Float) -> Float? {
+        raycastModelHit(from: origin, direction: direction, maxDistance: maxDistance)?.distance
+    }
+
+    /// Raycasts a segment in model space (`modelRoot`) against visible opaque face geometry and returns the closest hit distance, 3D point, oriented surface normal, and diffuse albedo.
+    public func raycastModelHit(
+        from origin: SIMD3<Float>,
+        direction: SIMD3<Float>,
+        maxDistance: Float
+    ) -> (distance: Float, point: SIMD3<Float>, normal: SIMD3<Float>, albedo: SIMD3<Float>)? {
         let dirLen = simd_length(direction)
         guard dirLen > 1e-6, maxDistance > 0.02 else { return nil }
         let unitDir = direction / dirLen
         var bestT: Float = .infinity
+        var bestNormal = SIMD3<Float>(0, -1, 0)
+        var bestMaterial: SCNMaterial? = nil
 
         for chunk in faceChunks {
             guard !chunk.node.isHidden,
@@ -2512,6 +2603,7 @@ public final class ViewportScene: @unchecked Sendable {
             ) else { continue }
 
             let pv = chunk.positions.contents().bindMemory(to: Float.self, capacity: chunk.positions.length / 4)
+            let chunkMat = chunk.node.geometry?.firstMaterial
             chunk.indicesData.withUnsafeBytes { rawIdx in
                 guard let ix = rawIdx.bindMemory(to: UInt32.self).baseAddress else { return }
                 var tIdx = 0
@@ -2539,11 +2631,24 @@ public final class ViewportScene: @unchecked Sendable {
                     let t = f * simd_dot(e2, q)
                     if t >= 0.04, t <= maxDistance, t < bestT {
                         bestT = t
+                        let triCross = simd_cross(e1, e2)
+                        let cLen = simd_length(triCross)
+                        if cLen > 1e-7 {
+                            var n = triCross / cLen
+                            if simd_dot(n, unitDir) > 0 { n = -n }
+                            bestNormal = n
+                        }
+                        bestMaterial = chunkMat
                     }
                 }
             }
         }
-        return bestT < .infinity ? bestT : nil
+        guard bestT < .infinity else { return nil }
+        var albedo = SIMD3<Float>(repeating: 0.90)
+        if let color = (bestMaterial?.diffuse.contents as? NSColor)?.usingColorSpace(.sRGB) {
+            albedo = SIMD3<Float>(Float(color.redComponent), Float(color.greenComponent), Float(color.blueComponent))
+        }
+        return (bestT, origin + unitDir * bestT, bestNormal, albedo)
     }
 
     private func rebuildProjectorGizmos() {

@@ -1,5 +1,13 @@
 # Changelog — SimpleSKP
 
+## 1.4.1 — 2026-10-29
+- **Nouveaux modèles de vidéoprojecteurs Optoma** :
+  - Ajout des modèles courte focale et ultra-courte focale **Optoma ZU606TSTe** (WUXGA `1920 × 1200` `16:10`, rapport fixe `0.79:1`, *Lens Shift* H `±10 %` / V `±20 %`, `6 300 lm`), **Optoma ZH450ST** (Full HD `1920 × 1080` `16:9`, rapport fixe `0.496:1`, offset vertical `+16 %`, `4 200 lm`) et **Optoma ZH406ST** (Full HD `1920 × 1080` `16:9`, rapport fixe `0.50:1`, offset vertical `+15 %`, `4 200 lm`).
+- **Atténuation physique du flux lumineux selon l'angle d'incidence ($\theta$)** :
+  - Loi de Lambert et chute aux angles rasants ($\cos^{1.35}\theta \cdot \operatorname{smoothstep}(0.0, 0.16, \cos\theta)$) directement dans le *shader modifier* Metal : une paroi normale au faisceau ($\theta = 0^\circ$) offre `100 %` de rendement lumineux, tandis qu'une incidence rasante ($\theta \to 90^\circ$) tend continûment vers `0 %` sans surcoût GPU.
+- **Simulation de la réverbération lumineuse indirecte (inspirée de QuestVR Seine Musicale Auditorium)** :
+  - Sonde colorimétrique 4-quadrants (`HG`, `HD`, `BG`, `BD`, $12 \times 12 = 144$ échantillons par quadrant, exaltation chromatique et galbe de luminance) couplée au lancer de rayons 3D des 4 quadrants d'impact (position 3D, normale de la paroi, albédo et facteur d'incidence) et curseur de **Réverbération indirecte (`0 % – 200 %`)**.
+
 ## 1.4.0 — 2026-10-28
 - **Ouverture native des fichiers Collada (`.dae`) et Wavefront (`.obj`)** :
   - Lecteurs directs sans dépendance externe (`Mesh3DReader`) avec prise en charge des matériaux et textures `.mtl` ainsi que des scènes et transformations Collada, conversion automatique d'unités et d'axe vertical (`Y-up` / `Z-up`).
