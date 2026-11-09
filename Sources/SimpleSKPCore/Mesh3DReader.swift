@@ -1652,8 +1652,20 @@ public enum Mesh3DReader {
         return norms
     }
 
+    /// Extracts boundary edges and sharp crease edges (> 24° dihedral angle) from a list of triangle meshes.
+    static func extractFeatureEdges(from meshes: [SKPModel.Mesh]) -> [SIMD3<Float>] {
+        var result: [SIMD3<Float>] = []
+        for mesh in meshes {
+            let segs = extractFeatureEdges(positions: mesh.positions, indices: mesh.indices)
+            if !segs.isEmpty {
+                result.append(contentsOf: segs)
+            }
+        }
+        return result
+    }
+
     /// Extracts boundary edges and sharp crease edges (> 24° dihedral angle) from a triangle mesh.
-    private static func extractFeatureEdges(positions: [SIMD3<Float>], indices: [UInt32]) -> [SIMD3<Float>] {
+    static func extractFeatureEdges(positions: [SIMD3<Float>], indices: [UInt32]) -> [SIMD3<Float>] {
         let triCount = indices.count / 3
         guard triCount > 0, triCount <= 60_000 else { return [] }
         var edgeNormals: [EdgeKey: SIMD3<Float>] = [:]

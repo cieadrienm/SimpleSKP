@@ -70,12 +70,47 @@ final class DocumentModel {
     var selectedPointLightIndex: Int = 0
     var showsPointLightGizmo: Bool = true
     var hiddenFeaturesEnabled: Bool = Preferences.hiddenFeatures
+    enum InspectorCategory: String, CaseIterable {
+        case videoProjectors
+        case stageLights
+    }
+
     var videoProjectors: [VideoProjector] = []
     var selectedVideoProjectorIndex: Int = 0
+    var selectedVideoProjectorIndices: Set<Int> = [0]
+    var showProjectorInspector: Bool = false
+    var showProjectorPopover: Bool = false
+    var inspectorCategory: InspectorCategory = .videoProjectors
+    /// When `true`, only the 3D wireframe frustum cones and projector bodies are rendered in the viewport without computing surface projection or shadow maps.
+    var projectorsFrustumOnly: Bool = false
+    /// When `true`, video projector light emission in the 3D viewport simulates realistic illuminance (Lux),
+    /// taking into account nominal lumens, inverse-square beam divergence (`1/d²`), active throw ratio zoom,
+    /// lens transmission losses, and optical center-to-corner vignetting.
+    var photometricSimulation: Bool = true
+    /// Calibrated reference illuminance in Lux corresponding to a nominal 1.0 white level in the viewport.
+    /// Default `250.0 lx` corresponds to a standard theatrical stage screen reference.
+    var photometricReferenceLux: Float = 250.0
     var projectorPickMode: ProjectorPickMode = .none
+    var syphonOutputEnabled: Bool = Preferences.syphonOutputEnabled
+    var syphonOutputResolution: SyphonOutputResolution = Preferences.syphonOutputResolution
+    var isSyphonAvailable: Bool { ViewportView.isSyphonAvailable }
+    var availableSyphonSources: [LiveVideoSource] = LiveVideoSourceManager.shared.syphonSources
+    var availableNDISources: [LiveVideoSource] = []
     var sskpURL: URL? = nil
     var pendingSSKPProject: SSKPProject? = nil
+
+    // Art-Net DMX & Millumin Conduite Lumière
+    var artNetListening: Bool = false
+    var artNetPacketCount: UInt64 = 0
+    var isArtNetActive: Bool = false
+    var latestDMXChannelsByUniverse: [Int: [UInt8]] = [:]
+    var milluminBoardName: String? = nil
+    var milluminCues: [MilluminLightingCue] = []
+    var activeMilluminCueIndex: Int? = nil
+    @ObservationIgnored private var artNetThrottler: DispatchWorkItem?
+
     @ObservationIgnored private var hiddenFeaturesObserver: NSObjectProtocol?
+    @ObservationIgnored private var liveVideoSourcesObserver: NSObjectProtocol?
     var sunAzimuthDegrees: Float = -135
     var sunElevationDegrees: Float = 45
     var sunIntensity: Float = Rendering.defaultSunIntensity
@@ -89,6 +124,7 @@ final class DocumentModel {
     var cameraExposure: Float = -0.62
     var cameraOrthoScale: Float = 1
     var cameraSpeedScale: Float = 1
+    var hasNonDefaultCameraOptics = false
     var showSidebar = false
     var isMeasuring = false
     var measureStart: MeasureSnap? = nil
@@ -137,6 +173,10 @@ final class DocumentModel {
         var ambientIntensity: Float
         var videoProjectors: [VideoProjector]
         var selectedVideoProjectorIndex: Int
+        var selectedVideoProjectorIndices: Set<Int>
+        var projectorsFrustumOnly: Bool
+        var photometricSimulation: Bool
+        var photometricReferenceLux: Float
         var isMeasuring: Bool
         var measureStart: MeasureSnap?
         var measureEnd: MeasureSnap?
@@ -158,6 +198,7 @@ final class DocumentModel {
     private(set) var undoStack: [UndoEntry] = []
     private(set) var redoStack: [UndoEntry] = []
     @ObservationIgnored private var isRecordingOrApplyingUndo = false
+    @ObservationIgnored var isApplyingRemoteControl = false
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
@@ -218,6 +259,10 @@ final class DocumentModel {
             ambientIntensity: ambientIntensity,
             videoProjectors: videoProjectors,
             selectedVideoProjectorIndex: selectedVideoProjectorIndex,
+            selectedVideoProjectorIndices: selectedVideoProjectorIndices,
+            projectorsFrustumOnly: projectorsFrustumOnly,
+            photometricSimulation: photometricSimulation,
+            photometricReferenceLux: photometricReferenceLux,
             isMeasuring: isMeasuring,
             measureStart: measureStart,
             measureEnd: measureEnd,
@@ -234,7 +279,7 @@ final class DocumentModel {
         restoresCameraPose: Bool = false,
         _ body: () -> Void
     ) {
-        guard !isRecordingOrApplyingUndo else {
+        guard !isRecordingOrApplyingUndo && !isApplyingRemoteControl else {
             body()
             return
         }
@@ -334,6 +379,10 @@ final class DocumentModel {
 
         videoProjectors = snapshot.videoProjectors
         selectedVideoProjectorIndex = snapshot.selectedVideoProjectorIndex
+        selectedVideoProjectorIndices = snapshot.selectedVideoProjectorIndices
+        projectorsFrustumOnly = snapshot.projectorsFrustumOnly
+        photometricSimulation = snapshot.photometricSimulation
+        photometricReferenceLux = snapshot.photometricReferenceLux
         if videoProjectors.isEmpty {
             cancelProjectorPick()
         }
@@ -403,6 +452,17 @@ final class DocumentModel {
                 self?.hiddenFeaturesEnabled = Preferences.hiddenFeatures
             }
         }
+        liveVideoSourcesObserver = NotificationCenter.default.addObserver(
+            forName: .sskpLiveVideoSourcesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.availableSyphonSources = LiveVideoSourceManager.shared.syphonSources
+                self.availableNDISources = LiveVideoSourceManager.shared.ndiSources
+            }
+        }
         viewport.onFreeFlyingChange = { [weak self] in
             guard let self else { return }
             self.isFreeFlying = $0
@@ -444,18 +504,55 @@ final class DocumentModel {
         viewport.onCancelProjectorPick = { [weak self] in
             self?.cancelProjectorPick()
         }
+        setupArtNetReceiver()
+    }
+
+    func performBatchedRemoteUpdate(_ body: () -> Void) {
+        let wasRemote = isApplyingRemoteControl
+        isApplyingRemoteControl = true
+        defer {
+            isApplyingRemoteControl = wasRemote
+            syncCameraStateFromViewport()
+        }
+        viewport.performBatchedUpdate {
+            body()
+        }
     }
 
     func syncCameraStateFromViewport() {
         let pose = viewport.cameraPose
-        cameraPosition = pose.position
-        cameraYaw = pose.yaw
-        cameraPitch = pose.pitch
-        cameraDistance = pose.distance
-        cameraFOV = viewport.fieldOfView
-        cameraExposure = viewport.exposureOffset
-        cameraOrthoScale = viewport.orthographicScale
-        cameraSpeedScale = viewport.movementSpeedScale
+        if simd_distance_squared(cameraPosition, pose.position) > 1e-8 {
+            cameraPosition = pose.position
+        }
+        if abs(cameraYaw - pose.yaw) > 1e-5 {
+            cameraYaw = pose.yaw
+        }
+        if abs(cameraPitch - pose.pitch) > 1e-5 {
+            cameraPitch = pose.pitch
+        }
+        if abs(cameraDistance - pose.distance) > 1e-5 {
+            cameraDistance = pose.distance
+        }
+        let fov = viewport.fieldOfView
+        if abs(cameraFOV - fov) > 1e-4 {
+            cameraFOV = fov
+        }
+        let exp = viewport.exposureOffset
+        if abs(cameraExposure - exp) > 1e-4 {
+            cameraExposure = exp
+        }
+        let ortho = viewport.orthographicScale
+        if abs(cameraOrthoScale - ortho) > 1e-5 {
+            cameraOrthoScale = ortho
+        }
+        let spd = viewport.movementSpeedScale
+        if abs(cameraSpeedScale - spd) > 1e-5 {
+            cameraSpeedScale = spd
+        }
+        let nonDefaultOptics = abs(fov - 35) > 0.5 || abs(exp - (-0.62)) > 0.05
+        if hasNonDefaultCameraOptics != nonDefaultOptics {
+            hasNonDefaultCameraOptics = nonDefaultOptics
+        }
     }
 
     var cameraTarget: SIMD3<Float> {
@@ -545,8 +642,12 @@ final class DocumentModel {
         }
         viewport.ambientOcclusionIntensity = CGFloat(ambientOcclusionIntensity)
         viewport.ambientOcclusionEnabled = ambientOcclusionEnabled
+        viewport.syphonOutputResolution = syphonOutputResolution
         state = .ready(scene)
         viewport.present(scene)
+        if syphonOutputEnabled {
+            viewport.syphonOutputEnabled = true
+        }
         if scene.model.camera == nil {
             activeStandardView = scene.model.isPlanar2D ? .top : .iso
         }
@@ -996,7 +1097,9 @@ final class DocumentModel {
     func setCameraFOV(_ degrees: Float) {
         let clamped = max(10.0, min(120.0, degrees))
         recordUndoable(L("Focale caméra", "Camera FOV"), coalesceKey: "camera-fov", restoresCameraPose: true) {
-            cameraFOV = clamped
+            if abs(cameraFOV - clamped) > 1e-4 { cameraFOV = clamped }
+            let nonDefaultOptics = abs(clamped - 35) > 0.5 || abs(cameraExposure - (-0.62)) > 0.05
+            if hasNonDefaultCameraOptics != nonDefaultOptics { hasNonDefaultCameraOptics = nonDefaultOptics }
             viewport.fieldOfView = clamped
         }
     }
@@ -1009,7 +1112,9 @@ final class DocumentModel {
     func setCameraExposure(_ ev: Float) {
         let clamped = max(-3.0, min(3.0, ev))
         recordUndoable(L("Exposition caméra", "Camera Exposure"), coalesceKey: "camera-exposure", restoresCameraPose: true) {
-            cameraExposure = clamped
+            if abs(cameraExposure - clamped) > 1e-4 { cameraExposure = clamped }
+            let nonDefaultOptics = abs(cameraFOV - 35) > 0.5 || abs(clamped - (-0.62)) > 0.05
+            if hasNonDefaultCameraOptics != nonDefaultOptics { hasNonDefaultCameraOptics = nonDefaultOptics }
             viewport.exposureOffset = clamped
         }
     }
@@ -1017,93 +1122,93 @@ final class DocumentModel {
     func setCameraOrthoScale(_ scale: Float) {
         let clamped = max(0.05, min(10_000.0, scale))
         recordUndoable(L("Échelle orthographique", "Orthographic Scale"), coalesceKey: "camera-ortho", restoresCameraPose: true) {
-            cameraOrthoScale = clamped
+            if abs(cameraOrthoScale - clamped) > 1e-5 { cameraOrthoScale = clamped }
             viewport.orthographicScale = clamped
         }
     }
 
     func setCameraSpeedScale(_ scale: Float) {
         let clamped = max(1.0 / 16.0, min(16.0, scale))
-        cameraSpeedScale = clamped
+        if abs(cameraSpeedScale - clamped) > 1e-5 { cameraSpeedScale = clamped }
         viewport.movementSpeedScale = clamped
     }
 
     func setCameraPosition(_ position: SIMD3<Float>) {
         recordUndoable(L("Position caméra", "Camera Position"), coalesceKey: "camera-pos", restoresCameraPose: true) {
-            activeStandardView = nil
+            if activeStandardView != nil { activeStandardView = nil }
             viewport.setCameraPose(position: position)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     func setCameraOrientation(yawDegrees: Float? = nil, pitchDegrees: Float? = nil) {
         recordUndoable(L("Orientation caméra", "Camera Orientation"), coalesceKey: "camera-orient", restoresCameraPose: true) {
-            activeStandardView = nil
+            if activeStandardView != nil { activeStandardView = nil }
             viewport.setCameraPose(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     func setCameraDistance(_ distance: Float) {
         recordUndoable(L("Distance cible caméra", "Camera Target Distance"), coalesceKey: "camera-dist", restoresCameraPose: true) {
             viewport.setCameraPose(distance: max(0.05, distance))
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     func setCameraTarget(_ target: SIMD3<Float>, animated: Bool = false) {
         recordUndoable(L("Cible caméra", "Camera Target"), coalesceKey: "camera-target", restoresCameraPose: true) {
-            activeStandardView = nil
+            if activeStandardView != nil { activeStandardView = nil }
             viewport.setCameraTarget(target, animated: animated)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     func setCameraLookAt(position: SIMD3<Float>, target: SIMD3<Float>, animated: Bool = false) {
-        recordUndoable(L("Cadrage caméra", "Camera Framing"), restoresCameraPose: true) {
-            activeStandardView = nil
+        recordUndoable(L("Cadrage caméra", "Camera Framing"), coalesceKey: "camera-lookat", restoresCameraPose: true) {
+            if activeStandardView != nil { activeStandardView = nil }
             viewport.setCameraLookAt(position: position, target: target, animated: animated)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     func orbitCameraByDegrees(yaw dYawDegrees: Float, pitch dPitchDegrees: Float) {
         recordUndoable(L("Rotation caméra", "Camera Orbit"), coalesceKey: "camera-orbit", restoresCameraPose: true) {
-            activeStandardView = nil
+            if activeStandardView != nil { activeStandardView = nil }
             viewport.orbitByDegrees(yaw: dYawDegrees, pitch: dPitchDegrees)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     func levelCameraHorizon(animated: Bool = true) {
         recordUndoable(L("Horizon à niveau", "Level Horizon"), restoresCameraPose: true) {
-            activeStandardView = nil
+            if activeStandardView != nil { activeStandardView = nil }
             viewport.levelHorizon(animated: animated)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     /// Places the camera at human eye height (`1.70 m` above the model floor or Z=0) and levels the horizon.
     func setCameraEyeHeight(_ heightAboveFloor: Float = 1.70) {
         recordUndoable(L("Hauteur d'œil", "Eye Height"), restoresCameraPose: true) {
-            activeStandardView = nil
+            if activeStandardView != nil { activeStandardView = nil }
             let bMinZ = scene?.visibleBounds.min.z ?? skp?.boundsMin.z ?? 0
             let bMaxZ = scene?.visibleBounds.max.z ?? skp?.boundsMax.z ?? 3
             let floorZ = (bMinZ <= 0.2 && bMaxZ >= 1.5) ? 0.0 : bMinZ
             var pos = viewport.cameraModelPosition
             pos.z = floorZ + heightAboveFloor
             viewport.setCameraPose(position: pos, pitchDegrees: 0)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
     /// Places the camera at the geometric center of the model and levels the horizon.
     func centerCameraInModel() {
         recordUndoable(L("Centrer la caméra", "Center Camera"), restoresCameraPose: true) {
-            activeStandardView = nil
+            if activeStandardView != nil { activeStandardView = nil }
             let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
             viewport.setCameraPose(position: center, pitchDegrees: 0)
-            syncCameraStateFromViewport()
+            if !isApplyingRemoteControl { syncCameraStateFromViewport() }
         }
     }
 
@@ -1184,8 +1289,8 @@ final class DocumentModel {
         }
     }
 
-    func setAmbientOcclusionIntensity(_ value: Float) {
-        recordUndoable(L("Intensité AO", "AO Intensity"), coalesceKey: "ao-intensity") {
+    func setAmbientOcclusionIntensity(_ value: Float, coalesce: Bool = true) {
+        recordUndoable(L("Intensité AO", "AO Intensity"), coalesceKey: coalesce ? "ao-intensity" : nil) {
             let clamped = max(0, min(2.0, value))
             ambientOcclusionIntensity = clamped
             Preferences.ambientOcclusionIntensity = clamped
@@ -1268,9 +1373,10 @@ final class DocumentModel {
         }
     }
 
-    func updateSelectedPointLight(position: SIMD3<Float>? = nil, intensity: Float? = nil) {
+    func updateSelectedPointLight(position: SIMD3<Float>? = nil, intensity: Float? = nil, coalesceKey: String? = "point-light") {
         guard pointLights.indices.contains(selectedPointLightIndex) else { return }
-        recordUndoable(L("Réglage lumière", "Adjust Light"), coalesceKey: "point-light-\(selectedPointLightIndex)") {
+        let key = coalesceKey.map { "\($0)-\(selectedPointLightIndex)" }
+        recordUndoable(L("Réglage lumière", "Adjust Light"), coalesceKey: key) {
             if let position { pointLights[selectedPointLightIndex].position = position }
             if let intensity { pointLights[selectedPointLightIndex].intensity = max(0.0, min(3.0, intensity)) }
             scene?.pointLights = pointLights
@@ -1300,18 +1406,20 @@ final class DocumentModel {
         return lo...hi
     }
 
-    func setSun(azimuth: Float, elevation: Float) {
-        recordUndoable(L("Orientation du soleil", "Sun Orientation"), coalesceKey: "sun-orient") {
-            sunAzimuthDegrees = azimuth
-            sunElevationDegrees = elevation
-            scene?.sunAzimuthDegrees = azimuth
-            scene?.sunElevationDegrees = elevation
+    func setSun(azimuth: Float, elevation: Float, coalesce: Bool = true) {
+        let clampedAz = ((azimuth + 180.0).truncatingRemainder(dividingBy: 360.0) + 360.0).truncatingRemainder(dividingBy: 360.0) - 180.0
+        let clampedEl = max(8.0, min(85.0, elevation))
+        recordUndoable(L("Orientation du soleil", "Sun Orientation"), coalesceKey: coalesce ? "sun-orient" : nil) {
+            sunAzimuthDegrees = clampedAz
+            sunElevationDegrees = clampedEl
+            scene?.sunAzimuthDegrees = clampedAz
+            scene?.sunElevationDegrees = clampedEl
             viewport.requestRedraw()
         }
     }
 
-    func setSunIntensity(_ intensity: Float) {
-        recordUndoable(L("Intensité du soleil", "Sun Intensity"), coalesceKey: "sun-intensity") {
+    func setSunIntensity(_ intensity: Float, coalesce: Bool = true) {
+        recordUndoable(L("Intensité du soleil", "Sun Intensity"), coalesceKey: coalesce ? "sun-intensity" : nil) {
             let clamped = max(0.0, min(3.0, intensity))
             sunIntensity = clamped
             scene?.sunIntensity = clamped
@@ -1319,8 +1427,8 @@ final class DocumentModel {
         }
     }
 
-    func setAmbientIntensity(_ intensity: Float) {
-        recordUndoable(L("Lumière ambiante", "Ambient Light"), coalesceKey: "ambient-intensity") {
+    func setAmbientIntensity(_ intensity: Float, coalesce: Bool = true) {
+        recordUndoable(L("Lumière ambiante", "Ambient Light"), coalesceKey: coalesce ? "ambient-intensity" : nil) {
             let clamped = max(0.0, min(2.0, intensity))
             ambientIntensity = clamped
             scene?.ambientIntensity = clamped
@@ -1469,28 +1577,190 @@ final class DocumentModel {
         hiddenFeaturesEnabled || !videoProjectors.isEmpty || sskpURL != nil
     }
 
+    /// Indices in `videoProjectors` that are true video projectors (`isStageLight == false`).
+    var onlyVideoProjectorIndices: [Int] {
+        videoProjectors.indices.filter { !videoProjectors[$0].isStageLight }
+    }
+
+    /// Indices in `videoProjectors` that are stage lights (`isStageLight == true`).
+    var stageLightIndices: [Int] {
+        videoProjectors.indices.filter { videoProjectors[$0].isStageLight }
+    }
+
+    var enabledOnlyVideoProjectorCount: Int {
+        onlyVideoProjectorIndices.filter { videoProjectors[$0].isEnabled }.count
+    }
+
+    var enabledStageLightCount: Int {
+        stageLightIndices.filter { videoProjectors[$0].isEnabled }.count
+    }
+
     var selectedVideoProjector: VideoProjector? {
         guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else { return nil }
         return videoProjectors[selectedVideoProjectorIndex]
     }
 
-    func selectVideoProjector(_ index: Int) {
+    var selectedVideoProjectors: [VideoProjector] {
+        selectedVideoProjectorIndices.sorted().compactMap { idx in
+            videoProjectors.indices.contains(idx) ? videoProjectors[idx] : nil
+        }
+    }
+
+    var selectedProjectorCount: Int {
+        selectedVideoProjectorIndices.count
+    }
+
+    var isMultipleProjectorSelection: Bool {
+        selectedVideoProjectorIndices.count > 1
+    }
+
+    func selectVideoProjector(_ index: Int, extending: Bool = false, toggling: Bool = false) {
         guard videoProjectors.indices.contains(index) else { return }
-        selectedVideoProjectorIndex = index
-        scene?.selectedVideoProjectorIndex = index
-        viewport.requestRedraw()
+        let targetIsStageLight = videoProjectors[index].isStageLight
+        inspectorCategory = targetIsStageLight ? .stageLights : .videoProjectors
+        if toggling {
+            if selectedVideoProjectorIndices.contains(index) {
+                if selectedVideoProjectorIndices.count > 1 {
+                    selectedVideoProjectorIndices.remove(index)
+                    if selectedVideoProjectorIndex == index {
+                        selectedVideoProjectorIndex = selectedVideoProjectorIndices.sorted().first ?? 0
+                    }
+                }
+            } else {
+                // Keep multi-selection homogeneous (either all VPs or all Stage Lights)
+                selectedVideoProjectorIndices = selectedVideoProjectorIndices.filter {
+                    videoProjectors.indices.contains($0) && videoProjectors[$0].isStageLight == targetIsStageLight
+                }
+                selectedVideoProjectorIndices.insert(index)
+                selectedVideoProjectorIndex = index
+            }
+        } else if extending {
+            let start = min(selectedVideoProjectorIndex, index)
+            let end = max(selectedVideoProjectorIndex, index)
+            selectedVideoProjectorIndices = selectedVideoProjectorIndices.filter {
+                videoProjectors.indices.contains($0) && videoProjectors[$0].isStageLight == targetIsStageLight
+            }
+            for i in start...end where videoProjectors[i].isStageLight == targetIsStageLight {
+                selectedVideoProjectorIndices.insert(i)
+            }
+            selectedVideoProjectorIndex = index
+        } else {
+            selectedVideoProjectorIndices = [index]
+            selectedVideoProjectorIndex = index
+        }
+        syncProjectorsToScene()
+    }
+
+    func selectAllVideoProjectors() {
+        guard !videoProjectors.isEmpty else { return }
+        selectedVideoProjectorIndices = Set(videoProjectors.indices)
+        selectedVideoProjectorIndex = videoProjectors.indices.first ?? 0
+        syncProjectorsToScene()
+    }
+
+    func selectAllOnlyVideoProjectors() {
+        let indices = onlyVideoProjectorIndices
+        guard let first = indices.first else { return }
+        inspectorCategory = .videoProjectors
+        selectedVideoProjectorIndices = Set(indices)
+        selectedVideoProjectorIndex = first
+        syncProjectorsToScene()
+    }
+
+    func selectAllStageLights() {
+        let indices = stageLightIndices
+        guard let first = indices.first else { return }
+        inspectorCategory = .stageLights
+        selectedVideoProjectorIndices = Set(indices)
+        selectedVideoProjectorIndex = first
+        syncProjectorsToScene()
+    }
+
+    func toggleProjectorInspector() {
+        toggleVideoProjectorInspector()
+    }
+
+    func toggleVideoProjectorInspector() {
+        if showProjectorInspector && inspectorCategory == .videoProjectors {
+            showProjectorInspector = false
+            return
+        }
+        inspectorCategory = .videoProjectors
+        showProjectorInspector = true
+        let vpIndices = onlyVideoProjectorIndices
+        if let current = selectedVideoProjector, !current.isStageLight {
+            // Already selecting a VP
+        } else if let firstVP = vpIndices.first {
+            selectedVideoProjectorIndex = firstVP
+            selectedVideoProjectorIndices = [firstVP]
+            syncProjectorsToScene()
+        }
+    }
+
+    func toggleStageLightInspector() {
+        if showProjectorInspector && inspectorCategory == .stageLights {
+            showProjectorInspector = false
+            return
+        }
+        inspectorCategory = .stageLights
+        showProjectorInspector = true
+        let lightIndices = stageLightIndices
+        if let current = selectedVideoProjector, current.isStageLight {
+            // Already selecting a stage light
+        } else if let firstLight = lightIndices.first {
+            selectedVideoProjectorIndex = firstLight
+            selectedVideoProjectorIndices = [firstLight]
+            syncProjectorsToScene()
+        }
+    }
+
+    func switchInspectorCategory(_ category: InspectorCategory) {
+        inspectorCategory = category
+        showProjectorInspector = true
+        switch category {
+        case .videoProjectors:
+            if selectedVideoProjector?.isStageLight != false, let firstVP = onlyVideoProjectorIndices.first {
+                selectedVideoProjectorIndex = firstVP
+                selectedVideoProjectorIndices = [firstVP]
+                syncProjectorsToScene()
+            }
+        case .stageLights:
+            if selectedVideoProjector?.isStageLight != true, let firstLight = stageLightIndices.first {
+                selectedVideoProjectorIndex = firstLight
+                selectedVideoProjectorIndices = [firstLight]
+                syncProjectorsToScene()
+            }
+        }
     }
 
     func addVideoProjector(spec: ProjectorSpec = .optomaZU920ST) {
-        recordUndoable(L("Ajout vidéoprojecteur", "Add Video Projector")) {
-            let count = videoProjectors.count + 1
+        let actionTitle: String
+        let defaultPrefix: String
+        let pat: ProjectionPattern
+        let isLight = spec.isStageLight
+        switch spec.kind {
+        case .profileSpot:
+            actionTitle = L("Ajout découpe LED", "Add Profile Spot")
+            defaultPrefix = "Découpe"
+            pat = .whiteFrame
+        case .washPanel:
+            actionTitle = L("Ajout projecteur wash", "Add Wash Light")
+            defaultPrefix = "Wash"
+            pat = .whiteFrame
+        case .videoProjector:
+            actionTitle = L("Ajout vidéoprojecteur", "Add Video Projector")
+            defaultPrefix = "VP"
+            pat = .testGrid
+        }
+
+        recordUndoable(actionTitle) {
+            let categoryCount = isLight ? (stageLightIndices.count + 1) : (onlyVideoProjectorIndices.count + 1)
             let camPos = viewport.cameraModelPosition
             let camTarget = viewport.cameraPose.target
-            let offsetRight = viewport.cameraPose.right * (Float(videoProjectors.count) * 0.65)
+            let offsetRight = viewport.cameraPose.right * (Float(categoryCount - 1) * 0.65)
             let pos: SIMD3<Float>
             let tgt: SIMD3<Float>
             if isReady, simd_distance(camPos, camTarget) > 0.3 {
-                // Place at 65% of the way from camera to target (or at least 3.5 m from target) so the projector is immediately visible in front of the camera
                 let toCamera = camPos - camTarget
                 let d = simd_length(toCamera)
                 let dir = toCamera / max(d, 1e-4)
@@ -1499,12 +1769,18 @@ final class DocumentModel {
                 tgt = camTarget + offsetRight * 0.3
             } else {
                 let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
-                pos = center + SIMD3<Float>(0, -5.0, 2.5)
+                pos = center + SIMD3<Float>(0, isLight ? 0.0 : -5.0, isLight ? 4.5 : 2.5)
                 tgt = center
             }
 
+            // Look up matching OFL definition if this is a stage light
+            let oflDef = isLight ? OFLFixtureLibrary.shared.fixture(for: spec.id) : nil
+            let oflMode = oflDef?.modes.first
+            let chanNames = oflMode?.channels.map(\.name) ?? []
+            let chanRoles = oflMode?.channels.map(\.role) ?? []
+
             let proj = VideoProjector(
-                name: "VP \(count) — \(spec.model)",
+                name: "\(defaultPrefix) \(categoryCount) — \(spec.model)",
                 specID: spec.id,
                 isEnabled: true,
                 position: pos,
@@ -1514,16 +1790,213 @@ final class DocumentModel {
                 lensShiftH: 0,
                 lensShiftV: 0,
                 intensity: 1.0,
-                pattern: .testGrid,
-                showsFrustum: true
+                pattern: pat,
+                showsFrustum: true,
+                dmxMode: !chanRoles.isEmpty ? "ofl" : (spec.kind == .washPanel ? "rgbw4ch" : "dimmer1ch"),
+                oflFixtureID: oflDef?.id,
+                oflModeName: oflMode?.name,
+                dmxChannelNames: chanNames,
+                dmxChannelRoles: chanRoles
             )
             videoProjectors.append(proj)
-            selectedVideoProjectorIndex = videoProjectors.count - 1
+            let newIndex = videoProjectors.count - 1
+            selectedVideoProjectorIndex = newIndex
+            selectedVideoProjectorIndices = [newIndex]
+            inspectorCategory = isLight ? .stageLights : .videoProjectors
+            showProjectorInspector = true
             syncProjectorsToScene()
         }
     }
 
+    /// Adds a stage light directly from an Open Fixture Library (`OFLFixtureDefinition`) entry in `/Users/adrien/Library/Millumin/Light-fixtures`.
+    func addOFLStageLight(definition: OFLFixtureDefinition, modeName: String? = nil) {
+        let mode = definition.resolveMode(named: modeName ?? "") ?? definition.modes.first
+        let spec = definition.toProjectorSpec(modeName: mode?.name)
+        recordUndoable(L("Ajout lumière \(definition.displayName)", "Add Light \(definition.displayName)")) {
+            let lightNumber = stageLightIndices.count + 1
+            let camPos = viewport.cameraModelPosition
+            let camTarget = viewport.cameraPose.target
+            let offsetRight = viewport.cameraPose.right * (Float(lightNumber - 1) * 0.55)
+            let pos: SIMD3<Float>
+            let tgt: SIMD3<Float>
+            if isReady, simd_distance(camPos, camTarget) > 0.3 {
+                let toCamera = camPos - camTarget
+                let d = simd_length(toCamera)
+                let dir = toCamera / max(d, 1e-4)
+                let throwDist = min(max(d * 0.55, 2.5), max(d * 0.85, 4.5))
+                pos = camTarget + dir * throwDist + offsetRight
+                tgt = camTarget + offsetRight * 0.3
+            } else {
+                let center = scene?.defaultPointLightPosition ?? skp?.center ?? .zero
+                pos = SIMD3<Float>(center.x, center.y, max(center.z + 4.0, 4.5))
+                tgt = SIMD3<Float>(center.x, center.y, 0.0)
+            }
+            let chanNames = mode?.channels.map(\.name) ?? []
+            let chanRoles = mode?.channels.map(\.role) ?? []
+            let proj = VideoProjector(
+                name: "\(definition.name) #\(lightNumber)",
+                specID: spec.id,
+                isEnabled: true,
+                position: pos,
+                target: tgt,
+                rollDegrees: 0,
+                throwRatio: spec.defaultThrowRatio,
+                lensShiftH: 0,
+                lensShiftV: 0,
+                intensity: 1.0,
+                pattern: .whiteFrame,
+                showsFrustum: true,
+                dmxMode: !chanRoles.isEmpty ? "ofl" : "dimmer1ch",
+                oflFixtureID: definition.id,
+                oflModeName: mode?.name,
+                dmxChannelNames: chanNames,
+                dmxChannelRoles: chanRoles
+            )
+            videoProjectors.append(proj)
+            let newIndex = videoProjectors.count - 1
+            selectedVideoProjectorIndex = newIndex
+            selectedVideoProjectorIndices = [newIndex]
+            inspectorCategory = .stageLights
+            showProjectorInspector = true
+            syncProjectorsToScene()
+        }
+    }
+
+    /// Shortcut to add a Showtec Performer Profile Mini (compact 30W COB LED découpe with zoom 19°–36° and 4 framing shutters).
+    func addShowtecProfileMini() {
+        addVideoProjector(spec: .showtecPerformerProfileMini)
+    }
+
+    /// Shortcut to add an Eurolite LED PLL-480 QCL Panel (softlight wash panel with wide 120° flood and 4-leaf barn doors).
+    func addEurolitePLL480() {
+        addVideoProjector(spec: .euroliteLEDPLL480QCL)
+    }
+
+    /// Shortcut to add a Varytec Hero Wash 300 FC (moving head wash with 19×15W RGBW LEDs and motorized zoom 6°–50°).
+    func addVarytecHeroWash300() {
+        addVideoProjector(spec: .varytecHeroWash300FC)
+    }
+
+    var enabledVideoProjectorCount: Int {
+        videoProjectors.filter(\.isEnabled).count
+    }
+
+    func toggleVideoProjector(_ index: Int) {
+        guard videoProjectors.indices.contains(index) else { return }
+        recordUndoable(L("Activer/Désactiver projecteur", "Toggle Fixture")) {
+            selectedVideoProjectorIndex = index
+            videoProjectors[index].isEnabled.toggle()
+            syncProjectorsToScene()
+        }
+    }
+
+    func setAllVideoProjectors(enabled: Bool) {
+        guard !videoProjectors.isEmpty else { return }
+        let title = enabled ? L("Activer tous les projecteurs", "Enable All Fixtures") : L("Désactiver tous les projecteurs", "Disable All Fixtures")
+        recordUndoable(title) {
+            for i in videoProjectors.indices {
+                videoProjectors[i].isEnabled = enabled
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setAllOnlyVideoProjectors(enabled: Bool) {
+        let indices = onlyVideoProjectorIndices
+        guard !indices.isEmpty else { return }
+        let title = enabled ? L("Activer tous les VP", "Enable All VPs") : L("Désactiver tous les VP", "Disable All VPs")
+        recordUndoable(title) {
+            for i in indices {
+                videoProjectors[i].isEnabled = enabled
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setAllStageLights(enabled: Bool) {
+        let indices = stageLightIndices
+        guard !indices.isEmpty else { return }
+        let title = enabled ? L("Allumer toutes les lumières", "Enable All Stage Lights") : L("Éteindre toutes les lumières", "Disable All Stage Lights")
+        recordUndoable(title) {
+            for i in indices {
+                videoProjectors[i].isEnabled = enabled
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func soloVideoProjector(_ index: Int) {
+        guard videoProjectors.indices.contains(index) else { return }
+        let isLight = videoProjectors[index].isStageLight
+        let peerIndices = isLight ? stageLightIndices : onlyVideoProjectorIndices
+        guard peerIndices.count > 1 else { return }
+        let isAlreadySolo = peerIndices.allSatisfy { i in
+            videoProjectors[i].isEnabled == (i == index)
+        }
+        recordUndoable(isLight ? L("Isoler lumière", "Solo Stage Light") : L("Isoler VP", "Solo VP")) {
+            selectedVideoProjectorIndex = index
+            selectedVideoProjectorIndices = [index]
+            inspectorCategory = isLight ? .stageLights : .videoProjectors
+            for i in peerIndices {
+                videoProjectors[i].isEnabled = isAlreadySolo ? true : (i == index)
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func soloSelectedVideoProjectors() {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        let isLight = (selectedVideoProjector?.isStageLight == true)
+        let peerIndices = isLight ? stageLightIndices : onlyVideoProjectorIndices
+        guard peerIndices.count > 1 else { return }
+        let isAlreadySolo = peerIndices.allSatisfy { i in
+            videoProjectors[i].isEnabled == selectedVideoProjectorIndices.contains(i)
+        }
+        recordUndoable(L("Isoler sélection", "Solo Selection")) {
+            for i in peerIndices {
+                videoProjectors[i].isEnabled = isAlreadySolo ? true : selectedVideoProjectorIndices.contains(i)
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func lookThroughVideoProjector(_ index: Int) {
+        guard videoProjectors.indices.contains(index) else { return }
+        selectedVideoProjectorIndex = index
+        selectedVideoProjectorIndices = [index]
+        inspectorCategory = videoProjectors[index].isStageLight ? .stageLights : .videoProjectors
+        syncProjectorsToScene()
+        lookThroughSelectedProjector()
+    }
+
+    func openInspectorForVideoProjector(_ index: Int) {
+        guard videoProjectors.indices.contains(index) else { return }
+        selectedVideoProjectorIndex = index
+        selectedVideoProjectorIndices = [index]
+        inspectorCategory = videoProjectors[index].isStageLight ? .stageLights : .videoProjectors
+        showProjectorInspector = true
+        syncProjectorsToScene()
+    }
+
+    func duplicateVideoProjector(_ index: Int) {
+        guard videoProjectors.indices.contains(index) else { return }
+        selectedVideoProjectorIndex = index
+        selectedVideoProjectorIndices = [index]
+        duplicateSelectedVideoProjector()
+    }
+
+    func removeVideoProjector(_ index: Int) {
+        guard videoProjectors.indices.contains(index) else { return }
+        selectedVideoProjectorIndex = index
+        selectedVideoProjectorIndices = [index]
+        removeSelectedVideoProjector()
+    }
+
     func duplicateSelectedVideoProjector() {
+        if selectedVideoProjectorIndices.count > 1 {
+            duplicateSelectedVideoProjectors()
+            return
+        }
         guard var copy = selectedVideoProjector else { return }
         recordUndoable(L("Duplication vidéoprojecteur", "Duplicate Video Projector")) {
             copy.id = UUID()
@@ -1532,27 +2005,222 @@ final class DocumentModel {
             copy.position += right * 1.0
             copy.target += right * 1.0
             videoProjectors.append(copy)
-            selectedVideoProjectorIndex = videoProjectors.count - 1
+            let newIndex = videoProjectors.count - 1
+            selectedVideoProjectorIndex = newIndex
+            selectedVideoProjectorIndices = [newIndex]
             syncProjectorsToScene()
         }
     }
 
     func removeSelectedVideoProjector() {
+        if selectedVideoProjectorIndices.count > 1 {
+            removeSelectedVideoProjectors()
+            return
+        }
         guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else { return }
         recordUndoable(L("Suppression vidéoprojecteur", "Remove Video Projector")) {
             videoProjectors.remove(at: selectedVideoProjectorIndex)
-            selectedVideoProjectorIndex = max(0, min(selectedVideoProjectorIndex, videoProjectors.count - 1))
             if videoProjectors.isEmpty {
+                selectedVideoProjectorIndices = []
+                selectedVideoProjectorIndex = 0
                 cancelProjectorPick()
+            } else {
+                let safeIndex = max(0, min(selectedVideoProjectorIndex, videoProjectors.count - 1))
+                selectedVideoProjectorIndex = safeIndex
+                selectedVideoProjectorIndices = [safeIndex]
             }
             syncProjectorsToScene()
         }
     }
 
-    func updateSelectedVideoProjector(_ mutate: (inout VideoProjector) -> Void) {
+    func updateSelectedVideoProjector(
+        actionName: String? = nil,
+        coalesceKey: String? = nil,
+        _ mutate: (inout VideoProjector) -> Void
+    ) {
         guard videoProjectors.indices.contains(selectedVideoProjectorIndex) else { return }
-        recordUndoable(L("Réglage vidéoprojecteur", "Adjust Video Projector"), coalesceKey: "vp-edit-\(selectedVideoProjectorIndex)") {
+        let title = actionName ?? L("Réglage vidéoprojecteur", "Adjust Video Projector")
+        let key = coalesceKey.map { "vp-\(selectedVideoProjectorIndex)-\($0)" }
+        recordUndoable(title, coalesceKey: key) {
             mutate(&videoProjectors[selectedVideoProjectorIndex])
+            syncProjectorsToScene()
+        }
+    }
+
+    // MARK: - Group & Multi-Projector Operations
+
+    func moveSelectedProjectors(
+        delta: SIMD3<Float>,
+        actionName: String? = nil,
+        coalesceKey: String? = nil
+    ) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        let count = selectedVideoProjectorIndices.count
+        let title: String
+        if let actionName {
+            title = actionName
+        } else if count > 1 {
+            title = L("Déplacer \(count) vidéoprojecteurs", "Move \(count) Video Projectors")
+        } else {
+            title = L("Déplacer vidéoprojecteur", "Move Video Projector")
+        }
+        let key = coalesceKey.map { "vp-move-\($0)" }
+        recordUndoable(title, coalesceKey: key) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].position += delta
+                videoProjectors[idx].target += delta
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func nudgeSelectedProjectors(deltaX: Float = 0, deltaY: Float = 0, deltaZ: Float = 0) {
+        let delta = SIMD3<Float>(deltaX, deltaY, deltaZ)
+        let axisLabel = deltaX != 0 ? "X" : (deltaY != 0 ? "Y" : "Z")
+        moveSelectedProjectors(
+            delta: delta,
+            actionName: L("Déplacement \(axisLabel) VP", "VP \(axisLabel) Move"),
+            coalesceKey: "nudge-\(axisLabel)"
+        )
+    }
+
+    func duplicateSelectedProjectorSymmetricAcrossStage(axisX: Float = 0) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Duplication symétrique plateau", "Duplicate Symmetric Projector")) {
+            var newIndices: Set<Int> = []
+            for idx in selectedVideoProjectorIndices.sorted() where videoProjectors.indices.contains(idx) {
+                var copy = videoProjectors[idx]
+                copy.id = UUID()
+                let isJardin = copy.position.x < axisX
+                let sideSuffix = isJardin ? L("Cour", "Stage Right") : L("Jardin", "Stage Left")
+                copy.name = "\(copy.name) (\(sideSuffix))"
+                copy.position.x = 2 * axisX - copy.position.x
+                copy.target.x = 2 * axisX - copy.target.x
+                copy.lensShiftH = -copy.lensShiftH
+                videoProjectors.append(copy)
+                newIndices.insert(videoProjectors.count - 1)
+            }
+            if let first = newIndices.sorted().first {
+                selectedVideoProjectorIndex = first
+                selectedVideoProjectorIndices = newIndices
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func mirrorSelectedProjectorsAcrossStage(axisX: Float = 0) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Symétrie plateau", "Mirror Projectors Across Stage")) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].position.x = 2 * axisX - videoProjectors[idx].position.x
+                videoProjectors[idx].target.x = 2 * axisX - videoProjectors[idx].target.x
+                videoProjectors[idx].lensShiftH = -videoProjectors[idx].lensShiftH
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedVideoProjectorsEnabled(_ enabled: Bool) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        let title = enabled ? L("Allumer sélection", "Turn On Selection") : L("Éteindre sélection", "Turn Off Selection")
+        recordUndoable(title) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].isEnabled = enabled
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedVideoProjectorsFrustum(_ showsFrustum: Bool) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Faisceaux 3D sélection", "Frustum Selection")) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].showsFrustum = showsFrustum
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedVideoProjectorsPattern(_ pattern: ProjectionPattern) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Mire sélection", "Pattern Selection")) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].pattern = pattern
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedVideoProjectorsSpec(_ spec: ProjectorSpec) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Modèle sélection", "Model Selection")) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].applySpec(spec)
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedVideoProjectorsIntensity(_ intensity: Float, coalesceKey: String? = nil) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        let key = coalesceKey.map { "intensity-\($0)" }
+        recordUndoable(L("Intensité sélection", "Intensity Selection"), coalesceKey: key) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].intensity = intensity
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedVideoProjectorsReverb(_ reverb: Float, coalesceKey: String? = nil) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        let key = coalesceKey.map { "reverb-\($0)" }
+        recordUndoable(L("Réverbération sélection", "Reverberation Selection"), coalesceKey: key) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].reverbIntensity = reverb
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func duplicateSelectedVideoProjectors() {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Duplication sélection", "Duplicate Selection")) {
+            var newIndices: Set<Int> = []
+            for idx in selectedVideoProjectorIndices.sorted() where videoProjectors.indices.contains(idx) {
+                var copy = videoProjectors[idx]
+                copy.id = UUID()
+                copy.name = "\(copy.name) (\(videoProjectors.count + 1))"
+                let (right, _, _) = copy.opticalBasis()
+                copy.position += right * 1.0
+                copy.target += right * 1.0
+                videoProjectors.append(copy)
+                newIndices.insert(videoProjectors.count - 1)
+            }
+            if let first = newIndices.sorted().first {
+                selectedVideoProjectorIndex = first
+                selectedVideoProjectorIndices = newIndices
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func removeSelectedVideoProjectors() {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Suppression sélection", "Delete Selection")) {
+            let sortedIndices = selectedVideoProjectorIndices.sorted(by: >)
+            for idx in sortedIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors.remove(at: idx)
+            }
+            if videoProjectors.isEmpty {
+                selectedVideoProjectorIndices = []
+                selectedVideoProjectorIndex = 0
+                cancelProjectorPick()
+            } else {
+                let safeIndex = max(0, min(selectedVideoProjectorIndex, videoProjectors.count - 1))
+                selectedVideoProjectorIndex = safeIndex
+                selectedVideoProjectorIndices = [safeIndex]
+            }
             syncProjectorsToScene()
         }
     }
@@ -1560,8 +2228,16 @@ final class DocumentModel {
     func moveSelectedProjectorToCamera() {
         guard videoProjectors.indices.contains(selectedVideoProjectorIndex), isReady else { return }
         recordUndoable(L("Placer VP sur la caméra", "Place VP at Camera")) {
-            videoProjectors[selectedVideoProjectorIndex].position = viewport.cameraModelPosition
-            videoProjectors[selectedVideoProjectorIndex].target = viewport.cameraPose.target
+            let delta = viewport.cameraModelPosition - videoProjectors[selectedVideoProjectorIndex].position
+            if selectedVideoProjectorIndices.count > 1 {
+                for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                    videoProjectors[idx].position += delta
+                    videoProjectors[idx].target += delta
+                }
+            } else {
+                videoProjectors[selectedVideoProjectorIndex].position = viewport.cameraModelPosition
+                videoProjectors[selectedVideoProjectorIndex].target = viewport.cameraPose.target
+            }
             syncProjectorsToScene()
         }
     }
@@ -1569,7 +2245,9 @@ final class DocumentModel {
     func aimSelectedProjectorAtCameraTarget() {
         guard videoProjectors.indices.contains(selectedVideoProjectorIndex), isReady else { return }
         recordUndoable(L("Viser la cible caméra", "Aim VP at Camera Target")) {
-            videoProjectors[selectedVideoProjectorIndex].target = viewport.cameraPose.target
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].target = viewport.cameraPose.target
+            }
             syncProjectorsToScene()
         }
     }
@@ -1646,11 +2324,373 @@ final class DocumentModel {
         }
     }
 
+    func refreshLiveVideoSources() {
+        LiveVideoSourceManager.shared.refreshSources()
+        availableSyphonSources = LiveVideoSourceManager.shared.syphonSources
+        availableNDISources = LiveVideoSourceManager.shared.ndiSources
+        scene?.refreshLiveProjectorFrames()
+    }
+
+    func activateLiveStreamPattern(_ kind: ProjectionPattern) {
+        guard (kind == .syphon || kind == .ndi),
+              videoProjectors.indices.contains(selectedVideoProjectorIndex)
+        else { return }
+        refreshLiveVideoSources()
+        let sources = (kind == .syphon) ? availableSyphonSources : availableNDISources
+        let label = (kind == .syphon) ? L("Flux Syphon VP", "VP Syphon Stream") : L("Flux NDI VP", "VP NDI Stream")
+        recordUndoable(label) {
+            videoProjectors[selectedVideoProjectorIndex].pattern = kind
+            let currentID = videoProjectors[selectedVideoProjectorIndex].liveSourceID
+            let hasMatchingSource = sources.contains(where: { $0.id == currentID })
+            if !hasMatchingSource, let first = sources.first {
+                videoProjectors[selectedVideoProjectorIndex].liveSourceID = first.id
+                videoProjectors[selectedVideoProjectorIndex].liveSourceName = first.displayTitle
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func selectLiveVideoSource(id: String, forKind kind: ProjectionPattern) {
+        guard (kind == .syphon || kind == .ndi),
+              videoProjectors.indices.contains(selectedVideoProjectorIndex)
+        else { return }
+        let sources = (kind == .syphon) ? availableSyphonSources : availableNDISources
+        let matched = sources.first(where: { $0.id == id })
+        let label = (kind == .syphon) ? L("Source Syphon VP", "VP Syphon Source") : L("Source NDI VP", "VP NDI Source")
+        recordUndoable(label) {
+            videoProjectors[selectedVideoProjectorIndex].pattern = kind
+            videoProjectors[selectedVideoProjectorIndex].liveSourceID = id
+            if let matched {
+                videoProjectors[selectedVideoProjectorIndex].liveSourceName = matched.displayTitle
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setProjectorsFrustumOnly(_ enabled: Bool) {
+        guard projectorsFrustumOnly != enabled else { return }
+        recordUndoable(L("Mode Frustum seul VP", "VP Frustum-Only Mode")) {
+            projectorsFrustumOnly = enabled
+            syncProjectorsToScene()
+        }
+    }
+
+    func toggleProjectorsFrustumOnly() {
+        setProjectorsFrustumOnly(!projectorsFrustumOnly)
+    }
+
+    func setPhotometricSimulation(_ enabled: Bool) {
+        guard photometricSimulation != enabled else { return }
+        recordUndoable(enabled ? L("Activer simulation photométrique", "Enable Photometric Simulation") : L("Désactiver simulation photométrique", "Disable Photometric Simulation")) {
+            photometricSimulation = enabled
+            syncProjectorsToScene()
+        }
+    }
+
+    func togglePhotometricSimulation() {
+        setPhotometricSimulation(!photometricSimulation)
+    }
+
+    func setPhotometricReferenceLux(_ refLux: Float, coalesceKey: String? = nil) {
+        let clamped = max(50.0, min(1500.0, refLux))
+        guard abs(photometricReferenceLux - clamped) > 0.5 else { return }
+        recordUndoable(L("Étalonnage photométrique", "Photometric Calibration"), coalesceKey: coalesceKey) {
+            photometricReferenceLux = clamped
+            syncProjectorsToScene()
+        }
+    }
+
+    /// Measures the exact distance in metres from the projector lens along its optical forward axis
+    /// to the first physical 3D model surface encountered in the scene, if any.
+    func actualSurfaceDistance(for projector: VideoProjector) -> Float? {
+        guard let scene else { return nil }
+        let (_, _, forward) = projector.opticalBasis()
+        let maxReach = max(projector.throwDistance * 2.5, 120.0)
+        return scene.raycastModelDistance(from: projector.position, direction: forward, maxDistance: maxReach)
+    }
+
     func syncProjectorsToScene() {
         guard let scene else { return }
         scene.selectedVideoProjectorIndex = selectedVideoProjectorIndex
+        scene.selectedVideoProjectorIndices = selectedVideoProjectorIndices
+        scene.projectorsFrustumOnly = projectorsFrustumOnly
+        scene.photometricSimulation = photometricSimulation
+        scene.photometricReferenceLux = photometricReferenceLux
         scene.videoProjectors = videoProjectors
         viewport.requestRedraw()
+    }
+
+    // MARK: - Millumin Project & Conduite Lumière Import
+
+    func importMilluminProject(from url: URL) {
+        do {
+            let parsed = try MilluminImporter.parseProjectFull(at: url)
+            let imported = parsed.lights.map { $0.toVideoProjector() }
+            guard !imported.isEmpty else { return }
+            recordUndoable(L("Importer projet Millumin", "Import Millumin Project")) {
+                let startIndex = videoProjectors.count
+                videoProjectors.append(contentsOf: imported)
+                milluminBoardName = parsed.boardName ?? url.deletingPathExtension().lastPathComponent
+                milluminCues = parsed.cues
+                if let firstActiveIdx = parsed.cues.firstIndex(where: { cue in
+                    cue.valuesByLightName.values.contains(where: { dict in dict.values.contains(where: { $0 > 1.0 }) })
+                }) {
+                    activeMilluminCueIndex = firstActiveIdx
+                } else if !parsed.cues.isEmpty {
+                    activeMilluminCueIndex = 0
+                } else {
+                    activeMilluminCueIndex = nil
+                }
+                selectedVideoProjectorIndex = startIndex
+                selectedVideoProjectorIndices = Set(startIndex..<videoProjectors.count)
+                inspectorCategory = .stageLights
+                showProjectorInspector = true
+                syncProjectorsToScene()
+            }
+            if parsed.cues.isEmpty {
+                flash(L("\(imported.count) lumière(s) importée(s) depuis Millumin", "\(imported.count) light(s) imported from Millumin"))
+            } else {
+                flash(L("\(imported.count) lumière(s) + \(parsed.cues.count) états de conduite importés depuis Millumin", "\(imported.count) light(s) + \(parsed.cues.count) lighting cues imported from Millumin"))
+            }
+        } catch {
+            flash(L("Erreur d'import Millumin : \(error.localizedDescription)", "Millumin import error: \(error.localizedDescription)"))
+        }
+    }
+
+    func promptImportMillumin() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if let ut = UTType(filenameExtension: "millumin") {
+            panel.allowedContentTypes = [ut]
+        }
+        panel.message = L("Sélectionnez un projet Millumin (.millumin) à importer :", "Select a Millumin project (.millumin) to import:")
+        panel.prompt = L("Importer", "Import")
+        if panel.runModal() == .OK, let url = panel.url {
+            importMilluminProject(from: url)
+        }
+    }
+
+    /// Applies a lighting cue (`MilluminLightingCue`) from the imported Millumin conduite to all matching stage lights.
+    func applyMilluminCue(at cueIndex: Int) {
+        guard milluminCues.indices.contains(cueIndex) else { return }
+        let cue = milluminCues[cueIndex]
+        recordUndoable(L("Conduite Millumin : \(cue.title)", "Millumin Cue: \(cue.title)")) {
+            activeMilluminCueIndex = cueIndex
+            for i in videoProjectors.indices where videoProjectors[i].isStageLight {
+                let name = videoProjectors[i].name
+                if let vals = cue.valuesByLightName[name] {
+                    _ = videoProjectors[i].applyMilluminCueValues(vals)
+                }
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func nextMilluminCue() {
+        guard !milluminCues.isEmpty else { return }
+        let next = ((activeMilluminCueIndex ?? -1) + 1) % milluminCues.count
+        applyMilluminCue(at: next)
+    }
+
+    func previousMilluminCue() {
+        guard !milluminCues.isEmpty else { return }
+        let cur = activeMilluminCueIndex ?? 0
+        let prev = (cur - 1 + milluminCues.count) % milluminCues.count
+        applyMilluminCue(at: prev)
+    }
+
+    // MARK: - Beam Shaping, Vertical Douche & DMX Patch Controls
+
+    /// Aims the selected stage light(s) straight down (`Z = 0` vertically beneath `position.x, position.y`).
+    func aimSelectedProjectorStraightDown() {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Pointer en douche verticale (90°)", "Aim Straight Down (90°)")) {
+            let floorZ: Float = {
+                let bMinZ = scene?.visibleBounds.min.z ?? skp?.boundsMin.z ?? 0
+                let bMaxZ = scene?.visibleBounds.max.z ?? skp?.boundsMax.z ?? 3
+                return (bMinZ <= 0.2 && bMaxZ >= 1.5) ? 0.0 : bMinZ
+            }()
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                let pos = videoProjectors[idx].position
+                let targetZ = (pos.z > floorZ + 0.2) ? floorZ : (pos.z - 3.0)
+                videoProjectors[idx].target = SIMD3<Float>(pos.x, pos.y, targetZ)
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    /// Sets the optical beam angle in degrees (`beamAngleDegrees`) on the selected stage light(s).
+    func setSelectedStageLightBeamAngle(_ degrees: Float, coalesceKey: String? = "beam-angle") {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Ouverture faisceau (°)", "Beam Angle (°)"), coalesceKey: coalesceKey) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].beamAngleDegrees = degrees
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    /// Assigns an Open Fixture Library (`OFLFixtureDefinition`) and mode (`OFLFixtureMode`) from `/Users/adrien/Library/Millumin/Light-fixtures` to the selected stage light(s).
+    func setSelectedStageLightOFLFixture(definition: OFLFixtureDefinition, modeName: String? = nil) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        let mode = definition.resolveMode(named: modeName ?? "") ?? definition.modes.first
+        let newSpec = definition.toProjectorSpec(modeName: mode?.name)
+        let chanNames = mode?.channels.map(\.name) ?? []
+        let chanRoles = mode?.channels.map(\.role) ?? []
+        recordUndoable(L("Fixture OFL : \(definition.displayName)", "OFL Fixture: \(definition.displayName)")) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].applySpec(newSpec)
+                videoProjectors[idx].oflFixtureID = definition.id
+                videoProjectors[idx].oflModeName = mode?.name
+                videoProjectors[idx].dmxChannelNames = chanNames
+                videoProjectors[idx].dmxChannelRoles = chanRoles
+                if !chanRoles.isEmpty {
+                    videoProjectors[idx].dmxMode = "ofl"
+                }
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedProjectorShutters(top: Float? = nil, bottom: Float? = nil, left: Float? = nil, right: Float? = nil) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Réglage couteaux/volets", "Adjust Shutters/Barn Doors"), coalesceKey: "shutters") {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                if let t = top { videoProjectors[idx].shutterTop = simd_clamp(t, 0.0, 1.0) }
+                if let b = bottom { videoProjectors[idx].shutterBottom = simd_clamp(b, 0.0, 1.0) }
+                if let l = left { videoProjectors[idx].shutterLeft = simd_clamp(l, 0.0, 1.0) }
+                if let r = right { videoProjectors[idx].shutterRight = simd_clamp(r, 0.0, 1.0) }
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedProjectorEdgeSoftness(_ value: Float) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Netteté/Flou du faisceau", "Beam Edge Softness"), coalesceKey: "softness") {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].edgeSoftness = simd_clamp(value, 0.0, 1.0)
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedProjectorLightColor(_ color: SIMD3<Float>, white: Float? = 0.0) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Couleur du projecteur", "Fixture Color"), coalesceKey: "lightColor") {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                videoProjectors[idx].lightColor = simd_clamp(color, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+                if let w = white {
+                    videoProjectors[idx].whiteChannel = simd_clamp(w, 0.0, 1.0)
+                }
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedProjectorRGBW(
+        r: Float? = nil,
+        g: Float? = nil,
+        b: Float? = nil,
+        w: Float? = nil,
+        coalesceKey: String? = "rgbw"
+    ) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Mélange RGBW", "RGBW Mix"), coalesceKey: coalesceKey) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                var lc = videoProjectors[idx].lightColor
+                if let r { lc.x = simd_clamp(r, 0.0, 1.0) }
+                if let g { lc.y = simd_clamp(g, 0.0, 1.0) }
+                if let b { lc.z = simd_clamp(b, 0.0, 1.0) }
+                videoProjectors[idx].lightColor = lc
+                if let w {
+                    videoProjectors[idx].whiteChannel = simd_clamp(w, 0.0, 1.0)
+                }
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    func setSelectedProjectorDMX(universe: Int? = nil, channel: Int? = nil, mode: String? = nil) {
+        guard !selectedVideoProjectorIndices.isEmpty else { return }
+        recordUndoable(L("Patch DMX", "DMX Patch")) {
+            for idx in selectedVideoProjectorIndices where videoProjectors.indices.contains(idx) {
+                if let u = universe { videoProjectors[idx].dmxUniverse = max(0, min(15, u)) }
+                if let c = channel { videoProjectors[idx].dmxChannel = max(1, min(512, c)) }
+                if let m = mode {
+                    videoProjectors[idx].dmxMode = m
+                    if m != "ofl" {
+                        videoProjectors[idx].dmxChannelRoles = []
+                        videoProjectors[idx].dmxChannelNames = []
+                    }
+                }
+            }
+            syncProjectorsToScene()
+        }
+    }
+
+    /// Returns the most recent live DMX byte (`0 ... 255`) received via Art-Net for a 1-based DMX channel, or `nil` if no Art-Net packet was received for that universe.
+    func liveDMXByte(universe: Int, channel1Based: Int) -> UInt8? {
+        guard let bytes = latestDMXChannelsByUniverse[universe],
+              channel1Based >= 1,
+              channel1Based <= bytes.count else {
+            return nil
+        }
+        return bytes[channel1Based - 1]
+    }
+
+    // MARK: - Art-Net Receiver & Realtime DMX Binding
+
+    private func setupArtNetReceiver() {
+        let receiver = ArtNetReceiver.shared
+        receiver.onDMXPacket = { [weak self] packet in
+            DispatchQueue.main.async {
+                self?.handleArtNetPacket(packet)
+            }
+        }
+        let started = receiver.start()
+        artNetListening = started && receiver.isListening
+    }
+
+    private func handleArtNetPacket(_ packet: ArtNetDMXPacket) {
+        artNetPacketCount = ArtNetReceiver.shared.packetCount
+        isArtNetActive = true
+
+        let bytes = packet.channels
+        latestDMXChannelsByUniverse[packet.universe] = bytes
+        if packet.universe < 16 {
+            latestDMXChannelsByUniverse[packet.shortUniverse] = bytes
+        }
+        let normalized = bytes.map { Float($0) / 255.0 }
+
+        var didChange = false
+        for i in videoProjectors.indices {
+            let p = videoProjectors[i]
+            guard p.isEnabled else { continue }
+            guard p.dmxUniverse == packet.universe || (packet.universe < 16 && p.dmxUniverse == packet.shortUniverse) else {
+                continue
+            }
+            if videoProjectors[i].applyDMXValues(normalized) {
+                didChange = true
+            }
+        }
+
+        if didChange {
+            scheduleProjectorSceneSync()
+        }
+    }
+
+    private func scheduleProjectorSceneSync() {
+        if artNetThrottler == nil {
+            let item = DispatchWorkItem { [weak self] in
+                self?.artNetThrottler = nil
+                self?.syncProjectorsToScene()
+            }
+            artNetThrottler = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.016, execute: item)
+        }
     }
 
     /// URL of the underlying 3D geometry file (`.skp`, `.dwg`, `.dxf`, `.dae`, `.obj`).
@@ -1695,7 +2735,9 @@ final class DocumentModel {
                     intensity: $0.intensity,
                     isFromScene: $0.isFromScene
                 )
-            }
+            },
+            photometricSimulation: photometricSimulation,
+            photometricReferenceLux: photometricReferenceLux
         )
         var hiddenNames: [String] = []
         if let skp {
@@ -1740,6 +2782,12 @@ final class DocumentModel {
                     ViewportPointLight(name: $0.name, position: $0.position, intensity: $0.intensity, isFromScene: $0.isFromScene)
                 }
             }
+            if let photoSim = lighting.photometricSimulation {
+                photometricSimulation = photoSim
+            }
+            if let refLux = lighting.photometricReferenceLux {
+                photometricReferenceLux = refLux
+            }
             lightingMode = (lighting.lightingMode == "point") ? .point : .sun
             if let scene {
                 scene.showsEdges = showsEdges
@@ -1767,6 +2815,7 @@ final class DocumentModel {
         }
         videoProjectors = project.projectors
         selectedVideoProjectorIndex = 0
+        selectedVideoProjectorIndices = videoProjectors.isEmpty ? [] : [0]
         syncProjectorsToScene()
     }
 
@@ -1948,13 +2997,23 @@ final class DocumentModel {
         if isFreeFlying { return L("Vol libre — Échap pour sortir", "Free fly — Esc to exit") }
         if let skp {
             let size = visibleSize ?? skp.size
-            let parts: [String?] = [
-                info?.versionLabel ?? skp.fileInfo.versionLabel,
-                Format.count(skp.stats.faces, L("face", "face")),
-                Format.count(skp.stats.edges, L("arête", "edge")),
-                Format.count(skp.stats.instances, L("composant", "component")),
-                "\(Format.decimal(size.x)) × \(Format.decimal(size.y)) × \(Format.decimal(size.z)) m",
-            ]
+            let parts: [String?]
+            if skp.stats.splats > 0, skp.stats.faces == 0, skp.stats.edges == 0 {
+                let unit = skp.splatCloud?.kind == .gaussianSplats ? L("splat", "splat") : L("point", "point")
+                parts = [
+                    info?.versionLabel ?? skp.fileInfo.versionLabel,
+                    Format.count(skp.stats.splats, unit),
+                    "\(Format.decimal(size.x)) × \(Format.decimal(size.y)) × \(Format.decimal(size.z)) m",
+                ]
+            } else {
+                parts = [
+                    info?.versionLabel ?? skp.fileInfo.versionLabel,
+                    Format.count(skp.stats.faces, L("face", "face")),
+                    Format.count(skp.stats.edges, L("arête", "edge")),
+                    Format.count(skp.stats.instances, L("composant", "component")),
+                    "\(Format.decimal(size.x)) × \(Format.decimal(size.y)) × \(Format.decimal(size.z)) m",
+                ]
+            }
             return parts.compactMap { $0 }.joined(separator: " · ")
         }
         var text = L("Chargement…", "Loading…")
@@ -1962,6 +3021,46 @@ final class DocumentModel {
             text += " \(progress.phase) · " + Format.count(progress.faces, L("face", "face"))
         }
         return text
+    }
+
+    // MARK: - Syphon Video Output
+
+    func toggleSyphonOutput() {
+        setSyphonOutputEnabled(!syphonOutputEnabled)
+    }
+
+    func setSyphonOutputEnabled(_ enabled: Bool) {
+        guard syphonOutputEnabled != enabled else { return }
+        syphonOutputEnabled = enabled
+        Preferences.syphonOutputEnabled = enabled
+        viewport.syphonOutputResolution = syphonOutputResolution
+        viewport.syphonOutputEnabled = enabled
+        if enabled {
+            flash(L("Sortie Syphon activée (\(syphonOutputResolution.shortLabel))", "Syphon output enabled (\(syphonOutputResolution.shortLabel))"))
+        } else {
+            flash(L("Sortie Syphon désactivée", "Syphon output disabled"))
+        }
+    }
+
+    func setSyphonOutputResolution(_ resolution: SyphonOutputResolution) {
+        guard syphonOutputResolution != resolution else {
+            if !syphonOutputEnabled {
+                setSyphonOutputEnabled(true)
+            }
+            return
+        }
+        syphonOutputResolution = resolution
+        Preferences.syphonOutputResolution = resolution
+        viewport.syphonOutputResolution = resolution
+        if !syphonOutputEnabled {
+            setSyphonOutputEnabled(true)
+        } else {
+            flash(L("Syphon : \(resolution.label)", "Syphon: \(resolution.label)"))
+        }
+    }
+
+    func stopSyphonOutput() {
+        viewport.stopSyphonOutput()
     }
 }
 

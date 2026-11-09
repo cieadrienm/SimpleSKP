@@ -25,9 +25,9 @@ struct AboutView: View {
     private static var features: [(icon: String, title: String, subtitle: String)] {
         [
             ("cube.transparent",
-             L("Lecture directe .skp, .dwg, .dxf, .dae & .obj", "Direct .skp, .dwg, .dxf, .dae & .obj reading"),
-             L("Ouverture asynchrone SketchUp, AutoCAD, Collada et Wavefront OBJ, calibration métrique automatique, SDK C embarqué et fusion Metal par matériaux.",
-               "Asynchronous SketchUp, AutoCAD, Collada and Wavefront OBJ loading, automatic metric calibration, embedded C SDK, and Metal material merging.")),
+             L("Lecture directe 3D, CAD, Splats & Nuages de points", "Direct 3D, CAD, Splats & Point Clouds reading"),
+             L("Ouverture asynchrone SketchUp (.skp), AutoCAD (.dwg/.dxf), Collada (.dae), OBJ, FBX, Gaussian Splats (.ply/.splat/.spz) et nuages de points (.xyz/.pts/.pcd) accélérés par Metal.",
+               "Asynchronous SketchUp (.skp), AutoCAD (.dwg/.dxf), Collada (.dae), OBJ, FBX, Gaussian Splats (.ply/.splat/.spz), and point clouds (.xyz/.pts/.pcd) loading with Metal GPU acceleration.")),
             ("sun.max.trianglebadge.exclamationmark",
              L("Rendu architectural doux", "Soft architectural rendering"),
              L("Matériaux PBR, soleil orientable à cascades d'ombres, contre-jour céleste et styles Maquette / Rayons X.",
@@ -87,8 +87,8 @@ struct AboutView: View {
                         .help(L("Cliquer pour copier le numéro de version", "Click to copy version number"))
                     }
 
-                    Text(L("Visualiseur 3D natif et léger de fichiers SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae) et Wavefront (.obj) pour macOS.",
-                           "Lightweight native 3D viewer for SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), and Wavefront (.obj) files on macOS."))
+                    Text(L("Visualiseur 3D natif et léger de fichiers SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), OBJ, FBX, Gaussian Splats (.ply, .splat, .spz) et nuages de points (.xyz, .pts, .pcd) pour macOS.",
+                           "Lightweight native 3D viewer for SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), OBJ, FBX, Gaussian Splats (.ply, .splat, .spz), and point clouds (.xyz, .pts, .pcd) on macOS."))
                         .font(.system(size: 12.5))
                         .foregroundStyle(Theme.textDim.swiftUI)
                         .fixedSize(horizontal: false, vertical: true)
@@ -494,12 +494,12 @@ struct HelpView: View {
     private func sectionContent(_ section: Section) -> some View {
         switch section {
         case .overview:
-            heading(L("Ouvrir et inspecter un modèle 3D ou un plan CAD", "Opening and inspecting a 3D model or CAD plan"))
-            paragraph(L("SimpleSKP ouvre directement les fichiers SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae) et Wavefront (.obj) en lecture seule. Les plans et modèles CAD bénéficient d'une calibration métrique automatique, d'un recentrage des coordonnées géodésiques et d'un cadrage automatique en vue de dessus pour les plans 2D.",
-                        "SimpleSKP opens SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), and Wavefront (.obj) files directly in read-only mode. CAD plans and models feature automatic metric unit calibration, geodetic origin recentering, and automatic top-view framing for 2D plans."))
+            heading(L("Ouvrir et inspecter un modèle 3D, un plan CAD ou un Gaussian Splat", "Opening and inspecting a 3D model, CAD plan, or Gaussian Splat"))
+            paragraph(L("SimpleSKP ouvre directement les fichiers SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), Wavefront (.obj), Autodesk FBX (.fbx), 3D Gaussian Splats (.ply, .splat, .spz) et nuages de points (.xyz, .pts, .pcd) en lecture seule. Les plans et modèles bénéficient d'une calibration métrique automatique, d'un recentrage des coordonnées géodésiques et d'un cadrage automatique en vue de dessus pour les plans 2D.",
+                        "SimpleSKP opens SketchUp (.skp), AutoCAD (.dwg, .dxf), Collada (.dae), Wavefront (.obj), Autodesk FBX (.fbx), 3D Gaussian Splats (.ply, .splat, .spz), and point clouds (.xyz, .pts, .pcd) directly in read-only mode. Plans and models feature automatic metric unit calibration, geodetic origin recentering, and automatic top-view framing for 2D plans."))
             step(1, L("Ouvrir un fichier", "Open a file"),
-                 L("Double-cliquer un fichier .skp, .dwg, .dxf, .dae ou .obj dans le Finder, le glisser dans la fenêtre ou utiliser ⌘O.",
-                   "Double-click a .skp, .dwg, .dxf, .dae, or .obj file in Finder, drag it into the window, or press ⌘O."))
+                 L("Double-cliquer un fichier .skp, .dwg, .dxf, .dae, .obj, .fbx, .ply, .splat, .spz, .xyz, .pts ou .pcd dans le Finder, le glisser dans la fenêtre ou utiliser ⌘O.",
+                   "Double-click a .skp, .dwg, .dxf, .dae, .obj, .fbx, .ply, .splat, .spz, .xyz, .pts, or .pcd file in Finder, drag it into the window, or press ⌘O."))
             step(2, L("Choisir l'angle et le style", "Choose angle and style"),
                  L("Utiliser la barre d'outils supérieure pour basculer entre les vues standard (Iso, Dessus, Face, Droite…), la projection (Perspective / Parallèle) et les styles de rendu (PBR, Blanc, Rayons X, Filaire).",
                    "Use the top toolbar to switch between standard views (Iso, Top, Front, Right…), projection (Perspective / Parallel), and shading styles (PBR, Clay, X-Ray, Wireframe)."))

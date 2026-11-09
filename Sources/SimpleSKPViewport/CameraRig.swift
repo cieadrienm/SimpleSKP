@@ -52,7 +52,17 @@ public final class CameraRig {
 
     let node: SCNNode
     var onChange: () -> Void = {}
-    var pose = Pose() { didSet { write() } }
+    private var batchDepth = 0
+    private var hasPendingWrite = false
+    var pose = Pose() {
+        didSet {
+            if batchDepth > 0 {
+                hasPendingWrite = true
+            } else {
+                write()
+            }
+        }
+    }
     /// Orbit centre of the current drag or inertia (model space); nil = the target.
     var pivot: SIMD3<Float>?
 
@@ -212,6 +222,8 @@ public final class CameraRig {
 
     /// One frame of glide, inertia and held keys (called by the timer; by the tests directly).
     func step(dt: Float) {
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "rig.step") }
         if var g = glide {
             g.elapsed += dt
             let t = min(1, g.elapsed / g.duration), s = t * t * (3 - 2 * t)
@@ -274,12 +286,31 @@ public final class CameraRig {
 
     private func tick() {
         let now = CACurrentMediaTime()
-        step(dt: Float(min(now - lastTick, 0.1)))
+        let rawDt = now - lastTick
+        if rawDt > 0, rawDt < 0.5 {
+            FrameProfiler.shared.recordDuration(seconds: rawDt, for: "dl.tick")
+        }
+        step(dt: Float(min(rawDt, 0.1)))
         lastTick = now
         if !isMoving {
             timer?.invalidate()
             timer = nil
         }
+    }
+
+    func beginBatch() {
+        batchDepth += 1
+    }
+
+    @discardableResult
+    func endBatch() -> Bool {
+        batchDepth = max(0, batchDepth - 1)
+        if batchDepth == 0, hasPendingWrite {
+            hasPendingWrite = false
+            write()
+            return true
+        }
+        return false
     }
 
     private func write() {

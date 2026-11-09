@@ -1,15 +1,166 @@
+import Metal
 import SceneKit
 import SimpleSKPCore
+import SimpleSKPVideoBridge
 
 public enum StandardView: CaseIterable, Sendable {
     case iso, top, bottom, front, back, left, right
+}
+
+/// Resolution preset for the live Syphon video output stream (e.g. for recording in SimpleRecorder).
+public enum SyphonOutputResolution: String, CaseIterable, Identifiable, Sendable {
+    public enum Category: String, CaseIterable, Sendable {
+        case native
+        case landscape16x9
+        case wuxga16x10
+        case portrait9x16
+
+        public var title: String {
+            switch self {
+            case .native:        return L("Fenêtre", "Viewport")
+            case .landscape16x9: return L("Paysage 16:9", "Landscape 16:9")
+            case .wuxga16x10:    return L("Projecteurs 16:10 (WUXGA)", "Projectors 16:10 (WUXGA)")
+            case .portrait9x16:  return L("Vertical 9:16 & 10:16", "Vertical 9:16 & 10:16")
+            }
+        }
+    }
+
+    case viewport
+    // Paysage 16:9
+    case hd720p
+    case hd1080p
+    case qhd1440p
+    case uhd4k
+    // Projecteurs 16:10 (WXGA / WUXGA / WQXGA / WQUXGA)
+    case wxga800
+    case wuxga1200
+    case wqxga1600
+    case wquxga2400
+    // Vertical 9:16 & 10:16
+    case portrait720x1280
+    case portrait1080x1920
+    case portrait1200x1920
+    case portrait2160x3840
+
+    public var id: String { rawValue }
+
+    public var category: Category {
+        switch self {
+        case .viewport:
+            return .native
+        case .hd720p, .hd1080p, .qhd1440p, .uhd4k:
+            return .landscape16x9
+        case .wxga800, .wuxga1200, .wqxga1600, .wquxga2400:
+            return .wuxga16x10
+        case .portrait720x1280, .portrait1080x1920, .portrait1200x1920, .portrait2160x3840:
+            return .portrait9x16
+        }
+    }
+
+    public static func presets(in category: Category) -> [SyphonOutputResolution] {
+        allCases.filter { $0.category == category }
+    }
+
+    public var label: String {
+        switch self {
+        case .viewport:          return L("Fenêtre (natif)", "Viewport (native)")
+        case .hd720p:            return "720p — 1280×720 (16:9)"
+        case .hd1080p:           return "1080p — 1920×1080 (16:9)"
+        case .qhd1440p:          return "1440p — 2560×1440 (16:9)"
+        case .uhd4k:             return "4K UHD — 3840×2160 (16:9)"
+        case .wxga800:           return "WXGA — 1280×800 (16:10)"
+        case .wuxga1200:         return "WUXGA — 1920×1200 (16:10)"
+        case .wqxga1600:         return "WQXGA — 2560×1600 (16:10)"
+        case .wquxga2400:        return "4K 16:10 — 3840×2400 (WQUXGA)"
+        case .portrait720x1280:  return "Vertical 720p — 720×1280 (9:16)"
+        case .portrait1080x1920: return "Vertical 1080p — 1080×1920 (9:16)"
+        case .portrait1200x1920: return "Vertical WUXGA — 1200×1920 (10:16)"
+        case .portrait2160x3840: return "Vertical 4K — 2160×3840 (9:16)"
+        }
+    }
+
+    public var shortLabel: String {
+        switch self {
+        case .viewport:          return L("Natif", "Native")
+        case .hd720p:            return "1280×720"
+        case .hd1080p:           return "1920×1080"
+        case .qhd1440p:          return "2560×1440"
+        case .uhd4k:             return "3840×2160"
+        case .wxga800:           return "1280×800"
+        case .wuxga1200:         return "1920×1200"
+        case .wqxga1600:         return "2560×1600"
+        case .wquxga2400:        return "3840×2400"
+        case .portrait720x1280:  return "720×1280"
+        case .portrait1080x1920: return "1080×1920"
+        case .portrait1200x1920: return "1200×1920"
+        case .portrait2160x3840: return "2160×3840"
+        }
+    }
+
+    public var fixedPixelSize: (width: Int, height: Int)? {
+        switch self {
+        case .viewport:          return nil
+        case .hd720p:            return (1280, 720)
+        case .hd1080p:           return (1920, 1080)
+        case .qhd1440p:          return (2560, 1440)
+        case .uhd4k:             return (3840, 2160)
+        case .wxga800:           return (1280, 800)
+        case .wuxga1200:         return (1920, 1200)
+        case .wqxga1600:         return (2560, 1600)
+        case .wquxga2400:        return (3840, 2400)
+        case .portrait720x1280:  return (720, 1280)
+        case .portrait1080x1920: return (1080, 1920)
+        case .portrait1200x1920: return (1200, 1920)
+        case .portrait2160x3840: return (2160, 3840)
+        }
+    }
+
+    public static func parse(_ raw: String) -> SyphonOutputResolution? {
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "×", with: "x")
+            .replacingOccurrences(of: " ", with: "")
+        if let exact = SyphonOutputResolution(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return exact
+        }
+        switch token {
+        case "viewport", "native", "natif", "window", "fenetre", "fenêtre", "0":
+            return .viewport
+        case "720p", "hd720p", "1280x720", "720":
+            return .hd720p
+        case "1080p", "hd1080p", "fhd", "1920x1080", "1080", "16:9", "16/9":
+            return .hd1080p
+        case "1440p", "qhd", "qhd1440p", "2560x1440", "1440", "2k":
+            return .qhd1440p
+        case "4k", "uhd", "uhd4k", "3840x2160", "2160p", "2160":
+            return .uhd4k
+        case "wxga", "wxga800", "1280x800", "800p":
+            return .wxga800
+        case "wuxga", "wuxga1200", "1920x1200", "1200p", "16:10", "16/10":
+            return .wuxga1200
+        case "wqxga", "wqxga1600", "2560x1600", "1600p":
+            return .wqxga1600
+        case "wquxga", "wquxga2400", "3840x2400", "2400p", "4k16:10", "4kwuxga":
+            return .wquxga2400
+        case "720x1280", "portrait720p", "portrait720x1280", "vertical720p":
+            return .portrait720x1280
+        case "1080x1920", "portrait", "portrait1080p", "portrait1080x1920", "vertical", "vertical1080p", "9:16", "9/16":
+            return .portrait1080x1920
+        case "1200x1920", "portraitwuxga", "portrait1200x1920", "verticalwuxga", "10:16", "10/16":
+            return .portrait1200x1920
+        case "2160x3840", "portrait4k", "portrait2160x3840", "vertical4k", "4k9:16", "4kvertical":
+            return .portrait2160x3840
+        default:
+            return nil
+        }
+    }
 }
 
 /// D6 navigation over one `CameraRig`, four ways side by side: orbit (left drag, inertia; ⇧/middle drag = pan; wheel =
 /// zoom towards the cursor; double-click = recentre), game editor (right drag = look; WASD/ZQSD by keyCode, arrows,
 /// space/E/C), trackpad (two fingers = orbit or zoom, ⌥ = pan, pinch = zoom, rotate = yaw), and free fly.
 /// Renders on demand only (`rendersContinuously = false`).
-public final class ViewportView: SCNView {
+public final class ViewportView: SCNView, SCNSceneRendererDelegate {
     public private(set) var viewportScene: ViewportScene?
     public let cameraNode = SCNNode()
     private(set) lazy var rig = CameraRig(node: cameraNode)
@@ -75,10 +226,70 @@ public final class ViewportView: SCNView {
     private var didDragDuringMouseDown = false
     private var zoomAnchor: SIMD3<Float>?
     private var lastWheel: TimeInterval = 0
+    private var lastHandledMouseMovedTimestamp: TimeInterval = -1
     private var allowScrollMomentum = false
     private var mouseMovedMonitor: Any?
     /// NSCursor.hide() calls not yet balanced by unhide(): 0 or 1, checked by the tests.
     private(set) var cursorHides = 0
+    private var batchDepth = 0
+    private var batchNeedsRedraw = false
+    private var batchPoseChanged = false
+
+    // MARK: - Syphon Output State
+
+    public static var isSyphonAvailable: Bool {
+        SSKPVideoSyphonBridge.isAvailable()
+    }
+
+    public var syphonOutputEnabled: Bool = false {
+        didSet {
+            guard syphonOutputEnabled != oldValue else { return }
+            updateSyphonOutputState()
+        }
+    }
+
+    public var syphonOutputResolution: SyphonOutputResolution = .viewport {
+        didSet {
+            guard syphonOutputResolution != oldValue else { return }
+            if syphonOutputEnabled {
+                publishSyphonFrameNow(waitUntilDone: false)
+            }
+        }
+    }
+
+    /// Custom server name override (defaults to `""` in `SimpleSKP.app` so SimpleRecorder lists it as `"SimpleSKP"`).
+    public var syphonServerName: String = "" {
+        didSet {
+            guard syphonServerName != oldValue else { return }
+            syphonServer?.name = effectiveSyphonServerName
+        }
+    }
+
+    /// Used by unit tests to create an isolated private Syphon server.
+    public var syphonIsPrivateForTesting: Bool = false
+
+    public private(set) var syphonServer: SSKPVideoSyphonServer?
+    private var syphonOffscreenRenderer: SCNRenderer?
+    private var syphonOffscreenCommandQueue: MTLCommandQueue?
+    private var syphonOffscreenColorTexture: MTLTexture?
+    private var syphonOffscreenDepthTexture: MTLTexture?
+    private var syphonKeepAliveTimer: Timer?
+    private var lastOnScreenRenderTimestamp: TimeInterval = 0
+    private var syphonFallbackWorkItem: DispatchWorkItem?
+    nonisolated(unsafe) private var currentRenderStartTime: CFTimeInterval = 0
+
+    public var syphonPublishedFrameCount: UInt64 {
+        syphonServer?.publishedFrameCount ?? 0
+    }
+
+    public var syphonHasClients: Bool {
+        syphonServer?.hasClients ?? false
+    }
+
+    public var syphonLastPublishedSize: (width: Int, height: Int) {
+        guard let srv = syphonServer else { return (0, 0) }
+        return (Int(srv.lastPublishedWidth), Int(srv.lastPublishedHeight))
+    }
 
     public override init(frame: NSRect, options: [String: Any]? = nil) {
         super.init(frame: frame, options: options)
@@ -95,6 +306,7 @@ public final class ViewportView: SCNView {
         antialiasingMode = .multisampling4X
         allowsCameraControl = false
         autoenablesDefaultLighting = false
+        delegate = self
         backgroundColor = NSColor(red: 0.067, green: 0.075, blue: 0.09, alpha: 1)
         preferredFramesPerSecond = max(60, NSScreen.screens.map(\.maximumFramesPerSecond).max() ?? 60)
         let camera = SCNCamera()
@@ -106,8 +318,14 @@ public final class ViewportView: SCNView {
         cameraNode.camera = camera
         cameraNode.name = "camera"
         rig.onChange = { [unowned self] in
+            if batchDepth > 0 {
+                batchPoseChanged = true
+                batchNeedsRedraw = true
+                return
+            }
             refreshMeasurementCamera()
             setNeedsDisplay(bounds)
+            scheduleSyphonFallbackIfNeeded()
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
         rig.onZoomInertiaStep = { [unowned self] stepRatio, point in
@@ -150,10 +368,16 @@ public final class ViewportView: SCNView {
         get { Float(camera.fieldOfView) }
         set {
             let clamped = max(10.0, min(120.0, newValue))
+            guard abs(Float(camera.fieldOfView) - clamped) > 1e-4 else { return }
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0
             camera.fieldOfView = CGFloat(clamped)
             SCNTransaction.commit()
+            if batchDepth > 0 {
+                batchPoseChanged = true
+                batchNeedsRedraw = true
+                return
+            }
             refreshMeasurementCamera()
             requestRedraw()
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
@@ -165,7 +389,13 @@ public final class ViewportView: SCNView {
         get { Float(camera.exposureOffset) }
         set {
             let clamped = max(-3.0, min(3.0, newValue))
+            guard abs(Float(camera.exposureOffset) - clamped) > 1e-4 else { return }
             camera.exposureOffset = CGFloat(clamped)
+            if batchDepth > 0 {
+                batchPoseChanged = true
+                batchNeedsRedraw = true
+                return
+            }
             requestRedraw()
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
@@ -175,10 +405,17 @@ public final class ViewportView: SCNView {
     public var orthographicScale: Float {
         get { Float(camera.orthographicScale) }
         set {
+            let clamped = Double(max(0.01, min(10_000.0, newValue)))
+            guard abs(camera.orthographicScale - clamped) > 1e-5 else { return }
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0
-            camera.orthographicScale = Double(max(0.01, min(10_000.0, newValue)))
+            camera.orthographicScale = clamped
             SCNTransaction.commit()
+            if batchDepth > 0 {
+                batchPoseChanged = true
+                batchNeedsRedraw = true
+                return
+            }
             refreshMeasurementCamera()
             requestRedraw()
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
@@ -189,7 +426,13 @@ public final class ViewportView: SCNView {
     public var movementSpeedScale: Float {
         get { rig.speedScale }
         set {
-            rig.speedScale = max(1.0 / 16.0, min(16.0, newValue))
+            let clamped = max(1.0 / 16.0, min(16.0, newValue))
+            guard abs(rig.speedScale - clamped) > 1e-5 else { return }
+            rig.speedScale = clamped
+            if batchDepth > 0 {
+                batchPoseChanged = true
+                return
+            }
             onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
         }
     }
@@ -313,18 +556,59 @@ public final class ViewportView: SCNView {
         refreshMeasurementCamera()
     }
 
+    /// Batches multiple camera/scene mutations (such as a frame's coalesced OSC messages) into a single SceneKit commit and redraw.
+    public func performBatchedUpdate(_ body: () -> Void) {
+        batchDepth += 1
+        rig.beginBatch()
+        defer {
+            _ = rig.endBatch()
+            batchDepth = max(0, batchDepth - 1)
+            if batchDepth == 0 {
+                let poseChanged = batchPoseChanged
+                let needsRedraw = batchNeedsRedraw
+                batchPoseChanged = false
+                batchNeedsRedraw = false
+                if poseChanged || needsRedraw {
+                    refreshMeasurementCamera()
+                    SCNTransaction.begin()
+                    SCNTransaction.animationDuration = 0
+                    let pos = cameraNode.simdPosition
+                    cameraNode.simdPosition = pos
+                    SCNTransaction.commit()
+                    setNeedsDisplay(bounds)
+                    scheduleSyphonFallbackIfNeeded()
+                }
+                if poseChanged {
+                    onPoseChange?(rig.pose.yaw, rig.pose.pitch, rig.speed)
+                }
+            }
+        }
+        body()
+    }
+
     /// Forces an immediate on-demand SceneKit redraw even when only light or camera post-processing properties changed.
     public func requestRedraw() {
+        if batchDepth > 0 {
+            batchNeedsRedraw = true
+            return
+        }
         refreshMeasurementCamera()
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
         let pos = cameraNode.simdPosition
         cameraNode.simdPosition = pos
-        SCNTransaction.flush()
+        SCNTransaction.commit()
         setNeedsDisplay(bounds)
+        scheduleSyphonFallbackIfNeeded()
     }
 
     /// Main thread: shows the scene, applies the file's camera if any, otherwise zooms to extents.
     public func present(_ scene: ViewportScene) {
+        viewportScene?.onNeedRedraw = nil
         viewportScene = scene
+        scene.onNeedRedraw = { [weak self] in
+            self?.requestRedraw()
+        }
         self.scene = scene.scene
         cameraNode.removeFromParentNode()
         scene.modelRoot.addChildNode(cameraNode)
@@ -345,6 +629,10 @@ public final class ViewportView: SCNView {
             look(scene.model.isPlanar2D ? .top : .iso, animated: false)
         }
         refreshMeasurementCamera()
+        if syphonOutputEnabled {
+            syphonServer?.attach(toMetalLayer: self.layer)
+            scheduleSyphonFallbackIfNeeded()
+        }
     }
 
     public func zoomExtents(animated: Bool) {
@@ -521,6 +809,10 @@ public final class ViewportView: SCNView {
             return
         }
         guard drag == nil else { return }
+        if event.timestamp > 0, abs(event.timestamp - lastHandledMouseMovedTimestamp) < 1e-6 {
+            return
+        }
+        lastHandledMouseMovedTimestamp = event.timestamp
         let point = convert(event.locationInWindow, from: nil)
         updateHoveredLayer(at: point)
         if isMeasuring || isPickingProjectorPoint {
@@ -778,10 +1070,14 @@ public final class ViewportView: SCNView {
             guard let self, let window = self.window, event.window === window, !self.isFreeFlying, self.drag == nil else {
                 return event
             }
+            if event.timestamp > 0, abs(event.timestamp - self.lastHandledMouseMovedTimestamp) < 1e-6 {
+                return event
+            }
+            self.lastHandledMouseMovedTimestamp = event.timestamp
             let point = self.convert(event.locationInWindow, from: nil)
             if self.bounds.contains(point) {
                 self.updateHoveredLayer(at: point)
-                if self.isMeasuring {
+                if self.isMeasuring || self.isPickingProjectorPoint {
                     self.onMeasureHover?(self.pickSnapPoint(at: point), event.modifierFlags.contains(.shift))
                 }
             } else {
@@ -789,7 +1085,7 @@ public final class ViewportView: SCNView {
                     self.hoveredLayer = nil
                     self.onHoverLayer?(nil)
                 }
-                if self.isMeasuring {
+                if self.isMeasuring || self.isPickingProjectorPoint {
                     self.onMeasureHover?(nil, false)
                 }
             }
@@ -942,6 +1238,8 @@ public final class ViewportView: SCNView {
     /// outwards. Faces only (category 1): edges, hit with a tolerance, would win the closest-only search and lie off the
     /// surface. A segment test on the scene graph: `SCNView.hitTest` finds nothing before a first frame.
     func hit(_ point: CGPoint) -> SIMD3<Float>? {
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "raycast.pick") }
         guard let root = viewportScene?.modelRoot, let bounds = viewportScene?.visibleBounds else { return nil }
         let pose = rig.pose, reach = simd_distance(pose.position, (bounds.min + bounds.max) / 2) + simd_distance(bounds.min, bounds.max)
         var from = pose.position, direction = ray(through: point)
@@ -958,6 +1256,21 @@ public final class ViewportView: SCNView {
         ).first {
             return worldToModel(SIMD3<Float>(faceHit.worldCoordinates))
         }
+        if let scene = viewportScene, scene.model.splatCloud != nil {
+            let viewHeight = Float(max(1, self.bounds.height))
+            let orthoMPP: Float? = camera.usesOrthographicProjection ? (visibleHeight / viewHeight) : nil
+            if let splatHit = scene.raycastSplatCloud(
+                from: from,
+                direction: direction,
+                reach: max(reach, 1.0),
+                tanHalfFOV: tanHalfFOV,
+                viewportHeight: viewHeight,
+                screenRadiusPoints: 16.0,
+                orthoMetresPerPoint: orthoMPP
+            ) {
+                return splatHit
+            }
+        }
         // Pure-edge / 2D CAD plan fallback: intersect the ray with the model's mid-Z plane so zoom-to-cursor,
         // double-click recentre and orbit pivot work seamlessly when there are no faces under the cursor.
         if let model = viewportScene?.model, (model.stats.faces == 0 || model.isPlanar2D), abs(direction.z) > 1e-5 {
@@ -972,6 +1285,8 @@ public final class ViewportView: SCNView {
 
     /// Picks the layer index in `model.layers` of the visible face or edge under `point` in view coordinates.
     public func pickLayer(at point: CGPoint, screenRadiusPoints: Float = 12.0) -> Int? {
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "raycast.pick") }
         guard let scene = viewportScene else { return nil }
         let bounds = scene.visibleBounds
         let pose = rig.pose
@@ -1017,6 +1332,8 @@ public final class ViewportView: SCNView {
 
     /// Snaps the cursor at `point` (in view coordinates) to the nearest visible vertex, edge midpoint, edge segment, face, or 2D plane.
     public func pickSnapPoint(at point: CGPoint, screenRadiusPoints: Float = 13.0) -> MeasureSnap? {
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "raycast.pick") }
         guard let scene = viewportScene else { return nil }
         let bounds = scene.visibleBounds
         let pose = rig.pose
@@ -1105,5 +1422,269 @@ public final class ViewportView: SCNView {
         pose.position = centre - pose.forward * pose.distance
         let scale = camera.usesOrthographicProjection ? Double(radius * 1.05 / min(1, aspect)) : nil
         if animated { rig.glide(to: pose, orthographicScale: scale) } else { rig.set(pose, orthographicScale: scale) }
+    }
+
+    // MARK: - Syphon Video Output
+
+    private var effectiveSyphonServerName: String {
+        if !syphonServerName.isEmpty {
+            return syphonServerName
+        }
+        let appName = Bundle.main.object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String ?? ""
+        return appName == "SimpleSKP" ? "" : "SimpleSKP"
+    }
+
+    private func updateSyphonOutputState() {
+        if syphonOutputEnabled {
+            guard syphonServer == nil else { return }
+            guard let dev = self.device ?? MTLCreateSystemDefaultDevice() else { return }
+            if syphonOffscreenCommandQueue == nil {
+                syphonOffscreenCommandQueue = self.commandQueue ?? dev.makeCommandQueue()
+            }
+            guard let server = SSKPVideoSyphonServer(
+                name: effectiveSyphonServerName,
+                device: dev,
+                isPrivate: syphonIsPrivateForTesting
+            ) else {
+                return
+            }
+            syphonServer = server
+            if !syphonIsPrivateForTesting {
+                LiveVideoSourceManager.shared.setOwnSyphonServerUUID(server.serverUUID, excluded: true)
+            }
+            server.attach(toMetalLayer: self.layer)
+            setNeedsDisplay(bounds)
+            publishSyphonFrameNow(waitUntilDone: false)
+
+            let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.syphonOutputEnabled, let srv = self.syphonServer else { return }
+                    if srv.publishedFrameCount == 0 {
+                        self.publishSyphonFrameNow(waitUntilDone: false)
+                    } else if srv.hasClients, CACurrentMediaTime() - self.lastOnScreenRenderTimestamp > 0.35 {
+                        _ = srv.republishLastFrame()
+                    }
+                }
+            }
+            timer.tolerance = 0.1
+            RunLoop.main.add(timer, forMode: .common)
+            syphonKeepAliveTimer = timer
+        } else {
+            stopSyphonOutput()
+        }
+    }
+
+    /// Stops and retires the Syphon output server if running.
+    public func stopSyphonOutput() {
+        syphonFallbackWorkItem?.cancel()
+        syphonFallbackWorkItem = nil
+        syphonKeepAliveTimer?.invalidate()
+        syphonKeepAliveTimer = nil
+        if let srv = syphonServer {
+            LiveVideoSourceManager.shared.setOwnSyphonServerUUID(srv.serverUUID, excluded: false)
+            srv.attach(toMetalLayer: nil)
+            srv.stop()
+            syphonServer = nil
+        }
+        syphonOffscreenColorTexture = nil
+        syphonOffscreenDepthTexture = nil
+        syphonOffscreenRenderer = nil
+    }
+
+    public nonisolated func renderer(_ renderer: any SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        currentRenderStartTime = CACurrentMediaTime()
+    }
+
+    public nonisolated func renderer(_ renderer: any SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        let now = CACurrentMediaTime()
+        let start = currentRenderStartTime
+        let renderDuration = start > 0 ? max(0.0, now - start) : 0.0
+        currentRenderStartTime = 0
+        if renderDuration > 0 {
+            FrameProfiler.shared.recordDuration(seconds: renderDuration, for: "render.scene")
+        }
+        let sel = NSSelectorFromString("currentCommandBuffer")
+        if let obj = renderer as? NSObject,
+           obj.responds(to: sel),
+           let cb = obj.perform(sel)?.takeUnretainedValue() as? MTLCommandBuffer {
+            cb.addCompletedHandler { commandBuffer in
+                let gpuStart = commandBuffer.gpuStartTime
+                let gpuEnd = commandBuffer.gpuEndTime
+                if gpuEnd > gpuStart, gpuStart > 0 {
+                    FrameProfiler.shared.recordAsyncGPUDuration(seconds: gpuEnd - gpuStart)
+                }
+            }
+        }
+        FrameProfiler.shared.frameEnd(totalSeconds: renderDuration, now: now)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lastOnScreenRenderTimestamp = CACurrentMediaTime()
+            self.syphonFallbackWorkItem?.cancel()
+            self.syphonFallbackWorkItem = nil
+            guard self.syphonOutputEnabled, let srv = self.syphonServer else { return }
+            if self.syphonOutputResolution == .viewport,
+               let tex = srv.consumeCapturedLayerTexture(),
+               let q = self.commandQueue ?? self.syphonOffscreenCommandQueue {
+                let s0 = CACurrentMediaTime()
+                _ = srv.publishTexture(
+                    tex,
+                    commandQueue: q,
+                    outputWidth: 0,
+                    outputHeight: 0,
+                    flipped: true,
+                    waitUntilDone: false
+                )
+                FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - s0, for: "syphon.publish")
+            } else {
+                self.publishOffscreenSyphonFrame(waitUntilDone: false)
+            }
+        }
+    }
+
+    private func scheduleSyphonFallbackIfNeeded() {
+        guard syphonOutputEnabled, syphonServer != nil else { return }
+        if let layer = self.layer {
+            syphonServer?.attach(toMetalLayer: layer)
+        }
+        if window == nil || window?.isVisible == false || window?.isMiniaturized == true {
+            publishOffscreenSyphonFrame(waitUntilDone: false)
+            return
+        }
+        guard syphonFallbackWorkItem == nil else { return }
+        let requestTime = CACurrentMediaTime()
+        let item = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.syphonFallbackWorkItem = nil
+                guard self.syphonOutputEnabled, self.syphonServer != nil else { return }
+                if self.lastOnScreenRenderTimestamp < requestTime {
+                    self.publishOffscreenSyphonFrame(waitUntilDone: false)
+                }
+            }
+        }
+        syphonFallbackWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.020, execute: item)
+    }
+
+    /// Renders and publishes a Syphon frame immediately (used on initial activation, resolution change, occluded windows, and headless tests).
+    @discardableResult
+    public func publishSyphonFrameNow(waitUntilDone: Bool = false) -> Bool {
+        if !syphonOutputEnabled {
+            syphonOutputEnabled = true
+        }
+        if syphonServer == nil {
+            updateSyphonOutputState()
+        }
+        return publishOffscreenSyphonFrame(waitUntilDone: waitUntilDone)
+    }
+
+    @discardableResult
+    private func publishOffscreenSyphonFrame(waitUntilDone: Bool) -> Bool {
+        guard syphonOutputEnabled,
+              let srv = syphonServer,
+              let scnScene = self.scene,
+              let dev = self.device ?? MTLCreateSystemDefaultDevice() else {
+            return false
+        }
+        if syphonOffscreenCommandQueue == nil {
+            syphonOffscreenCommandQueue = self.commandQueue ?? dev.makeCommandQueue()
+        }
+        guard let queue = syphonOffscreenCommandQueue else { return false }
+
+        let targetSize: (width: Int, height: Int)
+        if let fixed = syphonOutputResolution.fixedPixelSize {
+            targetSize = fixed
+        } else {
+            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+            let w = max(64, Int((bounds.width * scale).rounded()))
+            let h = max(64, Int((bounds.height * scale).rounded()))
+            targetSize = (w, h)
+        }
+        let w = targetSize.width
+        let h = targetSize.height
+
+        if syphonOffscreenColorTexture == nil || syphonOffscreenColorTexture?.width != w || syphonOffscreenColorTexture?.height != h {
+            let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm_srgb,
+                width: w,
+                height: h,
+                mipmapped: false
+            )
+            colorDesc.usage = [.renderTarget, .shaderRead]
+            colorDesc.storageMode = .private
+            syphonOffscreenColorTexture = dev.makeTexture(descriptor: colorDesc)
+
+            let depthDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .depth32Float,
+                width: w,
+                height: h,
+                mipmapped: false
+            )
+            depthDesc.usage = .renderTarget
+            depthDesc.storageMode = .private
+            syphonOffscreenDepthTexture = dev.makeTexture(descriptor: depthDesc)
+        }
+
+        guard let colorTex = syphonOffscreenColorTexture,
+              let depthTex = syphonOffscreenDepthTexture else {
+            return false
+        }
+
+        if syphonOffscreenRenderer == nil {
+            syphonOffscreenRenderer = SCNRenderer(device: dev, options: nil)
+        }
+        guard let offscreen = syphonOffscreenRenderer,
+              let cmdBuf = queue.makeCommandBuffer() else {
+            return false
+        }
+
+        offscreen.scene = scnScene
+        offscreen.pointOfView = cameraNode
+        offscreen.autoenablesDefaultLighting = false
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = colorTex
+        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].storeAction = .store
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0.067, green: 0.075, blue: 0.09, alpha: 1.0)
+        rpd.depthAttachment.texture = depthTex
+        rpd.depthAttachment.loadAction = .clear
+        rpd.depthAttachment.storeAction = .dontCare
+        rpd.depthAttachment.clearDepth = 1.0
+
+        let s0 = CACurrentMediaTime()
+        cmdBuf.addCompletedHandler { commandBuffer in
+            let gpuStart = commandBuffer.gpuStartTime
+            let gpuEnd = commandBuffer.gpuEndTime
+            if gpuEnd > gpuStart, gpuStart > 0 {
+                FrameProfiler.shared.recordAsyncGPUDuration(seconds: gpuEnd - gpuStart)
+            }
+        }
+        offscreen.render(
+            atTime: s0,
+            viewport: CGRect(x: 0, y: 0, width: w, height: h),
+            commandBuffer: cmdBuf,
+            passDescriptor: rpd
+        )
+        cmdBuf.commit()
+
+        let published = srv.publishTexture(
+            colorTex,
+            commandQueue: queue,
+            outputWidth: UInt(w),
+            outputHeight: UInt(h),
+            flipped: true,
+            waitUntilDone: waitUntilDone
+        )
+        let sEnd = CACurrentMediaTime()
+        let syphonElapsed = max(0.0, sEnd - s0)
+        FrameProfiler.shared.recordDuration(seconds: syphonElapsed, for: "syphon.publish")
+        if sEnd - lastOnScreenRenderTimestamp > 0.015 {
+            FrameProfiler.shared.recordDuration(seconds: syphonElapsed, for: "render.scene")
+            FrameProfiler.shared.frameEnd(totalSeconds: syphonElapsed, now: sEnd)
+        }
+        lastOnScreenRenderTimestamp = sEnd
+        return published
     }
 }

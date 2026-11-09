@@ -127,35 +127,6 @@ final class SimpleSKPCoreTests: XCTestCase {
     }
 
     func testReadFixture() throws {
-        let seineURL = URL(fileURLWithPath: "/Users/adrien/Dropbox/AM-VW - Seine musicale/Plans/La Seine Musicale - Auditorium.skp")
-        if FileManager.default.fileExists(atPath: seineURL.path) {
-            let model = try SKPReader.load(seineURL)
-            print("=== SEINE MUSICALE AUDITORIUM ===")
-            print("Bounds Min: \(model.boundsMin)")
-            print("Bounds Max: \(model.boundsMax)")
-            print("Size: \(model.size)")
-            print("Center: \(model.center)")
-            print("Scenes (\(model.scenes.count)):")
-            for (i, s) in model.scenes.enumerated() {
-                if let cam = s.camera {
-                    print("  Scene \(i): '\(s.name)' pos=\(cam.position) tgt=\(cam.target) fov=\(cam.fovDegrees) persp=\(cam.isPerspective)")
-                } else {
-                    print("  Scene \(i): '\(s.name)' (no camera)")
-                }
-            }
-            print("Layers (\(model.layers.count)):")
-            for (i, l) in model.layers.enumerated() {
-                print("  Layer \(i): '\(l.name)' visible=\(l.visible)")
-            }
-            if let defCam = model.camera {
-                print("Default Camera: pos=\(defCam.position) tgt=\(defCam.target) fov=\(defCam.fovDegrees)")
-            }
-            print("Top definitions (\(model.definitions.count)):")
-            for (i, d) in model.definitions.prefix(20).enumerated() {
-                print("  Def \(i): '\(d.name)' meshes=\(d.meshes.count) children=\(d.children.count)")
-            }
-            print("================================")
-        }
         guard SketchUpAPI.locate() != nil else { throw XCTSkip("SketchUp not installed") }
         let model = try SKPReader.load(Self.fixture)
         XCTAssertEqual(model.stats.faces, 18)
@@ -816,6 +787,552 @@ final class SimpleSKPCoreTests: XCTestCase {
         // 90° tangent to beam -> 0%
         let f90 = VideoProjector.incidenceFluxFactor(cosTheta: cos(90.0 * .pi / 180.0))
         XCTAssertEqual(Double(f90), 0.0, accuracy: 1e-6)
+    }
+
+    func testPanasonicPTRQ32KLensSpecs() {
+        let le30 = ProjectorSpec.panasonicPTRQ32K_ETD75LE30
+        XCTAssertEqual(le30.manufacturer, "Panasonic")
+        XCTAssertEqual(le30.lumens, 32000)
+        XCTAssertEqual(Double(le30.minThrowRatio), 2.40, accuracy: 1e-4)
+        XCTAssertEqual(Double(le30.maxThrowRatio), 4.70, accuracy: 1e-4)
+        XCTAssertEqual(Double(le30.aspectRatio), 1.6, accuracy: 1e-4)
+        XCTAssertEqual(ProjectorCatalog.spec(for: "ET-D75LE30"), le30)
+
+        let lew50 = ProjectorSpec.panasonicPTRQ32K_ETD3LEW50
+        XCTAssertEqual(lew50.manufacturer, "Panasonic")
+        XCTAssertEqual(lew50.lumens, 32000)
+        XCTAssertEqual(Double(lew50.minThrowRatio), 0.70, accuracy: 1e-4)
+        XCTAssertEqual(Double(lew50.maxThrowRatio), 0.70, accuracy: 1e-4)
+        XCTAssertEqual(ProjectorCatalog.spec(for: "ET-D3LEW50"), lew50)
+    }
+
+    func testStageLightingSpecs() {
+        let hero = ProjectorSpec.varytecHeroWash300FC
+        XCTAssertEqual(hero.manufacturer, "Varytec")
+        XCTAssertEqual(hero.model, "Hero Wash 300 FC")
+        XCTAssertEqual(hero.lumens, 6000)
+        XCTAssertEqual(hero.kind, .washPanel)
+        XCTAssertEqual(Double(hero.minThrowRatio), 1.07, accuracy: 1e-2)
+        XCTAssertEqual(Double(hero.maxThrowRatio), 9.54, accuracy: 1e-2)
+        XCTAssertTrue(hero.resolutionLabel.contains("Wash Zoom"))
+        XCTAssertEqual(ProjectorCatalog.spec(for: "Varytec Hero Wash 300 FC"), hero)
+        XCTAssertEqual(ProjectorCatalog.spec(for: "hero wash 300"), hero)
+
+        let profile = ProjectorSpec.showtecPerformerProfileMini
+        XCTAssertEqual(profile.kind, .profileSpot)
+        XCTAssertEqual(profile.lumens, 1500)
+        XCTAssertEqual(profile.colorTemperatureKelvin, 3200)
+
+        let eurolite = ProjectorSpec.euroliteLEDPLL480QCL
+        XCTAssertEqual(eurolite.kind, .washPanel)
+        XCTAssertEqual(eurolite.lumens, 4500)
+    }
+
+    func testVideoProjectorPhotometricsAndLuxSimulation() {
+        let zu920 = VideoProjector(
+            name: "ZU920ST Test",
+            specID: ProjectorSpec.optomaZU920ST.id,
+            position: SIMD3<Float>(0, 0, 3.0),
+            target: SIMD3<Float>(0, 6.8, 3.0),
+            throwRatio: 0.68
+        )
+        // Throw distance is 6.8 m
+        XCTAssertEqual(Double(zu920.throwDistance), 6.8, accuracy: 1e-3)
+        // Image width at 6.8 m: 6.8 / 0.68 = 10.0 m
+        XCTAssertEqual(Double(zu920.projectedWidth()), 10.0, accuracy: 1e-3)
+        // Image height for 16:10: 10.0 / 1.6 = 6.25 m
+        XCTAssertEqual(Double(zu920.projectedHeight()), 6.25, accuracy: 1e-3)
+        // Image area: 62.5 m²
+        XCTAssertEqual(Double(zu920.projectedArea()), 62.5, accuracy: 1e-2)
+
+        // Lens transmission around 85-90%
+        XCTAssertGreaterThan(zu920.lensTransmission, 0.80)
+        XCTAssertLessThanOrEqual(zu920.lensTransmission, 0.95)
+
+        // Effective lumens
+        XCTAssertGreaterThan(zu920.effectiveLumens, 7500)
+        XCTAssertLessThanOrEqual(zu920.effectiveLumens, 9800)
+
+        // Illuminance at 6.8 m: ~135 lx
+        let lux68 = zu920.illuminanceLux()
+        XCTAssertGreaterThan(lux68, 110)
+        XCTAssertLessThan(lux68, 160)
+        XCTAssertEqual(zu920.photometricRating(), .theaterAmbiance)
+
+        // Closer at 3.4 m: 4x illuminance (~540 lx)
+        let lux34 = zu920.illuminanceLux(atDistance: 3.4)
+        XCTAssertEqual(Double(lux34), Double(lux68 * 4.0), accuracy: 1.0)
+        XCTAssertEqual(zu920.photometricRating(atDistance: 3.4), .optimalMapping)
+
+        // Far at 17.0 m: dim (~21 lx)
+        let lux17 = zu920.illuminanceLux(atDistance: 17.0)
+        XCTAssertLessThan(lux17, 30)
+        XCTAssertEqual(zu920.photometricRating(atDistance: 17.0), .lowContrast)
+
+        // Luminance in Nits (gain 1.0): lux / pi
+        let nits = zu920.surfaceLuminanceNits()
+        XCTAssertEqual(Double(nits), Double(lux68 / .pi), accuracy: 0.1)
+    }
+
+    // MARK: - FBX, 3D Gaussian Splats & Point Clouds
+
+    func testFBXReaderASCII() throws {
+        let fbxText = """
+        ; FBX 7.4.0 project file
+        FBXHeaderExtension:  {
+            FBXHeaderVersion: 1003
+            FBXVersion: 7400
+        }
+        GlobalSettings:  {
+            Version: 1000
+            Properties70:  {
+                P: "UnitScaleFactor", "double", "Number", "",100
+                P: "OriginalUnitScaleFactor", "double", "Number", "",100
+                P: "UpAxis", "int", "Integer", "",2
+                P: "UpAxisSign", "int", "Integer", "",1
+                P: "FrontAxis", "int", "Integer", "",1
+                P: "FrontAxisSign", "int", "Integer", "",-1
+                P: "CoordAxis", "int", "Integer", "",0
+                P: "CoordAxisSign", "int", "Integer", "",1
+            }
+        }
+        Objects:  {
+            Geometry: 1001, "Geometry::CubeMesh", "Mesh" {
+                Vertices: *12 {
+                    a: 0,0,0, 2,0,0, 2,3,0, 0,3,0
+                }
+                PolygonVertexIndex: *4 {
+                    a: 0, 1, 2, -4
+                }
+                GeometryVersion: 124
+            }
+            Model: 2001, "Model::StageFloor", "Mesh" {
+                Version: 232
+                Properties70:  {
+                    P: "Lcl Translation", "Lcl Translation", "", "A",0,0,1.5
+                }
+            }
+            Material: 3001, "Material::StageWood", "" {
+                Version: 102
+                ShadingModel: "phong"
+                Properties70:  {
+                    P: "DiffuseColor", "Color", "", "A",0.8,0.4,0.2
+                }
+            }
+        }
+        Connections:  {
+            C: "OO",2001,0
+            C: "OO",1001,2001
+            C: "OO",3001,2001
+        }
+        """
+        let fbxURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-stage-\(UUID().uuidString).fbx")
+        try fbxText.write(to: fbxURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: fbxURL) }
+
+        let info = try SKPFileInfo.read(fbxURL)
+        XCTAssertTrue(info.isFBX)
+        XCTAssertEqual(info.version, "FBX 7.4.0")
+
+        let model = try SKPReader.load(fbxURL)
+        XCTAssertEqual(model.fileInfo.version, "FBX 7.4")
+        XCTAssertEqual(model.stats.faces, 1)
+        XCTAssertEqual(model.stats.triangles, 2)
+        XCTAssertEqual(model.materials.count, 1)
+        XCTAssertEqual(model.materials.first?.name, "StageWood")
+        XCTAssertEqual(Double(model.size.x), 2.0, accuracy: 1e-3)
+        XCTAssertEqual(Double(model.size.y), 3.0, accuracy: 1e-3)
+        XCTAssertEqual(Double(model.boundsMin.z), 1.5, accuracy: 1e-3)
+    }
+
+    func testGaussianSplatPLYAndSplatFormats() throws {
+        // 1. ASCII 3DGS PLY with SH1 (9 rest floats)
+        let plyText = """
+        ply
+        format ascii 1.0
+        element vertex 2
+        property float x
+        property float y
+        property float z
+        property float f_dc_0
+        property float f_dc_1
+        property float f_dc_2
+        property float f_rest_0
+        property float f_rest_1
+        property float f_rest_2
+        property float f_rest_3
+        property float f_rest_4
+        property float f_rest_5
+        property float f_rest_6
+        property float f_rest_7
+        property float f_rest_8
+        property float opacity
+        property float scale_0
+        property float scale_1
+        property float scale_2
+        property float rot_0
+        property float rot_1
+        property float rot_2
+        property float rot_3
+        end_header
+        1.0 -2.0 3.0 1.5 -0.5 0.0 0.1 0.2 0.3 0.1 0.2 0.3 0.1 0.2 0.3 2.0 -2.3 -2.3 -2.3 1.0 0.0 0.0 0.0
+        -1.0 1.0 2.0 -0.5 1.5 0.5 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 3.0 -1.6 -1.6 -1.6 1.0 0.0 0.0 0.0
+        """
+        let plyURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-3dgs-\(UUID().uuidString).ply")
+        try plyText.write(to: plyURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: plyURL) }
+
+        let plyInfo = try SKPFileInfo.read(plyURL)
+        XCTAssertTrue(plyInfo.isPLY)
+        XCTAssertTrue(plyInfo.isGaussianSplat)
+        XCTAssertFalse(plyInfo.isPointCloud)
+
+        let gsModel = try SKPReader.load(plyURL)
+        XCTAssertEqual(gsModel.stats.splats, 2)
+        let cloud = try XCTUnwrap(gsModel.splatCloud)
+        XCTAssertEqual(cloud.kind, .gaussianSplats)
+        XCTAssertEqual(cloud.shDegree, 1)
+        XCTAssertEqual(cloud.shCoefficients.count, 2 * 9)
+        XCTAssertFalse(cloud.subBlocks.isEmpty)
+        for splat in cloud.splats {
+            // Diagonal elements of 3D covariance must be strictly positive
+            XCTAssertGreaterThan(splat.covAx, 0)
+            XCTAssertGreaterThan(splat.covBx, 0)
+            XCTAssertGreaterThan(splat.covBz, 0)
+            XCTAssertGreaterThan(Float(splat.colorA), 0.8)
+        }
+
+        // 2. Binary .splat (32 bytes per splat: pos Float32x3, scale Float32x3, rgba UInt8x4, rot UInt8x4)
+        let splatURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-antimatter-\(UUID().uuidString).splat")
+        var splatData = Data()
+        for i in 0..<3 {
+            var pos = SIMD3<Float>(Float(i) * 2.0, -1.0, Float(i) + 1.0)
+            var scale = SIMD3<Float>(0.15, 0.20, 0.10)
+            let rgba: [UInt8] = [240, 120, 60, 255]
+            let rot: [UInt8] = [255, 128, 128, 128] // identity quaternion (w=1, x=0, y=0, z=0)
+            withUnsafeBytes(of: &pos.x) { splatData.append(contentsOf: $0) }
+            withUnsafeBytes(of: &pos.y) { splatData.append(contentsOf: $0) }
+            withUnsafeBytes(of: &pos.z) { splatData.append(contentsOf: $0) }
+            withUnsafeBytes(of: &scale.x) { splatData.append(contentsOf: $0) }
+            withUnsafeBytes(of: &scale.y) { splatData.append(contentsOf: $0) }
+            withUnsafeBytes(of: &scale.z) { splatData.append(contentsOf: $0) }
+            splatData.append(contentsOf: rgba)
+            splatData.append(contentsOf: rot)
+        }
+        try splatData.write(to: splatURL)
+        defer { try? FileManager.default.removeItem(at: splatURL) }
+
+        let splatInfo = try SKPFileInfo.read(splatURL)
+        XCTAssertTrue(splatInfo.isSplat)
+        XCTAssertTrue(splatInfo.isGaussianSplat)
+
+        let splatModel = try SKPReader.load(splatURL)
+        XCTAssertEqual(splatModel.stats.splats, 3)
+        XCTAssertEqual(splatModel.splatCloud?.kind, .gaussianSplats)
+    }
+
+    func testPointCloudFormatsAndPLYMeshFallback() throws {
+        // 1. XYZRGB point cloud
+        let xyzText = """
+        0.0 0.0 0.0 255 0 0
+        2.0 0.0 0.0 0 255 0
+        0.0 3.0 1.5 0 0 255
+        """
+        let xyzURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-cloud-\(UUID().uuidString).xyz")
+        try xyzText.write(to: xyzURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: xyzURL) }
+
+        let xyzInfo = try SKPFileInfo.read(xyzURL)
+        XCTAssertTrue(xyzInfo.isPointCloud)
+        let xyzModel = try SKPReader.load(xyzURL)
+        XCTAssertEqual(xyzModel.stats.splats, 3)
+        XCTAssertEqual(xyzModel.splatCloud?.kind, .pointCloud)
+        XCTAssertEqual(Double(xyzModel.size.x), 2.0, accuracy: 1e-4)
+        XCTAssertEqual(Double(xyzModel.size.y), 3.0, accuracy: 1e-4)
+        XCTAssertEqual(Double(xyzModel.size.z), 1.5, accuracy: 1e-4)
+
+        // 2. PCD v0.7 ASCII point cloud
+        let pcdText = """
+        # .PCD v0.7 - Point Cloud Data file format
+        VERSION 0.7
+        FIELDS x y z
+        SIZE 4 4 4
+        TYPE F F F
+        COUNT 1 1 1
+        WIDTH 2
+        HEIGHT 1
+        VIEWPOINT 0 0 0 1 0 0 0
+        POINTS 2
+        DATA ascii
+        -1.0 -2.0 0.5
+        3.0 4.0 2.5
+        """
+        let pcdURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-pcd-\(UUID().uuidString).pcd")
+        try pcdText.write(to: pcdURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: pcdURL) }
+
+        let pcdModel = try SKPReader.load(pcdURL)
+        XCTAssertEqual(pcdModel.stats.splats, 2)
+        XCTAssertEqual(pcdModel.splatCloud?.kind, .pointCloud)
+        XCTAssertEqual(Double(pcdModel.size.x), 4.0, accuracy: 1e-4)
+        XCTAssertEqual(Double(pcdModel.size.y), 6.0, accuracy: 1e-4)
+        XCTAssertEqual(Double(pcdModel.size.z), 2.0, accuracy: 1e-4)
+
+        // 3. PLY Polygon Mesh fallback
+        let meshPlyText = """
+        ply
+        format ascii 1.0
+        element vertex 4
+        property float x
+        property float y
+        property float z
+        element face 1
+        property list uchar int vertex_indices
+        end_header
+        0 0 0
+        2 0 0
+        2 2 0
+        0 2 0
+        4 0 1 2 3
+        """
+        let meshPlyURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-mesh-\(UUID().uuidString).ply")
+        try meshPlyText.write(to: meshPlyURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: meshPlyURL) }
+
+        let meshPlyModel = try SKPReader.load(meshPlyURL)
+        XCTAssertNil(meshPlyModel.splatCloud)
+        XCTAssertEqual(meshPlyModel.stats.faces, 1)
+        XCTAssertEqual(meshPlyModel.stats.triangles, 2)
+    }
+
+    // MARK: Art-Net & Stage Lights Tests
+
+    func testArtNetPacketParsing() {
+        var dummyChannels = [UInt8](repeating: 0, count: 512)
+        dummyChannels[0] = 255   // Ch 1: 100%
+        dummyChannels[20] = 128  // Ch 21: ~50%
+        dummyChannels[511] = 64  // Ch 512: ~25%
+
+        let raw = ArtNetReceiver.buildOpDmxPacket(universe: 3, sequence: 42, channels: dummyChannels)
+        let parsed = ArtNetReceiver.parseOpDmx(data: raw, count: raw.count)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.universe, 3)
+        XCTAssertEqual(parsed?.shortUniverse, 3)
+        XCTAssertEqual(parsed?.sequence, 42)
+        XCTAssertEqual(parsed?.length, 512)
+        XCTAssertEqual(parsed?.value(forChannel: 1), 255)
+        XCTAssertEqual(parsed?.normalized(forChannel: 1), 1.0)
+        XCTAssertEqual(parsed?.value(forChannel: 21), 128)
+        XCTAssertEqual(parsed?.value(forChannel: 512), 64)
+        XCTAssertNil(parsed?.value(forChannel: 0))
+        XCTAssertNil(parsed?.value(forChannel: 513))
+    }
+
+    func testMilluminFileImport() throws {
+        let milluminURL = URL(fileURLWithPath: "/Users/adrien/Dropbox/MilluminFiles/Frissons-Sol-ANGERS.millumin")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: milluminURL.path), "Sample Millumin file not present")
+
+        let lights = try MilluminImporter.parseProject(at: milluminURL)
+        XCTAssertFalse(lights.isEmpty, "Should find stage lights in Frissons-Sol-ANGERS.millumin")
+        XCTAssertEqual(lights.count, 4, "Expected 4 DALLE fixtures")
+
+        let channels = lights.map { $0.dmxChannel }.sorted()
+        XCTAssertEqual(channels, [21, 31, 41, 51])
+
+        let projectors = try MilluminImporter.importProjectors(from: milluminURL)
+        XCTAssertEqual(projectors.count, 4)
+        for p in projectors {
+            XCTAssertEqual(p.spec.kind, .washPanel)
+            XCTAssertTrue(p.isStageLight)
+            XCTAssertEqual(p.dmxUniverse, 0)
+            XCTAssertTrue([21, 31, 41, 51].contains(p.dmxChannel))
+            XCTAssertEqual(p.oflFixtureID, "eurolite/led-ml-56-rgbw")
+            XCTAssertEqual(p.oflModeName, "6-channel")
+            XCTAssertEqual(p.dmxChannelCount, 6)
+            // Initial stage cue ("ACCUEILGROUPE") is applied automatically from FCLightStateMedia
+            XCTAssertGreaterThan(p.intensity, 0.05)
+        }
+
+        // Verify full import including Conduite Lumière cues
+        let full = try MilluminImporter.parseProjectFull(at: milluminURL)
+        XCTAssertEqual(full.lights.count, 4)
+        XCTAssertFalse(full.cues.isEmpty, "Should extract lighting cues from FCBoardColumn / FCLightStateMedia")
+    }
+
+    func testVideoProjectorAndStageLightCatalogSeparation() {
+        XCTAssertFalse(ProjectorCatalog.videoProjectorSpecs.isEmpty)
+        XCTAssertFalse(ProjectorCatalog.stageLightSpecs.isEmpty)
+
+        for vpSpec in ProjectorCatalog.videoProjectorSpecs {
+            XCTAssertFalse(vpSpec.isStageLight, "\(vpSpec.displayName) should not be a stage light")
+            XCTAssertEqual(vpSpec.kind, .videoProjector)
+        }
+
+        for lightSpec in ProjectorCatalog.stageLightSpecs {
+            XCTAssertTrue(lightSpec.isStageLight, "\(lightSpec.displayName) must be a stage light")
+            XCTAssertNotEqual(lightSpec.kind, .videoProjector)
+            XCTAssertGreaterThan(lightSpec.maxBeamAngleDegrees, 5.0)
+        }
+    }
+
+    func testOFLFixtureLibraryAndDMXChannelRoles() {
+        let lib = OFLFixtureLibrary.shared
+        XCTAssertFalse(lib.allFixtures.isEmpty)
+
+        // 1. Eurolite LED ML-56 RGBW 6-channel (R, G, B, W, Dimmer at index 4, Function at index 5)
+        let ml56 = lib.fixture(forIdentifier: "eurolite/led-ml-56-rgbw")
+        XCTAssertNotNil(ml56)
+        let mode6 = ml56?.mode(named: "6-channel")
+        XCTAssertEqual(mode6?.channels.count, 6)
+        XCTAssertEqual(mode6?.channels[0].role, .red)
+        XCTAssertEqual(mode6?.channels[1].role, .green)
+        XCTAssertEqual(mode6?.channels[2].role, .blue)
+        XCTAssertEqual(mode6?.channels[4].role, .dimmer)
+
+        var wash = VideoProjector(
+            name: "DALLE 1",
+            specID: ProjectorSpec.euroliteLEDML56RGBW.id,
+            position: SIMD3<Float>(0, 0, 5),
+            target: SIMD3<Float>(0, 0, 0),
+            dmxUniverse: 0,
+            dmxChannel: 21,
+            oflFixtureID: "eurolite/led-ml-56-rgbw",
+            oflModeName: "6-channel",
+            dmxChannelNames: mode6?.channels.map { $0.name } ?? [],
+            dmxChannelRoles: mode6?.channels.map { $0.role } ?? []
+        )
+        var universe = [Float](repeating: 0.0, count: 512)
+        universe[20] = 0.20 // Ch 21: Red = 20%
+        universe[21] = 0.60 // Ch 22: Green = 60%
+        universe[22] = 1.00 // Ch 23: Blue = 100%
+        universe[23] = 0.00 // Ch 24: White = 0%
+        universe[24] = 0.80 // Ch 25: Dimmer = 80%
+        let didChange = wash.applyDMXValues(universe)
+        XCTAssertTrue(didChange)
+        XCTAssertEqual(Double(wash.intensity), 0.80, accuracy: 1e-4)
+        XCTAssertEqual(Double(wash.lightColor.x), 0.20, accuracy: 1e-3)
+        XCTAssertEqual(Double(wash.lightColor.y), 0.60, accuracy: 1e-3)
+        XCTAssertEqual(Double(wash.lightColor.z), 1.00, accuracy: 1e-3)
+
+        // 2. American DJ Ikon Profile 3-channel (Ch 1: Strobe, Ch 2: Dimmer, Ch 3: Dimmer Mod -> must be ignored)
+        let ikon = lib.fixture(forIdentifier: "american-dj/ikon-profile")
+        XCTAssertNotNil(ikon)
+        let ikonMode = ikon?.modes.first
+        XCTAssertEqual(ikonMode?.channels.count, 3)
+        XCTAssertTrue(ikonMode?.channels.contains(where: { $0.role == .dimmer }) == true)
+        XCTAssertNotEqual(ikonMode?.channels[2].role, .dimmer, "Dimmer Mod must not override master Dimmer")
+
+        // 3. Millumin Cue values application
+        var cueLight = wash
+        let cueApplied = cueLight.applyMilluminCueValues([
+            "___Intensity": 0.55,
+            "___Red": 1.0,
+            "___Green": 0.4,
+            "___Blue": 0.1
+        ])
+        XCTAssertTrue(cueApplied)
+        XCTAssertEqual(Double(cueLight.intensity), 0.55, accuracy: 1e-4)
+        XCTAssertEqual(Double(cueLight.lightColor.x), 1.0, accuracy: 1e-3)
+        XCTAssertEqual(Double(cueLight.lightColor.y), 0.4, accuracy: 1e-3)
+        XCTAssertEqual(Double(cueLight.lightColor.z), 0.1, accuracy: 1e-3)
+    }
+
+    func testGLTFAndGLBReaderLoadsMeshesHierarchyMaterialsAndRealGLB() throws {
+        // 1. Build a binary buffer with 3 float3 vertices (36 bytes) + 3 UInt16 indices (6 bytes padded to 8) = 44 bytes
+        var binData = Data()
+        let verts: [Float] = [
+            0.0, 0.0, 0.0,
+            4.0, 0.0, 0.0,
+            0.0, 3.0, 0.0 // Y=3 in glTF -> Z=3 in SimpleSKP
+        ]
+        for f in verts {
+            var bits = f.bitPattern.littleEndian
+            binData.append(Data(bytes: &bits, count: 4))
+        }
+        let indices: [UInt16] = [0, 1, 2, 0] // 8 bytes total
+        for idx in indices {
+            var le = idx.littleEndian
+            binData.append(Data(bytes: &le, count: 2))
+        }
+
+        let b64 = binData.base64EncodedString()
+        let gltfJSON = """
+        {
+          "asset": { "version": "2.0", "generator": "SimpleSKP Test" },
+          "scene": 0,
+          "scenes": [{ "nodes": [0] }],
+          "nodes": [
+            { "name": "Plateau", "mesh": 0, "translation": [0.0, 1.5, 0.0] }
+          ],
+          "meshes": [
+            {
+              "name": "ArcheMesh",
+              "primitives": [
+                {
+                  "attributes": { "POSITION": 0 },
+                  "indices": 1,
+                  "material": 0
+                }
+              ]
+            }
+          ],
+          "materials": [
+            {
+              "name": "VeloursNoir",
+              "pbrMetallicRoughness": {
+                "baseColorFactor": [0.2, 0.4, 0.8, 1.0]
+              }
+            }
+          ],
+          "buffers": [
+            {
+              "uri": "data:application/octet-stream;base64,\(b64)",
+              "byteLength": \(binData.count)
+            }
+          ],
+          "bufferViews": [
+            { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+            { "buffer": 0, "byteOffset": 36, "byteLength": 6 }
+          ],
+          "accessors": [
+            { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3" },
+            { "bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR" }
+          ]
+        }
+        """
+
+        let gltfURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-\(UUID().uuidString).gltf")
+        try gltfJSON.write(to: gltfURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: gltfURL) }
+
+        let gltfInfo = try SKPFileInfo.read(gltfURL)
+        XCTAssertTrue(gltfInfo.isGLTF)
+        XCTAssertTrue(gltfInfo.isGLTFOrGLB)
+
+        let gltfModel = try SKPReader.load(gltfURL)
+        XCTAssertEqual(gltfModel.stats.triangles, 1)
+        XCTAssertEqual(gltfModel.materials.first?.name, "VeloursNoir")
+        XCTAssertTrue(gltfModel.layers.contains(where: { $0.name == "Plateau" }))
+        // Translation Y=1.5 + vertex Y=3.0 in glTF -> Z_min = 1.5, Z_max = 4.5 in Z-up SimpleSKP
+        XCTAssertEqual(Double(gltfModel.boundsMin.z), 1.5, accuracy: 1e-4)
+        XCTAssertEqual(Double(gltfModel.boundsMax.z), 4.5, accuracy: 1e-4)
+        XCTAssertEqual(Double(gltfModel.size.x), 4.0, accuracy: 1e-4)
+
+        // 2. Real GLB on disk if present (`venue.glb` from Piano Inside)
+        let realGLB = URL(fileURLWithPath: "/Users/adrien/Programmation/QuestVR/piano-inside-mac/Resources/venue.glb")
+        if FileManager.default.fileExists(atPath: realGLB.path) {
+            let info = try SKPFileInfo.read(realGLB)
+            XCTAssertTrue(info.isGLB)
+            let venue = try SKPReader.load(realGLB)
+            defer {
+                if let texDir = venue.textureDirectory {
+                    try? FileManager.default.removeItem(at: texDir)
+                }
+            }
+            XCTAssertGreaterThan(venue.stats.triangles, 1000)
+            XCTAssertGreaterThan(venue.materials.count, 5)
+            XCTAssertTrue(venue.materials.contains(where: { $0.textureURL != nil }))
+        }
     }
 }
 

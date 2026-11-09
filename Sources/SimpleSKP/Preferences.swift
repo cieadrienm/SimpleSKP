@@ -23,6 +23,8 @@ enum Preferences {
         static let oscOutHost = "oscOutHost"
         static let oscOutPort = "oscOutPort"
         static let hiddenFeatures = "hiddenFeatures"
+        static let syphonOutputEnabled = "syphonOutputEnabled"
+        static let syphonOutputResolution = "syphonOutputResolution"
     }
 
     static let defaults: [String: Any] = [
@@ -42,6 +44,8 @@ enum Preferences {
         Key.oscOutHost: "127.0.0.1",
         Key.oscOutPort: Int(kSimpleSKPDefaultOSCOutPort),
         Key.hiddenFeatures: false,
+        Key.syphonOutputEnabled: false,
+        Key.syphonOutputResolution: SyphonOutputResolution.viewport.rawValue,
     ]
 
     @MainActor static func register() {
@@ -163,6 +167,22 @@ enum Preferences {
             UserDefaults.standard.set(newValue, forKey: Key.hiddenFeatures)
             NotificationCenter.default.post(name: .hiddenFeaturesChanged, object: nil)
         }
+    }
+
+    static var syphonOutputEnabled: Bool {
+        get { bool(Key.syphonOutputEnabled) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.syphonOutputEnabled) }
+    }
+
+    static var syphonOutputResolution: SyphonOutputResolution {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: Key.syphonOutputResolution),
+                  let res = SyphonOutputResolution(rawValue: raw) else {
+                return .viewport
+            }
+            return res
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Key.syphonOutputResolution) }
     }
 }
 

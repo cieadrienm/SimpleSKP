@@ -1,5 +1,6 @@
 import AppKit
 import SimpleSKPCore
+import SimpleSKPViewport
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -87,4 +88,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func showSettings(_ sender: Any?) { SettingsWindowController.shared.show() }
     @objc func showHelp(_ sender: Any?) { HelpWindowController.shared.show() }
     @objc func showShortcuts(_ sender: Any?) { ShortcutsWindowController.shared.show() }
+
+    @objc func toggleFrameProfiler(_ sender: Any?) {
+        FrameProfilerWindowController.shared.toggle()
+    }
+
+    @objc func copyFrameProfileMarkdown(_ sender: Any?) {
+        FrameProfilerWindowController.shared.copyMarkdownToPasteboard()
+        activeSKPDocument?.model.flash(L("Profil de frame copié (Markdown)", "Frame profile copied (Markdown)"))
+    }
+
+    @objc func resetFrameProfiler(_ sender: Any?) {
+        FrameProfiler.shared.reset()
+        if FrameProfilerWindowController.shared.isVisible {
+            FrameProfilerWindowController.shared.refresh()
+        }
+        activeSKPDocument?.model.flash(L("Profileur de frame réinitialisé", "Frame profiler reset"))
+    }
+
+    private var activeSKPDocument: SKPDocument? {
+        if let doc = NSApp.keyWindow?.windowController?.document as? SKPDocument { return doc }
+        if let doc = NSApp.keyWindow?.parent?.windowController?.document as? SKPDocument { return doc }
+        if let doc = NSApp.mainWindow?.windowController?.document as? SKPDocument { return doc }
+        if let doc = documentController?.currentDocument as? SKPDocument { return doc }
+        return documentController?.documents.compactMap({ $0 as? SKPDocument }).first
+    }
+
+    @objc func performUndo(_ sender: Any?) {
+        activeSKPDocument?.performUndo(sender)
+    }
+
+    @objc func performRedo(_ sender: Any?) {
+        activeSKPDocument?.performRedo(sender)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(performUndo(_:)):
+            guard let doc = activeSKPDocument else { return false }
+            item.title = doc.model.undoMenuTitle
+            return doc.model.canUndo
+        case #selector(performRedo(_:)):
+            guard let doc = activeSKPDocument else { return false }
+            item.title = doc.model.redoMenuTitle
+            return doc.model.canRedo
+        default:
+            return true
+        }
+    }
 }

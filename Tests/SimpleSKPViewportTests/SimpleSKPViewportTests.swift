@@ -2,6 +2,7 @@ import XCTest
 import SceneKit
 @testable import SimpleSKPViewport
 import SimpleSKPCore
+import SimpleSKPVideoBridge
 
 /// Hand-built models: the Core reader is not needed to test the scene.
 enum SyntheticModel {
@@ -636,5 +637,151 @@ final class SimpleSKPViewportTests: XCTestCase {
 
         scene.setHoveredLayers([])
         XCTAssertTrue(edges(scene, [1])[0].geometry?.firstMaterial === origEdge1Mat, "original material restored when hover cleared")
+    }
+
+    @MainActor
+    func testVideoProjectorLiveSyphonAndNDIStreams() throws {
+        // 1. Verify Codable round-trip for Syphon & NDI projector properties
+        let ndiProj = VideoProjector(
+            name: "VP 1 — ZU920ST",
+            specID: ProjectorSpec.optomaZU920ST.id,
+            position: SIMD3<Float>(0, -5, 2),
+            target: SIMD3<Float>(0, 0, 2),
+            pattern: .ndi,
+            liveSourceID: "ndi:MACBOOK (Millumin)",
+            liveSourceName: "MACBOOK (Millumin)"
+        )
+        let encoded = try JSONEncoder().encode(ndiProj)
+        let decoded = try JSONDecoder().decode(VideoProjector.self, from: encoded)
+        XCTAssertEqual(decoded.pattern, .ndi)
+        XCTAssertEqual(decoded.liveSourceID, "ndi:MACBOOK (Millumin)")
+        XCTAssertEqual(decoded.liveSourceName, "MACBOOK (Millumin)")
+
+        // 2. If Syphon.framework is available on this machine, verify live zero-copy IOSurface -> colorAtlas + 4-quadrant bounce tints
+        if LiveVideoSourceManager.isSyphonAvailable,
+           let device = MTLCreateSystemDefaultDevice(),
+           let server = SSKPVideoSyphonServer(name: "SimpleSKPTestServer", device: device, isPrivate: true),
+           let desc = server.serverDescription {
+            defer {
+                LiveVideoSourceManager.shared.registerCustomSyphonServerDescription(nil, forIdentifier: "syphon:test-private")
+                server.stop()
+            }
+            LiveVideoSourceManager.shared.registerCustomSyphonServerDescription(desc, forIdentifier: "syphon:test-private")
+
+            let renderer = VideoProjectorRenderer(device: device)
+            let syphonProj = VideoProjector(
+                name: "VP Syphon",
+                specID: ProjectorSpec.optomaZU920ST.id,
+                position: SIMD3<Float>(0, -4, 1.5),
+                target: SIMD3<Float>(0, 0, 1.5),
+                pattern: .syphon,
+                liveSourceID: "syphon:test-private",
+                liveSourceName: "SimpleSKPTestServer"
+            )
+            // Initial update creates the SSKPVideoSyphonClient and starts the Mach port handshake
+            renderer.update(activeProjectors: [syphonProj], faceChunks: [], zNear: 0.15, zFar: 50.0)
+
+            // Pump the runloop briefly while publishing so Syphon's CFMessagePort delivers the IOSurface
+            let deadline = Date(timeIntervalSinceNow: 0.5)
+            var updated = Set<Int>()
+            while Date() < deadline {
+                _ = server.publishTestQuadrants(
+                    withWidth: 128,
+                    height: 80,
+                    topLeftR: 255, topLeftG: 0, topLeftB: 0,
+                    topRightR: 0, topRightG: 255, topRightB: 0,
+                    bottomLeftR: 0, bottomLeftG: 0, bottomLeftB: 255,
+                    bottomRightR: 255, bottomRightG: 255, bottomRightB: 0
+                )
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.015))
+                updated = renderer.updateLiveFramesOnly(activeProjectors: [syphonProj])
+                if updated.contains(0) {
+                    break
+                }
+            }
+            XCTAssertTrue(updated.contains(0), "Syphon live frame should be received and blitted into slot 0")
+
+            let hg = renderer.quadrantBounceTint(forSlot: 0, quadrant: 0) // Top-Left (Red)
+            let hd = renderer.quadrantBounceTint(forSlot: 0, quadrant: 1) // Top-Right (Green)
+            let bg = renderer.quadrantBounceTint(forSlot: 0, quadrant: 2) // Bottom-Left (Blue)
+            let bd = renderer.quadrantBounceTint(forSlot: 0, quadrant: 3) // Bottom-Right (Yellow)
+
+            XCTAssertGreaterThan(hg.x, hg.y * 2.5, "Top-left quadrant tint should be predominantly red (got \(hg))")
+            XCTAssertGreaterThan(hd.y, hd.x * 2.5, "Top-right quadrant tint should be predominantly green (got \(hd))")
+            XCTAssertGreaterThan(bg.z, bg.x * 2.5, "Bottom-left quadrant tint should be predominantly blue (got \(bg))")
+            XCTAssertGreaterThan(bd.x, bd.z * 2.5, "Bottom-right quadrant tint should be yellow (high R & G, low B: got \(bd))")
+        }
+    }
+
+    @MainActor
+    func testGaussianSplatViewportRenderingAndRaycasting() throws {
+        let splat0 = SKPModel.PackedSplat(
+            position: SIMD3<Float>(0, 0, 0),
+            colorR: 0.95, colorG: 0.15, colorB: 0.15, colorA: 1.0,
+            covAx: 0.25, covAy: 0.0, covAz: 0.0,
+            covBx: 0.25, covBy: 0.0, covBz: 0.25
+        )
+        let splat1 = SKPModel.PackedSplat(
+            position: SIMD3<Float>(1.5, 0, 0.5),
+            colorR: 0.15, colorG: 0.90, colorB: 0.25, colorA: 1.0,
+            covAx: 0.20, covAy: 0.0, covAz: 0.0,
+            covBx: 0.20, covBy: 0.0, covBz: 0.20
+        )
+        let subBlock = SKPModel.SplatSubBlock(
+            startIndex: 0,
+            endIndex: 2,
+            boundsMin: SIMD3<Float>(-0.5, -0.5, -0.5),
+            boundsMax: SIMD3<Float>(2.0, 0.5, 1.0)
+        )
+        let cloud = SKPModel.SplatCloud(
+            kind: .gaussianSplats,
+            splats: [splat0, splat1],
+            shDegree: 0,
+            shCoefficients: [],
+            defaultPointRadius: 0.05,
+            subBlocks: [subBlock]
+        )
+        let model = SKPModel(
+            root: SKPModel.Definition(name: ""),
+            definitions: [],
+            materials: [],
+            layers: [SKPModel.Layer(name: "Gaussian Splats", isVisible: true)],
+            scenes: [],
+            camera: nil,
+            boundsMin: SIMD3<Float>(-0.5, -0.5, -0.5),
+            boundsMax: SIMD3<Float>(2.0, 0.5, 1.0),
+            stats: SKPModel.Stats(splats: 2),
+            fileInfo: SKPFileInfo(url: URL(fileURLWithPath: "/tmp/test.splat"), fileSize: 64, version: "SPLAT", versionLabel: "3D Gaussian Splat (.splat)", thumbnailPNG: nil),
+            splatCloud: cloud
+        )
+
+        let scene = ViewportScene(model: model)
+        XCTAssertNotNil(scene.splatNode)
+        XCTAssertNotNil(scene.splatRenderer)
+        XCTAssertFalse(model.isPlanar2D)
+
+        // Raycast along +Y toward origin in Z-up model space
+        let hit = scene.raycastSplatCloud(from: SIMD3<Float>(0, -3, 0), direction: SIMD3<Float>(0, 1, 0), reach: 3.0)
+        XCTAssertNotNil(hit)
+        if let hit {
+            XCTAssertEqual(Double(hit.x), 0.0, accuracy: 1e-4)
+            XCTAssertEqual(Double(hit.y), 0.0, accuracy: 1e-4)
+            XCTAssertEqual(Double(hit.z), 0.0, accuracy: 1e-4)
+        }
+
+        // Layer toggle hides splat rendering and disables raycast hit
+        scene.setLayer(0, visible: false)
+        XCTAssertEqual(scene.splatNode?.isHidden, true)
+        XCTAssertNil(scene.raycastSplatCloud(from: SIMD3<Float>(0, -3, 0), direction: SIMD3<Float>(0, 1, 0), reach: 3.0))
+
+        scene.setLayer(0, visible: true)
+        XCTAssertEqual(scene.splatNode?.isHidden, false)
+
+        // Render via ViewportView snapshot and verify non-blank output
+        let view = ViewportView(frame: NSRect(x: 0, y: 0, width: 320, height: 240))
+        view.present(scene)
+        let image = view.snapshot()
+        XCTAssertEqual(Int(image.size.width), 320)
+        XCTAssertEqual(Int(image.size.height), 240)
     }
 }

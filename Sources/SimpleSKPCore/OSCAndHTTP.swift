@@ -229,15 +229,27 @@ public enum OSCCodec {
 }
 
 /// UDP OSC server for receiving show/automation cues (`/simpleskp/...` or `/camera/...`) from OSCScore or any OSC controller.
+/// Runs packet reception and OSC decoding on a dedicated high-priority background queue and drains bursts non-blockingly.
 public final class OSCUDPServer: @unchecked Sendable {
     public private(set) var port: UInt16
     public private(set) var isRunning = false
     private var socketFD: Int32 = -1
     private let lock = NSLock()
     private let handler: @Sendable (OSCCodec.Message) -> Void
+    private let batchHandler: (@Sendable ([OSCCodec.Message]) -> Void)?
+    private let receiveQueue = DispatchQueue(label: "net.cieadrienm.simpleskp.osc.receive", qos: .userInteractive)
 
-    public init(port: UInt16 = kSimpleSKPDefaultOSCInPort, handler: @escaping @Sendable (OSCCodec.Message) -> Void) {
+    private static let sendQueue = DispatchQueue(label: "net.cieadrienm.simpleskp.osc.send", qos: .userInitiated)
+    private static let sendSocketLock = NSLock()
+    nonisolated(unsafe) private static var sharedSendFD: Int32 = -1
+
+    public init(
+        port: UInt16 = kSimpleSKPDefaultOSCInPort,
+        batchHandler: (@Sendable ([OSCCodec.Message]) -> Void)? = nil,
+        handler: @escaping @Sendable (OSCCodec.Message) -> Void
+    ) {
         self.port = port
+        self.batchHandler = batchHandler
         self.handler = handler
     }
 
@@ -273,6 +285,8 @@ public final class OSCUDPServer: @unchecked Sendable {
             guard fd >= 0 else { return false }
             var yes: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+            var rcvBuf: Int32 = 512 * 1024
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, socklen_t(MemoryLayout<Int32>.size))
 
             var addr = sockaddr_in()
             addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -308,7 +322,7 @@ public final class OSCUDPServer: @unchecked Sendable {
         self.isRunning = true
         lock.unlock()
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        receiveQueue.async { [weak self] in
             self?.receiveLoop(fd: boundFD)
         }
         return true
@@ -326,7 +340,7 @@ public final class OSCUDPServer: @unchecked Sendable {
     }
 
     private func receiveLoop(fd: Int32) {
-        var buffer = [UInt8](repeating: 0, count: 8192)
+        var buffer = [UInt8](repeating: 0, count: 65536)
         while true {
             lock.lock()
             let active = isRunning
@@ -338,28 +352,64 @@ public final class OSCUDPServer: @unchecked Sendable {
                 if errno == EINTR { continue }
                 break
             }
-            let data = Data(buffer[0..<n])
-            let messages = OSCCodec.decode(data)
-            for msg in messages {
-                handler(msg)
+
+            var burst: [OSCCodec.Message] = []
+            burst.reserveCapacity(16)
+            burst.append(contentsOf: OSCCodec.decode(Data(buffer[0..<n])))
+
+            // Drain any additional UDP packets already queued in the kernel socket buffer without blocking.
+            var extraReads = 0
+            while extraReads < 512 {
+                let m = Darwin.recv(fd, &buffer, buffer.count, Int32(MSG_DONTWAIT))
+                if m <= 0 { break }
+                burst.append(contentsOf: OSCCodec.decode(Data(buffer[0..<m])))
+                extraReads += 1
+            }
+
+            guard !burst.isEmpty else { continue }
+            if let batchHandler {
+                batchHandler(burst)
+            } else {
+                for msg in burst {
+                    handler(msg)
+                }
             }
         }
     }
 
     public static func send(_ message: OSCCodec.Message, toHost host: String = "127.0.0.1", port: UInt16 = kSimpleSKPDefaultOSCOutPort) {
-        let data = OSCCodec.encode(message)
-        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        guard fd >= 0 else { return }
-        defer { Darwin.close(fd) }
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = port.bigEndian
-        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return }
-        _ = data.withUnsafeBytes { ptr in
-            withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.sendto(fd, ptr.baseAddress, data.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        sendBatch([message], toHost: host, port: port)
+    }
+
+    public static func sendBatch(_ messages: [OSCCodec.Message], toHost host: String = "127.0.0.1", port: UInt16 = kSimpleSKPDefaultOSCOutPort) {
+        guard !messages.isEmpty else { return }
+        sendQueue.async {
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = port.bigEndian
+            guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return }
+
+            sendSocketLock.lock()
+            if sharedSendFD < 0 {
+                sharedSendFD = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+                if sharedSendFD >= 0 {
+                    var yes: Int32 = 1
+                    setsockopt(sharedSendFD, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+                }
+            }
+            let fd = sharedSendFD
+            sendSocketLock.unlock()
+            guard fd >= 0 else { return }
+
+            for message in messages {
+                let data = OSCCodec.encode(message)
+                _ = data.withUnsafeBytes { ptr in
+                    withUnsafePointer(to: &addr) {
+                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                            Darwin.sendto(fd, ptr.baseAddress, data.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
                 }
             }
         }

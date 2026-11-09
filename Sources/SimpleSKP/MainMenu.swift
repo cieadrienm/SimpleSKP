@@ -24,6 +24,7 @@ enum MainMenu {
         menu.addItem(editMenu())
         menu.addItem(viewMenu())
         menu.addItem(cameraMenu())
+        menu.addItem(debugMenu(delegate))
         menu.addItem(windowMenu())
         menu.addItem(helpMenu(delegate))
         return menu
@@ -55,6 +56,7 @@ enum MainMenu {
         menu.add(L("Ouvrir…", "Open…"), #selector(NSDocumentController.openDocument(_:)), key: "o")
         menu.add(L("Enregistrer le projet .sskp", "Save .sskp Project"), #selector(SKPDocument.saveSSKP(_:)), key: "s")
         menu.add(L("Enregistrer le projet .sskp sous…", "Save .sskp Project As…"), #selector(SKPDocument.saveSSKPAs(_:)), key: "s", modifiers: [.command, .shift])
+        menu.add(L("Importer depuis Millumin…", "Import from Millumin…"), #selector(SKPDocument.importMillumin(_:)))
         menu.addItem(.separator())
         menu.add(L("Exporter l'image PNG…", "Export PNG Image…"), #selector(SKPDocument.exportImage(_:)), key: "e", modifiers: [.command, .shift])
         menu.add(L("Exporter en PDF vectoriel…", "Export Vector PDF…"), #selector(SKPDocument.exportVectorPDF(_:)), key: "e", modifiers: [.command, .option])
@@ -77,6 +79,7 @@ enum MainMenu {
     private static func viewMenu() -> NSMenuItem {
         let menu = NSMenu(title: L("Présentation", "View"))
         menu.add(L("Barre latérale", "Sidebar"), #selector(SKPDocument.toggleSidebarPanel(_:)), key: "s", modifiers: [.command, .option])
+        menu.add(L("Inspecteur vidéoprojecteur", "Projector Inspector"), #selector(SKPDocument.toggleProjectorInspectorPanel(_:)), key: "i", modifiers: [.command, .option])
         menu.add(L("Arêtes", "Edges"), #selector(SKPDocument.toggleEdges(_:)), key: "e")
         menu.add(L("Grille et axes", "Grid and Axes"), #selector(SKPDocument.toggleGrid(_:)), key: "g", modifiers: [.command, .option])
         menu.add(L("Perspective / Parallèle", "Perspective / Parallel"), #selector(SKPDocument.togglePerspective(_:)), key: "p", modifiers: [.command, .option])
@@ -99,6 +102,7 @@ enum MainMenu {
         menu.add(L("Masquer l’objet sélectionné (CAD)", "Hide Selected Object (CAD)"), #selector(SKPDocument.hideSelectedLayer(_:)), key: "h", modifiers: [])
         menu.add(L("Outil de mesure (Règle)", "Measure Tool (Ruler)"), #selector(SKPDocument.toggleMeasureTool(_:)), key: "d", modifiers: [.command])
         menu.add(L("Mode vol libre", "Free Fly Mode"), #selector(SKPDocument.toggleFreeFlight(_:)), key: "f", modifiers: [.command, .option])
+        menu.add(L("Sortie vidéo Syphon", "Syphon Video Output"), #selector(SKPDocument.toggleSyphonOutput(_:)), key: "y", modifiers: [.command, .option])
         menu.addItem(.separator())
         menu.add(L("Scène précédente", "Previous Scene"), #selector(SKPDocument.previousScene(_:)), key: "[")
         let prevSlow = menu.add(L("Scène précédente (transition lente ×10)", "Previous Scene (10× slow transition)"), #selector(SKPDocument.previousSceneSlow(_:)), key: "[", modifiers: [.command, .shift])
@@ -115,6 +119,28 @@ enum MainMenu {
         for (index, entry) in cameraViews.enumerated() {
             menu.add(entry.title, #selector(SKPDocument.lookStandard(_:)), key: "\(index + 1)", tag: index)
         }
+        return menu.asItem()
+    }
+
+    private static func debugMenu(_ delegate: AppDelegate) -> NSMenuItem {
+        let menu = NSMenu(title: L("Débogage", "Debug"))
+        menu.add(
+            L("Profileur de frame…", "Frame Profiler…"),
+            #selector(AppDelegate.toggleFrameProfiler(_:)),
+            key: "m",
+            modifiers: [.command, .option],
+            target: delegate
+        )
+        menu.add(
+            L("Copier le profil de frame (Markdown)", "Copy Frame Profile (Markdown)"),
+            #selector(AppDelegate.copyFrameProfileMarkdown(_:)),
+            target: delegate
+        )
+        menu.add(
+            L("Réinitialiser le profileur", "Reset Frame Profiler"),
+            #selector(AppDelegate.resetFrameProfiler(_:)),
+            target: delegate
+        )
         return menu.asItem()
     }
 

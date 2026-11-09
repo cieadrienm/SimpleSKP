@@ -74,6 +74,22 @@ for MACHO in "$FW/Versions/A/SketchUpAPI" "$FW"/Versions/A/Libraries/*.dylib; do
 done
 echo "SketchUp SDK: $SDK" >&2
 
+# Optional Syphon.framework & libndi.dylib (for live video projector streams)
+SYPHON_SRC="/Users/adrien/Programmation/emotion/lib/Syphon/build/Release/Syphon.framework"
+[ -d "$SYPHON_SRC" ] || SYPHON_SRC="/Library/Frameworks/Syphon.framework"
+if [ -d "$SYPHON_SRC" ]; then
+    ditto "$SYPHON_SRC" "$APP/Contents/Frameworks/Syphon.framework"
+    rm -rf "$APP/Contents/Frameworks/Syphon.framework/Headers" "$APP/Contents/Frameworks/Syphon.framework/Versions/A/Headers"
+    echo "Syphon.framework: $SYPHON_SRC" >&2
+fi
+
+NDI_SRC="/Library/NDI SDK for Apple/lib/macOS/libndi.dylib"
+if [ -f "$NDI_SRC" ]; then
+    cp -L "$NDI_SRC" "$APP/Contents/Frameworks/libndi.dylib"
+    chmod +w "$APP/Contents/Frameworks/libndi.dylib"
+    echo "libndi.dylib: $NDI_SRC" >&2
+fi
+
 # Signing. A real identity keeps the app's identity stable across rebuilds.
 if [ -z "${SIGN_IDENTITY:-}" ]; then
     IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
@@ -87,10 +103,19 @@ case "$SIGN_IDENTITY" in
     "Developer ID Application:"*) SIGN_FLAGS=(--timestamp --options runtime --entitlements Resources/SimpleSKP.entitlements) ;;
     *) SIGN_FLAGS=(--timestamp=none) ;;
 esac
-# Inside out: the framework's dylibs, the framework, the MCP binary, then the app.
+# Inside out: the framework's dylibs, the frameworks, the MCP binary, then the app.
 sign_all() {
-    for LIB in "$FW"/Versions/A/Libraries/*.dylib "$FW" "$APP/Contents/MacOS/simpleskp-mcp" "$APP"; do
+    for LIB in "$FW"/Versions/A/Libraries/*.dylib "$FW"; do
         codesign --force "$@" "$LIB" || return 1
+    done
+    if [ -d "$APP/Contents/Frameworks/Syphon.framework" ]; then
+        codesign --force "$@" "$APP/Contents/Frameworks/Syphon.framework" || return 1
+    fi
+    if [ -f "$APP/Contents/Frameworks/libndi.dylib" ]; then
+        codesign --force "$@" "$APP/Contents/Frameworks/libndi.dylib" || return 1
+    fi
+    for BIN_ITEM in "$APP/Contents/MacOS/simpleskp-mcp" "$APP"; do
+        codesign --force "$@" "$BIN_ITEM" || return 1
     done
 }
 if ! sign_all "${SIGN_FLAGS[@]}" --sign "$SIGN_IDENTITY" 2>build/codesign.log; then

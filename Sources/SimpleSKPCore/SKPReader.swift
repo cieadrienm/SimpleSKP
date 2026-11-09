@@ -58,6 +58,15 @@ public enum SKPReader {
         if fileInfo.isCAD {
             return try CADReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
         }
+        if fileInfo.isFBX {
+            return try FBXReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
+        }
+        if fileInfo.isGLTFOrGLB {
+            return try GLTFReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
+        }
+        if fileInfo.isSplatOrPointCloud {
+            return try SplatAndPointCloudReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
+        }
         if fileInfo.is3DMesh {
             return try Mesh3DReader.load(url, fileInfo: fileInfo, progress: progress, isCancelled: isCancelled)
         }

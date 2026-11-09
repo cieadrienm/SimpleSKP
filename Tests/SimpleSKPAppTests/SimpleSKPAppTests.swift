@@ -1,7 +1,9 @@
 import AppKit
+import Metal
 import simd
 import SimpleSKPCore
 import SimpleSKPMCPCore
+import SimpleSKPVideoBridge
 @testable import SimpleSKPViewport
 import XCTest
 @testable import SimpleSKP
@@ -27,9 +29,12 @@ final class SimpleSKPAppTests: XCTestCase {
     func testMainMenuTitlesAndCameraKeys() {
         let menu = MainMenu.build(delegate: AppDelegate())
         let titles = menu.items.map(\.title)
-        for title in [L("Fichier", "File"), L("Édition", "Edit"), L("Présentation", "View"), L("Caméra", "Camera"), L("Fenêtre", "Window"), L("Aide", "Help")] {
+        for title in [L("Fichier", "File"), L("Édition", "Edit"), L("Présentation", "View"), L("Caméra", "Camera"), L("Débogage", "Debug"), L("Fenêtre", "Window"), L("Aide", "Help")] {
             XCTAssertTrue(titles.contains(title), "missing menu \(title) in \(titles)")
         }
+        let debug = try! XCTUnwrap(menu.items.first { $0.title == L("Débogage", "Debug") }?.submenu)
+        let profilerItem = try! XCTUnwrap(debug.items.first { $0.action == #selector(AppDelegate.toggleFrameProfiler(_:)) })
+        XCTAssertEqual(Snapshot.keyLabel(profilerItem), "⌥⌘M")
         let camera = menu.items.first { $0.title == L("Caméra", "Camera") }?.submenu
         XCTAssertEqual(camera?.items.count, 7)
         XCTAssertEqual(camera?.items.map(\.keyEquivalent), ["1", "2", "3", "4", "5", "6", "7"])
@@ -52,6 +57,7 @@ final class SimpleSKPAppTests: XCTestCase {
         XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleFreeFlight(_:)))!), "⌥⌘F")
         XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleShadows(_:)))!), "⌥⌘O")
         XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleAmbientOcclusion(_:)))!), "⌥⌘A")
+        XCTAssertEqual(Snapshot.keyLabel(item(#selector(SKPDocument.toggleSyphonOutput(_:)))!), "⌥⌘Y")
     }
 
     func testFreeFlyShowsHowToExit() {
@@ -393,6 +399,62 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         XCTAssertTrue(specs.contains(where: { $0.path == "/simpleskp/camera/fov" && $0.typeTag == "f" }))
     }
 
+    func testOSCCoalescerAndBatchedCurveStreamZeroLag() {
+        let model = DocumentModel()
+        model.present(ViewportScene(model: SyntheticModel.cube()), seconds: 0.1)
+        let server = RemoteControlServer.shared
+        server.overrideModel = model
+        defer { server.overrideModel = nil }
+
+        let coalescer = OSCIncomingCoalescer()
+
+        // Simulate 200 multi-track curve frames (1,200 OSC messages) arriving on the background UDP thread before a frame drain
+        for step in 1...200 {
+            let f = Float(step)
+            let burst: [OSCCodec.Message] = [
+                OSCCodec.Message(address: "/simpleskp/camera/x", arguments: [.float(f * 0.1)]),
+                OSCCodec.Message(address: "/simpleskp/camera/y", arguments: [.float(-f * 0.2)]),
+                OSCCodec.Message(address: "/simpleskp/camera/z", arguments: [.float(1.0 + f * 0.01)]),
+                OSCCodec.Message(address: "/simpleskp/camera/yaw", arguments: [.float(f * 0.25)]),
+                OSCCodec.Message(address: "/simpleskp/camera/pitch", arguments: [.float(-15.0)]),
+                OSCCodec.Message(address: "/simpleskp/camera/fov", arguments: [.float(40.0 + f * 0.1)]),
+            ]
+            let scheduleDelay = coalescer.enqueue(burst, now: 100.0)
+            if step == 1 {
+                XCTAssertNotNil(scheduleDelay, "first burst schedules a single main-thread drain")
+            } else {
+                XCTAssertNil(scheduleDelay, "subsequent bursts before drain are absorbed without queuing extra main-thread tasks")
+            }
+        }
+
+        // Draining returns only the 6 latest parameter messages instead of 1,200 backlogged tasks
+        let drained = coalescer.drain(now: 100.01)
+        XCTAssertEqual(drained.count, 6, "1,200 continuous curve messages coalesce down to the 6 latest parameter values")
+
+        server.handleOSCBatch(drained)
+        XCTAssertEqual(model.cameraPosition.x, 20.0, accuracy: 0.01)
+        XCTAssertEqual(model.cameraPosition.y, -40.0, accuracy: 0.01)
+        XCTAssertEqual(model.cameraPosition.z, 3.0, accuracy: 0.01)
+        XCTAssertEqual(model.cameraYawDegrees, 50.0, accuracy: 0.1)
+        XCTAssertEqual(model.cameraPitchDegrees, -15.0, accuracy: 0.1)
+        XCTAssertEqual(model.cameraFOV, 60.0, accuracy: 0.05)
+        XCTAssertTrue(model.undoStack.isEmpty, "continuous remote OSC curve streams never pollute the user's Undo stack")
+
+        // Verify vector superseding (`/camera/position` supersedes earlier `/camera/x` & `/camera/y`, then a later `/camera/z` overrides Z)
+        _ = coalescer.enqueue([
+            OSCCodec.Message(address: "/simpleskp/camera/x", arguments: [.float(99.0)]),
+            OSCCodec.Message(address: "/simpleskp/camera/y", arguments: [.float(99.0)]),
+            OSCCodec.Message(address: "/simpleskp/camera/position", arguments: [.float(4.0), .float(-6.0), .float(1.5)]),
+            OSCCodec.Message(address: "/simpleskp/camera/z", arguments: [.float(2.25)]),
+            OSCCodec.Message(address: "/simpleskp/camera/orbit", arguments: [.float(5.0), .float(2.0)]),
+            OSCCodec.Message(address: "/simpleskp/camera/orbit", arguments: [.float(7.0), .float(-3.0)]),
+        ], now: 101.0)
+        let mixedBatch = coalescer.drain(now: 101.01)
+        XCTAssertEqual(mixedBatch.count, 3, "position + subsequent z + summed orbit")
+        server.handleOSCBatch(mixedBatch)
+        XCTAssertEqual(model.cameraPosition.z, 2.25, accuracy: 0.25)
+    }
+
     func testMCPServerToolsListAndRouting() throws {
         var capturedMethod = ""
         var capturedPath = ""
@@ -692,5 +754,248 @@ final class OSCAndCameraRemoteTests: XCTestCase {
         XCTAssertFalse(model.canRedo)
         XCTAssertEqual(model.undoStack.count, 100)
         XCTAssertEqual(model.videoProjectors[0].rollDegrees, 115.0, accuracy: 1e-4)
+
+        // 3. Consecutive discrete VP edits (step buttons / numeric entry) must NOT coalesce
+        model.clearUndoHistory()
+        model.updateSelectedVideoProjector(actionName: "Position X VP") { $0.position.x = 1.0 }
+        model.updateSelectedVideoProjector(actionName: "Position X VP") { $0.position.x = 1.01 }
+        model.updateSelectedVideoProjector(actionName: "Position X VP") { $0.position.x = 1.02 }
+        XCTAssertEqual(model.undoStack.count, 3, "Each discrete VP step/edit must create its own undo entry")
+        model.undo()
+        XCTAssertEqual(model.videoProjectors[0].position.x, 1.01, accuracy: 1e-5)
+        model.undo()
+        XCTAssertEqual(model.videoProjectors[0].position.x, 1.00, accuracy: 1e-5)
+        model.redo()
+        XCTAssertEqual(model.videoProjectors[0].position.x, 1.01, accuracy: 1e-5)
+    }
+
+    func testVideoProjectorPositionCachingAndFrustumOnlyMode() {
+        let model = DocumentModel()
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        model.present(scene, seconds: 0.05)
+
+        // Add two video projectors
+        model.addVideoProjector(spec: .optomaZU920ST)
+        model.addVideoProjector(spec: .optomaZU920ST)
+        XCTAssertEqual(model.videoProjectors.count, 2)
+
+        let initialRaycasts = scene.projectorRaycastCount
+        let initialDepthPasses = scene.projectorDepthRenderPassCount
+        let initialSlotRenders = scene.projectorDepthSlotRenderCount
+        XCTAssertGreaterThan(initialRaycasts, 0, "Initial placement computes frustum and bounce raycasts")
+        if initialDepthPasses > 0 {
+            XCTAssertGreaterThanOrEqual(initialSlotRenders, 2)
+        }
+
+        // 1. Stationary edits (intensity, reverbIntensity, pattern, name, selection) must perform ZERO raycasts and ZERO depth passes
+        model.updateSelectedVideoProjector(actionName: "Intensité VP") { $0.intensity = 1.75 }
+        model.updateSelectedVideoProjector(actionName: "Réverb VP") { $0.reverbIntensity = 1.25 }
+        model.updateSelectedVideoProjector(actionName: "Mire VP") { $0.pattern = .colorBars }
+        model.updateSelectedVideoProjector(actionName: "Nom VP") { $0.name = "VP Face Jardin" }
+        model.selectVideoProjector(0)
+        model.selectVideoProjector(1)
+        model.updateSelectedVideoProjector(actionName: "Frustum VP") { $0.showsFrustum = false }
+        model.updateSelectedVideoProjector(actionName: "Frustum VP") { $0.showsFrustum = true }
+
+        XCTAssertEqual(
+            scene.projectorRaycastCount,
+            initialRaycasts,
+            "Stationary projector edits (intensity, reverb, pattern, name, selection, showsFrustum) must reuse cached raycasts (0 CPU raycasts)"
+        )
+        XCTAssertEqual(
+            scene.projectorDepthRenderPassCount,
+            initialDepthPasses,
+            "Stationary projector edits must reuse cached shadow depth tiles (0 GPU depth passes)"
+        )
+
+        // 2. Moving ONLY projector #1 updates ONLY projector #1 (1 slot render, 1 projector's raycasts) while projector #0 stays cached
+        let raycastsBeforeSingleMove = scene.projectorRaycastCount
+        let slotsBeforeSingleMove = scene.projectorDepthSlotRenderCount
+        model.updateSelectedVideoProjector(actionName: "Position X VP") { $0.position.x += 0.5 }
+        let singleMoveRaycastDelta = scene.projectorRaycastCount - raycastsBeforeSingleMove
+        XCTAssertEqual(
+            singleMoveRaycastDelta,
+            29, // 25 frustum raycasts (4 corners + 1 center + 20 perimeter) + 4 bounce quadrant raycasts for 1 projector only
+            "Moving 1 projector out of 2 must only raycast the moved projector (29 rays instead of 74)"
+        )
+        if initialDepthPasses > 0 {
+            XCTAssertEqual(
+                scene.projectorDepthSlotRenderCount - slotsBeforeSingleMove,
+                1,
+                "Moving 1 projector out of 2 must only re-render 1 depth atlas slot instead of all slots"
+            )
+        }
+
+        // 3. Enabling 'Frustum seul (réglage rapide)' bypasses shadow depth passes and bounce raycasts during placement
+        let passesBeforeFrustumOnly = scene.projectorDepthRenderPassCount
+        model.setProjectorsFrustumOnly(true)
+        XCTAssertTrue(model.projectorsFrustumOnly)
+        XCTAssertTrue(scene.projectorsFrustumOnly)
+        XCTAssertEqual(
+            scene.projectorDepthRenderPassCount,
+            passesBeforeFrustumOnly,
+            "Enabling frustum-only mode does not run any GPU depth pass"
+        )
+
+        let raycastsBeforeFastDrag = scene.projectorRaycastCount
+        model.updateSelectedVideoProjector(actionName: "Position Y VP") { $0.position.y -= 0.4 }
+        let fastDragRaycastDelta = scene.projectorRaycastCount - raycastsBeforeFastDrag
+        XCTAssertEqual(
+            fastDragRaycastDelta,
+            25, // Only 25 wireframe frustum rays; 0 bounce raycasts and 0 GPU depth passes
+            "In frustum-only mode, moving a projector skips bounce raycasts and GPU depth passes"
+        )
+        XCTAssertEqual(scene.projectorDepthRenderPassCount, passesBeforeFrustumOnly)
+
+        // Turning off frustum-only mode restores full surface projection and updates only the moved slot
+        model.setProjectorsFrustumOnly(false)
+        XCTAssertFalse(model.projectorsFrustumOnly)
+        if initialDepthPasses > 0 {
+            XCTAssertEqual(scene.projectorDepthRenderPassCount, passesBeforeFrustumOnly + 1)
+        }
+    }
+
+    func testSyphonViewportOutputForSimpleRecorder() throws {
+        let keys = [Preferences.Key.syphonOutputEnabled, Preferences.Key.syphonOutputResolution]
+        keys.forEach(UserDefaults.standard.removeObject(forKey:))
+        defer { keys.forEach(UserDefaults.standard.removeObject(forKey:)) }
+
+        let model = DocumentModel()
+        model.viewport.syphonIsPrivateForTesting = true
+        let scene = ViewportScene(model: SyntheticModel.cube())
+        model.present(scene, seconds: 0.05)
+        defer { model.stopSyphonOutput() }
+
+        try XCTSkipUnless(model.isSyphonAvailable, "Syphon.framework not available on this machine")
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+
+        // Enable 720p (1280x720) Syphon export and publish a frame
+        model.setSyphonOutputResolution(.hd720p)
+        XCTAssertTrue(model.syphonOutputEnabled)
+        XCTAssertEqual(model.syphonOutputResolution, .hd720p)
+        XCTAssertTrue(model.viewport.publishSyphonFrameNow(waitUntilDone: true))
+        XCTAssertGreaterThanOrEqual(model.viewport.syphonPublishedFrameCount, 1)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.width, 1280)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.height, 720)
+
+        let srvDesc = try XCTUnwrap(model.viewport.syphonServer?.serverDescription)
+        let client = try XCTUnwrap(SSKPVideoSyphonClient(
+            serverDescription: srvDesc,
+            identifier: "syphon:simpleskp-test-out",
+            device: device,
+            onNewFrame: nil
+        ))
+        defer { client.stop() }
+
+        // Move camera (as when driven by OSCScore) and publish frames while pumping the runloop so the client receives the IOSurface
+        let deadline = Date(timeIntervalSinceNow: 1.0)
+        var receivedTex: MTLTexture? = nil
+        var step: Float = 0
+        while Date() < deadline {
+            step += 0.2
+            model.setCameraPosition(SIMD3<Float>(2.0 + step, -4.0, 1.8))
+            _ = model.viewport.publishSyphonFrameNow(waitUntilDone: true)
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+            if let tex = client.currentTexture(), tex.width == 1280, tex.height == 720 {
+                receivedTex = tex
+                break
+            }
+        }
+
+        let tex = try XCTUnwrap(receivedTex, "Syphon client (SimpleRecorder) must receive 1280x720 frames from SimpleSKP")
+        XCTAssertEqual(tex.width, 1280)
+        XCTAssertEqual(tex.height, 720)
+
+        // Verify OSC toggle for Syphon output
+        let server = RemoteControlServer.shared
+        server.overrideModel = model
+        defer { server.overrideModel = nil }
+
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/syphon/resolution", arguments: [.string("1080p")]))
+        XCTAssertEqual(model.syphonOutputResolution, .hd1080p)
+        _ = model.viewport.publishSyphonFrameNow(waitUntilDone: true)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.width, 1920)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.height, 1080)
+
+        // Test WUXGA 16:10 (1920x1200)
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/syphon/resolution", arguments: [.string("1920x1200")]))
+        XCTAssertEqual(model.syphonOutputResolution, .wuxga1200)
+        _ = model.viewport.publishSyphonFrameNow(waitUntilDone: true)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.width, 1920)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.height, 1200)
+
+        // Test Vertical 9:16 (1080x1920)
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/syphon/resolution", arguments: [.string("9:16")]))
+        XCTAssertEqual(model.syphonOutputResolution, .portrait1080x1920)
+        _ = model.viewport.publishSyphonFrameNow(waitUntilDone: true)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.width, 1080)
+        XCTAssertEqual(model.viewport.syphonLastPublishedSize.height, 1920)
+
+        // Verify all preset pixel sizes and parser aliases
+        XCTAssertEqual(SyphonOutputResolution.parse("1280x800"), .wxga800)
+        XCTAssertEqual(SyphonOutputResolution.parse("wuxga"), .wuxga1200)
+        XCTAssertEqual(SyphonOutputResolution.parse("2560x1440"), .qhd1440p)
+        XCTAssertEqual(SyphonOutputResolution.parse("2560x1600"), .wqxga1600)
+        XCTAssertEqual(SyphonOutputResolution.parse("3840x2160"), .uhd4k)
+        XCTAssertEqual(SyphonOutputResolution.parse("3840x2400"), .wquxga2400)
+        XCTAssertEqual(SyphonOutputResolution.parse("720x1280"), .portrait720x1280)
+        XCTAssertEqual(SyphonOutputResolution.parse("1080x1920"), .portrait1080x1920)
+        XCTAssertEqual(SyphonOutputResolution.parse("1200x1920"), .portrait1200x1920)
+        XCTAssertEqual(SyphonOutputResolution.parse("2160x3840"), .portrait2160x3840)
+
+        server.handleOSCMessage(OSCCodec.Message(address: "/simpleskp/syphon/enable", arguments: [.int(0)]))
+        XCTAssertFalse(model.syphonOutputEnabled)
+        XCTAssertNil(model.viewport.syphonServer)
+    }
+
+    func testFrameProfilerAndMarkdownExport() {
+        let profiler = FrameProfiler.shared
+        let prevEnabled = profiler.isEnabled
+        defer {
+            profiler.isEnabled = prevEnabled
+            profiler.reset()
+        }
+
+        profiler.reset()
+        profiler.isEnabled = true
+
+        let baseTime: CFTimeInterval = 1_000.0
+        for i in 0..<60 {
+            let now = baseTime + Double(i) * (1.0 / 60.0)
+            profiler.recordDuration(seconds: 0.00042, for: "render.scene")
+            profiler.recordDuration(seconds: 0.00003, for: "osc.update")
+            profiler.recordAsyncGPUDuration(seconds: 0.00195)
+            profiler.frameEnd(totalSeconds: 0.00048, now: now)
+        }
+
+        // Rolling 1-second FPS at the end of the 60-frame burst (spanning 59/60 s < 1.0 s) is 60 fps
+        let fpsAtEnd = profiler.framesInLastSecond(at: baseTime + 59.0 / 60.0)
+        XCTAssertEqual(fpsAtEnd, 60)
+
+        // 1.5 seconds later (idle), live rolling FPS drops to 0, while profilerDisplayFPS keeps the ~60.0 fps cadence
+        XCTAssertEqual(profiler.framesInLastSecond(at: baseTime + 2.5), 0)
+        XCTAssertEqual(profiler.profilerDisplayFPS(at: baseTime + 2.5), 60.0, accuracy: 1.0)
+
+        let stats = profiler.copyStats()
+        XCTAssertEqual(stats.first?.name, "frame.total", "frame.total must always be the first row")
+        XCTAssertEqual(stats.first?.samples, 60)
+        XCTAssertGreaterThan(stats.first?.p50Ms ?? 0, 0.4)
+
+        let md = profiler.markdownTable(now: baseTime + 59.0 / 60.0)
+        XCTAssertTrue(md.contains("| Zone | p50 ms | p95 ms | max ms | frames |"), md)
+        XCTAssertTrue(md.contains("|---|---|---|---|---|"), md)
+        XCTAssertTrue(md.contains("| frame.total |"), md)
+        XCTAssertTrue(md.contains("| gpu.render |"), md)
+        XCTAssertTrue(md.contains("| render.scene |"), md)
+        XCTAssertTrue(md.contains("| osc.update |"), md)
+        XCTAssertTrue(md.contains("60.0 fps"), md)
+
+        // Verify FrameProfilerWindowController builds and refreshes cleanly
+        let wc = FrameProfilerWindowController.shared
+        wc.show()
+        wc.refresh()
+        XCTAssertTrue(wc.isVisible)
+        wc.toggle()
+        XCTAssertFalse(wc.isVisible)
     }
 }

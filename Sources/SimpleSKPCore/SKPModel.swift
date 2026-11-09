@@ -152,6 +152,139 @@ public struct SKPModel: Sendable {
         public init(name: String, camera: Camera?, hiddenLayers: [Int]? = []) { self.name = name; self.camera = camera; self.hiddenLayers = hiddenLayers }
     }
 
+    /// One 32-byte GPU-ready 3D Gaussian Splat or 3D Point Cloud surfel, matching Metal's `Splat` struct:
+    /// - `px, py, pz`: 3D position in model space (metres, Z up) — 12 bytes
+    /// - `colorR, colorG, colorB, colorA`: linear sRGB color (`0…1`+) and opacity (`0…1`) in `Float16` — 8 bytes
+    /// - `covAx, covAy, covAz`: 3D covariance upper triangle `(Σ₀₀, Σ₀₁, Σ₀₂)` in `Float16` — 6 bytes
+    /// - `covBx, covBy, covBz`: 3D covariance upper triangle `(Σ₁₁, Σ₁₂, Σ₂₂)` in `Float16` — 6 bytes
+    public struct PackedSplat: Sendable, Equatable {
+        public var px: Float
+        public var py: Float
+        public var pz: Float
+        public var colorR: Float16
+        public var colorG: Float16
+        public var colorB: Float16
+        public var colorA: Float16
+        public var covAx: Float16
+        public var covAy: Float16
+        public var covAz: Float16
+        public var covBx: Float16
+        public var covBy: Float16
+        public var covBz: Float16
+
+        @inlinable
+        public init(
+            position: SIMD3<Float>,
+            colorR: Float16, colorG: Float16, colorB: Float16, colorA: Float16,
+            covAx: Float16, covAy: Float16, covAz: Float16,
+            covBx: Float16, covBy: Float16, covBz: Float16
+        ) {
+            self.px = position.x
+            self.py = position.y
+            self.pz = position.z
+            self.colorR = colorR
+            self.colorG = colorG
+            self.colorB = colorB
+            self.colorA = colorA
+            self.covAx = covAx
+            self.covAy = covAy
+            self.covAz = covAz
+            self.covBx = covBx
+            self.covBy = covBy
+            self.covBz = covBz
+        }
+
+        @inlinable
+        public var position: SIMD3<Float> {
+            SIMD3<Float>(px, py, pz)
+        }
+    }
+
+    /// Spatial sub-block AABB covering a contiguous range of Morton-ordered splats (for fast raycasting & snapping).
+    public struct SplatSubBlock: Sendable, Equatable {
+        public var startIndex: Int
+        public var endIndex: Int
+        public var boundsMin: SIMD3<Float>
+        public var boundsMax: SIMD3<Float>
+
+        public init(startIndex: Int, endIndex: Int, boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>) {
+            self.startIndex = startIndex
+            self.endIndex = endIndex
+            self.boundsMin = boundsMin
+            self.boundsMax = boundsMax
+        }
+    }
+
+    /// High-density 3D Gaussian Splat cloud or 3D Point Cloud stored in Morton (Z-order) locality order.
+    public struct SplatCloud: Sendable {
+        public enum Kind: String, Sendable, Equatable {
+            case gaussianSplats
+            case pointCloud
+        }
+
+        public var kind: Kind
+        /// Contiguous 32-byte splat/point records ordered by 3D Morton code.
+        public var splats: [PackedSplat]
+        /// Spherical harmonics degree (`0` = SH0 only baked into `colorRGB`, `1` = 3 bands / 9 coeffs, `2` = 8 bands / 24 coeffs, `3` = 15 bands / 45 coeffs).
+        public var shDegree: UInt8
+        /// Interleaved higher-order SH coefficients (`Float16`, `shCoefficientCount` floats per splat: `[R0, G0, B0, R1, G1, B1, ...]`).
+        public var shCoefficients: [Float16]
+        /// Orthonormal 3×3 columns mapping a Z-up model-space view direction `(splatPos - cameraPos)` back into the file's native SH coordinate basis.
+        public var shDirCol0: SIMD3<Float>
+        public var shDirCol1: SIMD3<Float>
+        public var shDirCol2: SIMD3<Float>
+        /// Default world-space radius (metres) for rendering points when no anisotropic covariance is present.
+        public var defaultPointRadius: Float
+        /// Precomputed AABBs for 256-splat Morton blocks for sub-millisecond CPU raycasting and vertex snapping.
+        public var subBlocks: [SplatSubBlock]
+
+        public var count: Int { splats.count }
+
+        public init(
+            kind: Kind,
+            splats: [PackedSplat],
+            shDegree: UInt8 = 0,
+            shCoefficients: [Float16] = [],
+            shDirCol0: SIMD3<Float> = SIMD3(1, 0, 0),
+            shDirCol1: SIMD3<Float> = SIMD3(0, 1, 0),
+            shDirCol2: SIMD3<Float> = SIMD3(0, 0, 1),
+            defaultPointRadius: Float = 0.01,
+            subBlocks: [SplatSubBlock] = []
+        ) {
+            self.kind = kind
+            self.splats = splats
+            self.shDegree = shDegree
+            self.shCoefficients = shCoefficients
+            self.shDirCol0 = shDirCol0
+            self.shDirCol1 = shDirCol1
+            self.shDirCol2 = shDirCol2
+            self.defaultPointRadius = defaultPointRadius
+            self.subBlocks = subBlocks.isEmpty ? Self.buildSubBlocks(for: splats) : subBlocks
+        }
+
+        public static func buildSubBlocks(for splats: [PackedSplat], blockSize: Int = 256) -> [SplatSubBlock] {
+            guard !splats.isEmpty else { return [] }
+            let n = splats.count
+            let numBlocks = (n + blockSize - 1) / blockSize
+            var blocks: [SplatSubBlock] = []
+            blocks.reserveCapacity(numBlocks)
+            var idx = 0
+            while idx < n {
+                let end = min(n, idx + blockSize)
+                var bMin = SIMD3<Float>(repeating: .infinity)
+                var bMax = SIMD3<Float>(repeating: -.infinity)
+                for i in idx..<end {
+                    let p = splats[i].position
+                    bMin = simd_min(bMin, p)
+                    bMax = simd_max(bMax, p)
+                }
+                blocks.append(SplatSubBlock(startIndex: idx, endIndex: end, boundsMin: bMin, boundsMax: bMax))
+                idx = end
+            }
+            return blocks
+        }
+    }
+
     public struct Stats: Sendable {
         public var faces: Int
         public var triangles: Int
@@ -159,9 +292,11 @@ public struct SKPModel: Sendable {
         /// Placed groups and component instances, over the whole tree.
         public var instances: Int
         public var definitions: Int
+        /// Total 3D Gaussian Splats or Point Cloud points when `splatCloud != nil`.
+        public var splats: Int
         public var loadSeconds: Double
-        public init(faces: Int = 0, triangles: Int = 0, edges: Int = 0, instances: Int = 0, definitions: Int = 0, loadSeconds: Double = 0) {
-            self.faces = faces; self.triangles = triangles; self.edges = edges; self.instances = instances; self.definitions = definitions; self.loadSeconds = loadSeconds
+        public init(faces: Int = 0, triangles: Int = 0, edges: Int = 0, instances: Int = 0, definitions: Int = 0, splats: Int = 0, loadSeconds: Double = 0) {
+            self.faces = faces; self.triangles = triangles; self.edges = edges; self.instances = instances; self.definitions = definitions; self.splats = splats; self.loadSeconds = loadSeconds
         }
     }
 
@@ -182,12 +317,14 @@ public struct SKPModel: Sendable {
     /// Temporary folder holding the written textures (`NSTemporaryDirectory()/SimpleSKP/<uuid>/`), nil when none;
     /// the app deletes it when the document closes.
     public var textureDirectory: URL?
+    /// Optional 3D Gaussian Splat cloud or 3D Point Cloud rendered directly on Metal.
+    public var splatCloud: SplatCloud?
 
-    public init(root: Definition, definitions: [Definition] = [], materials: [Material] = [], layers: [Layer], scenes: [Scene] = [], camera: Camera? = nil, boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>, stats: Stats = Stats(), fileInfo: SKPFileInfo, loadWarning: String? = nil, textureDirectory: URL? = nil) {
+    public init(root: Definition, definitions: [Definition] = [], materials: [Material] = [], layers: [Layer], scenes: [Scene] = [], camera: Camera? = nil, boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>, stats: Stats = Stats(), fileInfo: SKPFileInfo, loadWarning: String? = nil, textureDirectory: URL? = nil, splatCloud: SplatCloud? = nil) {
         self.root = root; self.definitions = definitions; self.materials = materials; self.layers = layers
         self.layerGroups = Self.buildLayerGroups(for: layers)
         self.scenes = scenes; self.camera = camera
-        self.boundsMin = boundsMin; self.boundsMax = boundsMax; self.stats = stats; self.fileInfo = fileInfo; self.loadWarning = loadWarning; self.textureDirectory = textureDirectory
+        self.boundsMin = boundsMin; self.boundsMax = boundsMax; self.stats = stats; self.fileInfo = fileInfo; self.loadWarning = loadWarning; self.textureDirectory = textureDirectory; self.splatCloud = splatCloud
     }
 
     public var size: SIMD3<Float> { boundsMax - boundsMin }
@@ -195,6 +332,7 @@ public struct SKPModel: Sendable {
 
     /// True when the model is a 2D plan/section in the XY plane (e.g. a 2D AutoCAD plan or pure-wireframe drawing).
     public var isPlanar2D: Bool {
+        if splatCloud != nil { return false }
         let planarXY = max(size.x, size.y)
         guard planarXY > 1e-4 else { return false }
         if size.z <= planarXY * 0.01 && (fileInfo.isCAD || stats.faces == 0) {

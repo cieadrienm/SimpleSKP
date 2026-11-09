@@ -48,7 +48,7 @@ enum SelfTest {
             do {
                 let model = try SKPReader.load(URL(fileURLWithPath: (file as NSString).expandingTildeInPath))
                 let s = model.stats
-                check(s.faces > 0, "\(file): \(s.faces) faces, \(s.edges) edges, \(s.instances) instances, \(s.definitions) definitions, \(model.layers.count) layers, \(model.scenes.count) scenes in \(String(format: "%.2f", s.loadSeconds)) s")
+                check(s.faces > 0 || s.splats > 0, "\(file): \(s.faces) faces, \(s.splats) splats, \(s.edges) edges, \(s.instances) instances, \(s.definitions) definitions, \(model.layers.count) layers, \(model.scenes.count) scenes in \(String(format: "%.2f", s.loadSeconds)) s")
             } catch {
                 check(false, "\(file): \(error.localizedDescription)")
             }

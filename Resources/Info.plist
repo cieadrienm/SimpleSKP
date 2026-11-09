@@ -47,6 +47,7 @@
 	<array>
 		<string>_oscjson._tcp</string>
 		<string>_osc._udp</string>
+		<string>_ndi._tcp</string>
 	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
@@ -118,6 +119,80 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.geometry-definition-format</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Modèle 3D Autodesk FBX</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.autodesk.fbx</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Modèle 3D Khronos glTF / GLB (.glb, .gltf)</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.khronos.glb</string>
+				<string>org.khronos.gltf</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Gaussian Splat / Maillage PLY</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.polygon-file-format</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>3D Gaussian Splat (.splat, .spz)</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>net.cieadrienm.splat</string>
+				<string>net.cieadrienm.spz</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Nuage de points 3D (.xyz, .pts, .pcd)</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>SimpleSKP.SKPDocument</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.xyz-point-cloud</string>
+				<string>net.cieadrienm.pts</string>
+				<string>net.cieadrienm.pcd</string>
 			</array>
 		</dict>
 		<dict>
@@ -242,6 +317,168 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>obj</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.autodesk.fbx</string>
+			<key>UTTypeDescription</key>
+			<string>Modèle 3D Autodesk FBX</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fbx</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.khronos.glb</string>
+			<key>UTTypeDescription</key>
+			<string>Modèle 3D Khronos Binary glTF (.glb)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>glb</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.khronos.gltf</string>
+			<key>UTTypeDescription</key>
+			<string>Modèle 3D Khronos glTF (.gltf)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>gltf</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>public.polygon-file-format</string>
+			<key>UTTypeDescription</key>
+			<string>Gaussian Splat / Maillage PLY</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>ply</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>net.cieadrienm.splat</string>
+			<key>UTTypeDescription</key>
+			<string>3D Gaussian Splat (.splat)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>splat</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>net.cieadrienm.spz</string>
+			<key>UTTypeDescription</key>
+			<string>3D Gaussian Splat compressé (.spz)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>spz</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>public.xyz-point-cloud</string>
+			<key>UTTypeDescription</key>
+			<string>Nuage de points 3D (.xyz)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.text</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>xyz</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>net.cieadrienm.pts</string>
+			<key>UTTypeDescription</key>
+			<string>Nuage de points 3D (.pts)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.text</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>pts</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>net.cieadrienm.pcd</string>
+			<key>UTTypeDescription</key>
+			<string>Nuage de points 3D PCL (.pcd)</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>pcd</string>
 				</array>
 			</dict>
 		</dict>

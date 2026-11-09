@@ -21,6 +21,15 @@ final class SKPDocument: NSDocument {
             DocumentController.dxfType,
             DocumentController.daeType,
             DocumentController.objType,
+            DocumentController.fbxType,
+            DocumentController.glbType,
+            DocumentController.gltfType,
+            DocumentController.plyType,
+            DocumentController.splatType,
+            DocumentController.spzType,
+            DocumentController.xyzType,
+            DocumentController.ptsType,
+            DocumentController.pcdType,
             DocumentController.sskpType,
         ]
     }
@@ -96,6 +105,7 @@ final class SKPDocument: NSDocument {
     override func close() {
         cancelled.withLock { $0 = true }
         model.cancelProgressiveConstruction()
+        model.stopSyphonOutput()
         if let skp = model.skp { Self.removeTextures(of: skp) }
         super.close()
     }
@@ -115,7 +125,9 @@ final class SKPDocument: NSDocument {
     @objc func copyImage(_ sender: Any?) { model.copyImage() }
     @objc func exportImage(_ sender: Any?) { model.exportImage() }
     @objc func exportVectorPDF(_ sender: Any?) { model.exportVectorPDF() }
+    @objc func importMillumin(_ sender: Any?) { model.promptImportMillumin() }
     @objc func toggleSidebarPanel(_ sender: Any?) { model.toggleSidebar() }
+    @objc func toggleProjectorInspectorPanel(_ sender: Any?) { model.toggleProjectorInspector() }
     @objc func toggleEdges(_ sender: Any?) { model.toggleEdges() }
     @objc func toggleGrid(_ sender: Any?) { model.toggleGrid() }
     @objc func togglePerspective(_ sender: Any?) { model.togglePerspective() }
@@ -127,6 +139,7 @@ final class SKPDocument: NSDocument {
     @objc func hideSelectedLayer(_ sender: Any?) { model.hideSelectedLayer() }
     @objc func toggleMeasureTool(_ sender: Any?) { model.toggleMeasureTool() }
     @objc func toggleFreeFlight(_ sender: Any?) { model.toggleFreeFlight() }
+    @objc func toggleSyphonOutput(_ sender: Any?) { model.toggleSyphonOutput() }
     @objc func previousScene(_ sender: Any?) { model.previousScene() }
     @objc func nextScene(_ sender: Any?) { model.nextScene() }
     @objc func previousSceneSlow(_ sender: Any?) { model.previousScene(slow: true) }
@@ -153,17 +166,22 @@ final class SKPDocument: NSDocument {
         case #selector(saveSSKP(_:)), #selector(saveSSKPAs(_:)):
             item.isHidden = !model.showsHiddenFeaturesUI
             return !item.isHidden && model.isReady && model.underlyingModelURL != nil
+        case #selector(importMillumin(_:)):
+            return model.isReady
         case #selector(performUndo(_:)):
             item.title = model.undoMenuTitle
-            return !isEditingText && model.canUndo
+            return model.canUndo
         case #selector(performRedo(_:)):
             item.title = model.redoMenuTitle
-            return !isEditingText && model.canRedo
+            return model.canRedo
         case #selector(revealInFinder(_:)):
             return true
         case #selector(toggleSidebarPanel(_:)):
             item.state = model.showSidebar ? .on : .off
             return model.skp != nil
+        case #selector(toggleProjectorInspectorPanel(_:)):
+            item.state = model.showProjectorInspector ? .on : .off
+            return model.isReady
         case #selector(toggleEdges(_:)):
             item.state = model.showsEdges ? .on : .off
             return model.isReady
@@ -188,6 +206,9 @@ final class SKPDocument: NSDocument {
         case #selector(toggleFreeFlight(_:)):
             item.state = model.isFreeFlying ? .on : .off
             return model.isReady
+        case #selector(toggleSyphonOutput(_:)):
+            item.state = model.syphonOutputEnabled ? .on : .off
+            return model.isReady && model.isSyphonAvailable
         case #selector(selectShadingStyle(_:)):
             let styles = ShadingStyle.allCases
             if styles.indices.contains(item.tag) {

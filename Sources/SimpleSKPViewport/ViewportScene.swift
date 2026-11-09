@@ -57,22 +57,34 @@ public final class ViewportScene: @unchecked Sendable {
     public static let defaultSunElevationDegrees: Float = 45
 
     public var sunAzimuthDegrees: Float = ViewportScene.defaultSunAzimuthDegrees {
-        didSet { updateSunDirection() }
+        didSet {
+            guard oldValue != sunAzimuthDegrees else { return }
+            updateSunDirection()
+        }
     }
 
     public var sunElevationDegrees: Float = ViewportScene.defaultSunElevationDegrees {
-        didSet { updateSunDirection() }
+        didSet {
+            guard oldValue != sunElevationDegrees else { return }
+            updateSunDirection()
+        }
     }
 
     /// Sun directional light power multiplier (`0.0 ... 3.0`, default `1.0` = 100%).
     public var sunIntensity: Float = Rendering.defaultSunIntensity {
-        didSet { updateLightingModeAndPointLights() }
+        didSet {
+            guard oldValue != sunIntensity else { return }
+            updateLightingModeAndPointLights()
+        }
     }
 
     /// Ambient light power multiplier (`0.0 ... 2.0`, default `1.0` = 100%).
     /// Controls what remains when directional/point lights are set to `0 %`. Setting to `0` eliminates all residual ambient light.
     public var ambientIntensity: Float = Rendering.defaultAmbientIntensity {
-        didSet { updateLightingModeAndPointLights() }
+        didSet {
+            guard oldValue != ambientIntensity else { return }
+            updateLightingModeAndPointLights()
+        }
     }
 
     public func resetSun() {
@@ -82,11 +94,15 @@ public final class ViewportScene: @unchecked Sendable {
     }
 
     public var shadowsEnabled = true {
-        didSet { updateLightingModeAndPointLights() }
+        didSet {
+            guard oldValue != shadowsEnabled else { return }
+            updateLightingModeAndPointLights()
+        }
     }
 
     public var lightingMode: LightingMode = .sun {
         didSet {
+            guard oldValue != lightingMode else { return }
             if lightingMode == .point && pointLights.isEmpty {
                 pointLights = detectedSceneLights.isEmpty
                     ? [ViewportPointLight(name: L("Lumière 1", "Light 1"), position: defaultPointLightPosition, intensity: 1.0, isFromScene: false)]
@@ -101,23 +117,69 @@ public final class ViewportScene: @unchecked Sendable {
 
     /// Active point lights in model space (metres, Z up).
     public var pointLights: [ViewportPointLight] = [] {
-        didSet { updateLightingModeAndPointLights() }
+        didSet {
+            guard oldValue != pointLights else { return }
+            updateLightingModeAndPointLights()
+        }
     }
 
     /// Whether to draw the 3D wireframe position marker for point lights when in `.point` mode.
     public var showsPointLightGizmo: Bool = true {
-        didSet { updateLightingModeAndPointLights() }
+        didSet {
+            guard oldValue != showsPointLightGizmo else { return }
+            updateLightingModeAndPointLights()
+        }
     }
 
     /// Active virtual video projectors in model space (metres, Z up).
     public var videoProjectors: [VideoProjector] = [] {
-        didSet { updateVideoProjectors() }
+        didSet {
+            guard oldValue != videoProjectors else { return }
+            updateVideoProjectors()
+        }
+    }
+
+    /// When `true`, only the 3D projector chassis and wireframe optical frustums are displayed (`rebuildProjectorGizmos`),
+    /// bypassing the offscreen Metal shadow depth pass, 4-quadrant indirect bounce, and surface projection shader for ultra-fast setup.
+    public var projectorsFrustumOnly: Bool = false {
+        didSet {
+            guard oldValue != projectorsFrustumOnly else { return }
+            updateVideoProjectors()
+        }
+    }
+
+    /// When `true`, video projector light emission in the 3D viewport simulates realistic illuminance (Lux),
+    /// taking into account nominal lumens, inverse-square beam divergence (`1/d²`), active throw ratio zoom,
+    /// lens transmission losses, and optical center-to-corner vignetting.
+    public var photometricSimulation: Bool = true {
+        didSet {
+            guard oldValue != photometricSimulation else { return }
+            updateVideoProjectors()
+        }
+    }
+
+    /// Calibrated reference illuminance in Lux corresponding to a nominal 1.0 white level in the viewport.
+    /// Default `250.0 lx` corresponds to a standard theatrical stage screen reference.
+    public var photometricReferenceLux: Float = 250.0 {
+        didSet {
+            guard oldValue != photometricReferenceLux else { return }
+            updateVideoProjectors()
+        }
     }
 
     /// Index of the currently selected video projector for highlighting its frustum in the viewport.
     public var selectedVideoProjectorIndex: Int = 0 {
         didSet {
             if oldValue != selectedVideoProjectorIndex {
+                rebuildProjectorGizmos()
+            }
+        }
+    }
+
+    /// Indices of all currently selected video projectors (supports multi-selection for group moves/edits).
+    public var selectedVideoProjectorIndices: Set<Int> = [0] {
+        didSet {
+            if oldValue != selectedVideoProjectorIndices {
                 rebuildProjectorGizmos()
             }
         }
@@ -130,11 +192,17 @@ public final class ViewportScene: @unchecked Sendable {
     }
 
     public var backdropStyle: BackdropStyle = .architecturalSky {
-        didSet { updateBackdrop() }
+        didSet {
+            guard oldValue != backdropStyle else { return }
+            updateBackdrop()
+        }
     }
 
     public var customBackdropColor: SIMD3<Float> = Rendering.defaultCustomBackdropColor {
-        didSet { updateBackdrop() }
+        didSet {
+            guard oldValue != customBackdropColor else { return }
+            updateBackdrop()
+        }
     }
 
     private func updateBackdrop() {
@@ -144,7 +212,7 @@ public final class ViewportScene: @unchecked Sendable {
 
     /// Adapts the wireframe / edge material color to the active backdrop luminance and shading style so edges always remain contrasted.
     private func updateEdgeMaterial() {
-        let effectiveShading: ShadingStyle = (model.fileInfo.isCAD || model.stats.faces == 0) ? .wireframe : shadingStyle
+        let effectiveShading: ShadingStyle = (model.fileInfo.isCAD || (model.stats.faces == 0 && model.splatCloud == nil)) ? .wireframe : shadingStyle
         let rgb = Rendering.contrastingEdgeColor(
             for: backdropStyle,
             customColor: customBackdropColor,
@@ -214,6 +282,13 @@ public final class ViewportScene: @unchecked Sendable {
         init(layers: [Int]) { self.layers = layers }
     }
 
+    private static let subBlockSize = 256 // 256 triangles (faces) or 256 segments (edges) per Morton sub-block
+
+    private struct SubBlockAABB {
+        var min: SIMD3<Float>
+        var max: SIMD3<Float>
+    }
+
     private struct EdgeChunk {
         var node: SCNNode
         var buffer: MTLBuffer
@@ -221,6 +296,7 @@ public final class ViewportScene: @unchecked Sendable {
         var set: LayerSet
         var boundsMin: SIMD3<Float>
         var boundsMax: SIMD3<Float>
+        var subBlockBounds: [SubBlockAABB] = []
     }
 
     private struct FaceChunk {
@@ -232,6 +308,25 @@ public final class ViewportScene: @unchecked Sendable {
         var set: LayerSet
         var boundsMin: SIMD3<Float>
         var boundsMax: SIMD3<Float>
+        var subBlockBounds: [SubBlockAABB] = []
+    }
+
+    private struct ProjectorSceneKey: Hashable {
+        let poseKey: VideoProjector.OpticalPoseKey
+        let sceneRevision: UInt64
+    }
+
+    private struct CachedProjectorBounce {
+        let bPos: simd_float4x4
+        let bNorm: simd_float4x4
+        let unitReflectances: [SIMD3<Float>]
+    }
+
+    private struct CachedProjectorFrustum {
+        let rawCorners: [SIMD3<Float>]
+        let clippedCorners: [SIMD3<Float>]
+        let surfaceOutlineSegments: [SIMD3<Float>]
+        let axisEnd: SIMD3<Float>
     }
 
     /// A definition placed in the flattened tree (-1 = the root): model-space transform, material its unpainted faces
@@ -264,15 +359,37 @@ public final class ViewportScene: @unchecked Sendable {
     private var faceNodes: [(node: SCNNode, material: SCNMaterial)] = []
     private var faceNodeSet: [ObjectIdentifier: LayerSet] = [:]
     private var faceChunks: [FaceChunk] = []
+    private var faceChunksPreparedCount = 0
     private var edgeNodes: [SCNNode] = []
     private var edgeChunks: [EdgeChunk] = []
     private var gridNode: SCNNode?
+    private(set) var splatNode: SCNNode?
+    private(set) var splatRenderer: MetalSplatRenderer?
     private let pointLightsRoot = SCNNode()
     public let projectorsRoot = SCNNode()
-    private lazy var projectorRenderer = VideoProjectorRenderer(device: Self.device)
+    /// Called on the main queue when a live Syphon or NDI video projector stream delivers a new frame and requires a viewport redraw.
+    public var onNeedRedraw: (() -> Void)?
+    private lazy var projectorRenderer: VideoProjectorRenderer = {
+        let r = VideoProjectorRenderer(device: Self.device)
+        r.onNewLiveFrame = { [weak self] in
+            self?.refreshLiveProjectorFrames()
+        }
+        return r
+    }()
+    private var liveSourcesObserver: NSObjectProtocol?
     private var baseSurfaceModifiers: [ObjectIdentifier: String] = [:]
     private var projectorsShaderActive = false
-    private var cachedBounceMatrices: [(bPos: SCNMatrix4, bNorm: SCNMatrix4, bCol: SCNMatrix4)] = []
+    private var sceneGeometryRevision: UInt64 = 1
+    private var cachedBounceMatrices: [(bPos: simd_float4x4, bNorm: simd_float4x4, bCol: simd_float4x4)] = []
+    private var cachedBounceReflectanceGains: [[SIMD3<Float>]] = []
+    private var cachedProjectorBounces: [ProjectorSceneKey: CachedProjectorBounce] = [:]
+    private var cachedProjectorFrustums: [ProjectorSceneKey: CachedProjectorFrustum] = [:]
+    /// Total number of CPU raycasts executed for video projector bounce & frustum gizmos (exposed for performance tests).
+    public private(set) var projectorRaycastCount: Int = 0
+    /// Total number of Metal shadow depth render passes executed by `VideoProjectorRenderer`.
+    public var projectorDepthRenderPassCount: Int { projectorRenderer.depthRenderPassCount }
+    /// Total number of individual projector depth tiles rendered by `VideoProjectorRenderer`.
+    public var projectorDepthSlotRenderCount: Int { projectorRenderer.depthSlotRenderCount }
     /// Root node for 3D/2D measurement overlays (`⌘D`), living directly inside `modelRoot` so measurements pan, zoom, and orbit in the exact same Metal pass as the scene geometry with zero frame lag.
     public let measureRoot = SCNNode()
     private var measureIsActive = false
@@ -320,6 +437,24 @@ public final class ViewportScene: @unchecked Sendable {
         place(-1, transform: matrix_identity_float4x4, material: nil, layers: [])
         if !deferInitialLayerBuild {
             build(layerSets.values.filter(isVisible))
+        }
+        if let cloud = model.splatCloud, cloud.count > 0 {
+            let renderer = MetalSplatRenderer(cloud: cloud, boundsMin: model.boundsMin, boundsMax: model.boundsMax)
+            renderer.shadingStyle = shadingStyle
+            renderer.isHiddenLayer = hiddenLayers.contains(0)
+            let sNode = SCNNode()
+            sNode.name = "splatCloud"
+            let pad = SIMD3<Float>(repeating: max(10.0, simd_length(model.boundsMax - model.boundsMin)))
+            sNode.boundingBox = (
+                min: SCNVector3(model.boundsMin - pad),
+                max: SCNVector3(model.boundsMax + pad)
+            )
+            sNode.renderingOrder = 1
+            sNode.isHidden = hiddenLayers.contains(0)
+            sNode.rendererDelegate = renderer
+            modelRoot.addChildNode(sNode)
+            self.splatNode = sNode
+            self.splatRenderer = renderer
         }
         if ProcessInfo.processInfo.environment["SIMPLESKP_TIMING"] == "1" {
             print(String(format: "ViewportScene: %.3f s, %d placements, %d layer sets (%d built), %d nodes", CFAbsoluteTimeGetCurrent() - start,
@@ -372,6 +507,19 @@ public final class ViewportScene: @unchecked Sendable {
         updateSunDirection()
         updateShadowDistance()
         updateLightingModeAndPointLights()
+        liveSourcesObserver = NotificationCenter.default.addObserver(
+            forName: .sskpLiveVideoSourcesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshLiveProjectorFrames()
+        }
+    }
+
+    deinit {
+        if let liveSourcesObserver {
+            NotificationCenter.default.removeObserver(liveSourcesObserver)
+        }
     }
 
     private func updateSunDirection() {
@@ -392,12 +540,20 @@ public final class ViewportScene: @unchecked Sendable {
     /// Shows or hides everything on a layer, by index into `model.layers`: a layer set is shown iff all its layers are.
     /// Sets shown for the first time are built here (main thread, like any scene edit).
     public func setLayer(_ index: Int, visible: Bool) {
+        let wasHidden = hiddenLayers.contains(index)
+        guard wasHidden == visible else { return }
         if Thread.isMainThread { MainActor.assumeIsolated { clearHoverVisuals(); cancelLayerPulse() } }
         if visible { hiddenLayers.remove(index) } else { hiddenLayers.insert(index) }
+        sceneGeometryRevision &+= 1
         cachedVisibleBounds = nil
         let sets = setsByLayer[index] ?? []
         build(sets.filter { $0.node == nil && isVisible($0) })
         for set in sets { set.node?.isHidden = !isVisible(set) }
+        if index == 0 {
+            let hideSplat = hiddenLayers.contains(0)
+            splatRenderer?.isHiddenLayer = hideSplat
+            splatNode?.isHidden = hideSplat
+        }
         updateShadowDistance()
         if !videoProjectors.isEmpty { updateVideoProjectors() }
         if Thread.isMainThread { MainActor.assumeIsolated { applyHoverVisuals() } }
@@ -405,11 +561,18 @@ public final class ViewportScene: @unchecked Sendable {
 
     /// Applies a whole layer state at once (a scene change): only the sets visible in the end are built.
     public func setLayers(_ visible: [Bool]) {
+        let nextHidden = Set(visible.indices.filter { !visible[$0] })
+        let unbuiltVisible = layerSets.values.filter { $0.node == nil && $0.layers.allSatisfy { !nextHidden.contains($0) } }
+        guard nextHidden != hiddenLayers || !unbuiltVisible.isEmpty else { return }
         if Thread.isMainThread { MainActor.assumeIsolated { clearHoverVisuals(); cancelLayerPulse() } }
-        hiddenLayers = Set(visible.indices.filter { !visible[$0] })
+        hiddenLayers = nextHidden
+        sceneGeometryRevision &+= 1
         cachedVisibleBounds = nil
-        build(layerSets.values.filter { $0.node == nil && isVisible($0) })
+        build(unbuiltVisible)
         for set in layerSets.values { set.node?.isHidden = !isVisible(set) }
+        let hideSplat = hiddenLayers.contains(0)
+        splatRenderer?.isHiddenLayer = hideSplat
+        splatNode?.isHidden = hideSplat
         updateShadowDistance()
         if !videoProjectors.isEmpty { updateVideoProjectors() }
         if Thread.isMainThread { MainActor.assumeIsolated { applyHoverVisuals() } }
@@ -466,6 +629,7 @@ public final class ViewportScene: @unchecked Sendable {
         if !toBuild.isEmpty {
             build(toBuild)
             for set in toBuild { set.node?.isHidden = !isVisible(set) }
+            sceneGeometryRevision &+= 1
             cachedVisibleBounds = nil
         }
         let edgesCount = edgeChunks.reduce(0) { $0 + $1.vertexCount / 2 }
@@ -478,6 +642,7 @@ public final class ViewportScene: @unchecked Sendable {
         guard !remaining.isEmpty else { return }
         build(remaining)
         for set in remaining { set.node?.isHidden = !isVisible(set) }
+        sceneGeometryRevision &+= 1
         cachedVisibleBounds = nil
         updateShadowDistance()
         if !videoProjectors.isEmpty { updateVideoProjectors() }
@@ -688,39 +853,60 @@ public final class ViewportScene: @unchecked Sendable {
 
                 let ptr = chunk.buffer.contents().bindMemory(to: Float.self, capacity: chunk.vertexCount * 3)
                 let segCount = chunk.vertexCount / 2
-                for sIdx in 0..<segCount {
-                    let o0 = sIdx * 6
-                    let p0 = SIMD3<Float>(ptr[o0], ptr[o0 + 1], ptr[o0 + 2]) - from
-                    let p1 = SIMD3<Float>(ptr[o0 + 3], ptr[o0 + 4], ptr[o0 + 5]) - from
+                let blockCount = chunk.subBlockBounds.count
+                let tolVec = SIMD3<Float>(repeating: maxTol)
+                for bIdx in 0..<max(blockCount, 1) {
+                    let sStart: Int
+                    let sEnd: Int
+                    if bIdx < blockCount {
+                        let sb = chunk.subBlockBounds[bIdx]
+                        guard Self.rayIntersectsAABB(
+                            origin: from,
+                            direction: direction,
+                            maxT: maxDepth + maxTol,
+                            min: sb.min - tolVec,
+                            max: sb.max + tolVec
+                        ) else { continue }
+                        sStart = bIdx * Self.subBlockSize
+                        sEnd = min(segCount, sStart + Self.subBlockSize)
+                    } else {
+                        sStart = 0
+                        sEnd = segCount
+                    }
+                    for sIdx in sStart..<sEnd {
+                        let o0 = sIdx * 6
+                        let p0 = SIMD3<Float>(ptr[o0], ptr[o0 + 1], ptr[o0 + 2]) - from
+                        let p1 = SIMD3<Float>(ptr[o0 + 3], ptr[o0 + 4], ptr[o0 + 5]) - from
 
-                    let z0 = simd_dot(p0, direction)
-                    let z1 = simd_dot(p1, direction)
-                    let zMax = max(z0, z1)
-                    let zMin = min(z0, z1)
-                    if zMax < 0 || zMin > maxDepth { continue }
+                        let z0 = simd_dot(p0, direction)
+                        let z1 = simd_dot(p1, direction)
+                        let zMax = max(z0, z1)
+                        let zMin = min(z0, z1)
+                        if zMax < 0 || zMin > maxDepth { continue }
 
-                    let segTol = orthoTolerance ?? (max(zMax, 0.01) * perspScale)
-                    let x0 = simd_dot(p0, u), x1 = simd_dot(p1, u)
-                    if max(x0, x1) < -segTol || min(x0, x1) > segTol { continue }
-                    let y0 = simd_dot(p0, v), y1 = simd_dot(p1, v)
-                    if max(y0, y1) < -segTol || min(y0, y1) > segTol { continue }
+                        let segTol = orthoTolerance ?? (max(zMax, 0.01) * perspScale)
+                        let x0 = simd_dot(p0, u), x1 = simd_dot(p1, u)
+                        if max(x0, x1) < -segTol || min(x0, x1) > segTol { continue }
+                        let y0 = simd_dot(p0, v), y1 = simd_dot(p1, v)
+                        if max(y0, y1) < -segTol || min(y0, y1) > segTol { continue }
 
-                    let dx = x1 - x0, dy = y1 - y0
-                    let lenSq = dx * dx + dy * dy
-                    let s: Float = lenSq > 1e-12 ? simd_clamp(-(x0 * dx + y0 * dy) / lenSq, 0.0, 1.0) : 0.0
-                    let cz = z0 + s * (z1 - z0)
-                    if cz < 0 || cz > maxDepth { continue }
+                        let dx = x1 - x0, dy = y1 - y0
+                        let lenSq = dx * dx + dy * dy
+                        let s: Float = lenSq > 1e-12 ? simd_clamp(-(x0 * dx + y0 * dy) / lenSq, 0.0, 1.0) : 0.0
+                        let cz = z0 + s * (z1 - z0)
+                        if cz < 0 || cz > maxDepth { continue }
 
-                    let tolAtZ = max(orthoTolerance ?? (max(cz, 0.01) * perspScale), 1e-5)
-                    let cx = x0 + s * dx, cy = y0 + s * dy
-                    let dist = sqrt(cx * cx + cy * cy)
-                    guard dist <= tolAtZ else { continue }
-                    guard cz <= bestFaceT + tolAtZ * 1.5 else { continue }
+                        let tolAtZ = max(orthoTolerance ?? (max(cz, 0.01) * perspScale), 1e-5)
+                        let cx = x0 + s * dx, cy = y0 + s * dy
+                        let dist = sqrt(cx * cx + cy * cy)
+                        guard dist <= tolAtZ else { continue }
+                        guard cz <= bestFaceT + tolAtZ * 1.5 else { continue }
 
-                    let score = cz + (dist / tolAtZ) * (tolAtZ * 2.0)
-                    if score < bestEdgeScore {
-                        bestEdgeScore = score
-                        bestEdgeSet = chunk.set
+                        let score = cz + (dist / tolAtZ) * (tolAtZ * 2.0)
+                        if score < bestEdgeScore {
+                            bestEdgeScore = score
+                            bestEdgeSet = chunk.set
+                        }
                     }
                 }
             }
@@ -729,7 +915,22 @@ public final class ViewportScene: @unchecked Sendable {
         if let bestEdgeSet {
             return bestEdgeSet.primaryLayer
         }
-        return bestFaceSet?.primaryLayer
+        if let bestFaceSet {
+            return bestFaceSet.primaryLayer
+        }
+        if model.splatCloud != nil, !hiddenLayers.contains(0),
+           raycastSplatCloud(
+               from: from,
+               direction: direction,
+               reach: reach,
+               tanHalfFOV: tanHalfFOV,
+               viewportHeight: viewportHeight,
+               screenRadiusPoints: screenRadiusPoints,
+               orthoMetresPerPoint: orthoTolerance.map { $0 / max(1, screenRadiusPoints) }
+           ) != nil {
+            return 0
+        }
+        return nil
     }
 
     /// Snaps the cursor ray to the nearest visible vertex (`extrémité`), edge midpoint (`milieu`), edge segment (`arête`), or face surface.
@@ -806,88 +1007,110 @@ public final class ViewportScene: @unchecked Sendable {
             let ptr = chunk.buffer.contents().bindMemory(to: Float.self, capacity: chunk.vertexCount * 3)
             let segCount = chunk.vertexCount / 2
             let layerIdx = chunk.set.primaryLayer
+            let blockCount = chunk.subBlockBounds.count
+            let tolVec = SIMD3<Float>(repeating: maxTol)
 
-            for sIdx in 0..<segCount {
-                let o0 = sIdx * 6
-                let w0 = SIMD3<Float>(ptr[o0], ptr[o0 + 1], ptr[o0 + 2])
-                let w1 = SIMD3<Float>(ptr[o0 + 3], ptr[o0 + 4], ptr[o0 + 5])
-                let p0 = w0 - from
-                let p1 = w1 - from
+            for bIdx in 0..<max(blockCount, 1) {
+                let sStart: Int
+                let sEnd: Int
+                if bIdx < blockCount {
+                    let sb = chunk.subBlockBounds[bIdx]
+                    guard Self.rayIntersectsAABB(
+                        origin: from,
+                        direction: direction,
+                        maxT: maxDepth + maxTol,
+                        min: sb.min - tolVec,
+                        max: sb.max + tolVec
+                    ) else { continue }
+                    sStart = bIdx * Self.subBlockSize
+                    sEnd = min(segCount, sStart + Self.subBlockSize)
+                } else {
+                    sStart = 0
+                    sEnd = segCount
+                }
 
-                let z0 = simd_dot(p0, direction)
-                let z1 = simd_dot(p1, direction)
-                let zMax = max(z0, z1)
-                let zMin = min(z0, z1)
-                if zMax < 0 || zMin > maxDepth { continue }
+                for sIdx in sStart..<sEnd {
+                    let o0 = sIdx * 6
+                    let w0 = SIMD3<Float>(ptr[o0], ptr[o0 + 1], ptr[o0 + 2])
+                    let w1 = SIMD3<Float>(ptr[o0 + 3], ptr[o0 + 4], ptr[o0 + 5])
+                    let p0 = w0 - from
+                    let p1 = w1 - from
 
-                let segTol = (metresPerPoint ?? (max(zMax, 0.01) * perspUnitScale)) * screenRadiusPoints
-                let x0 = simd_dot(p0, u), x1 = simd_dot(p1, u)
-                if max(x0, x1) < -segTol || min(x0, x1) > segTol { continue }
-                let y0 = simd_dot(p0, v), y1 = simd_dot(p1, v)
-                if max(y0, y1) < -segTol || min(y0, y1) > segTol { continue }
+                    let z0 = simd_dot(p0, direction)
+                    let z1 = simd_dot(p1, direction)
+                    let zMax = max(z0, z1)
+                    let zMin = min(z0, z1)
+                    if zMax < 0 || zMin > maxDepth { continue }
 
-                // 1. Check endpoints (vertices)
-                if z0 >= 0 {
-                    let mpp0 = max(metresPerPoint ?? (max(z0, 0.01) * perspUnitScale), 1e-6)
-                    if z0 <= bestFaceT + mpp0 * 18.0 {
-                        let distPts0 = hypot(x0, y0) / mpp0
-                        if distPts0 <= vertexRadiusPts {
-                            let score = distPts0 + z0 * 1e-4
-                            if score < bestVertexScore {
-                                bestVertexScore = score
-                                bestVertexSnap = MeasureSnap(position: w0, kind: .vertex, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                    let segTol = (metresPerPoint ?? (max(zMax, 0.01) * perspUnitScale)) * screenRadiusPoints
+                    let x0 = simd_dot(p0, u), x1 = simd_dot(p1, u)
+                    if max(x0, x1) < -segTol || min(x0, x1) > segTol { continue }
+                    let y0 = simd_dot(p0, v), y1 = simd_dot(p1, v)
+                    if max(y0, y1) < -segTol || min(y0, y1) > segTol { continue }
+
+                    // 1. Check endpoints (vertices)
+                    if z0 >= 0 {
+                        let mpp0 = max(metresPerPoint ?? (max(z0, 0.01) * perspUnitScale), 1e-6)
+                        if z0 <= bestFaceT + mpp0 * 18.0 {
+                            let distPts0 = hypot(x0, y0) / mpp0
+                            if distPts0 <= vertexRadiusPts {
+                                let score = distPts0 + z0 * 1e-4
+                                if score < bestVertexScore {
+                                    bestVertexScore = score
+                                    bestVertexSnap = MeasureSnap(position: w0, kind: .vertex, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                                }
                             }
                         }
                     }
-                }
-                if z1 >= 0 {
-                    let mpp1 = max(metresPerPoint ?? (max(z1, 0.01) * perspUnitScale), 1e-6)
-                    if z1 <= bestFaceT + mpp1 * 18.0 {
-                        let distPts1 = hypot(x1, y1) / mpp1
-                        if distPts1 <= vertexRadiusPts {
-                            let score = distPts1 + z1 * 1e-4
-                            if score < bestVertexScore {
-                                bestVertexScore = score
-                                bestVertexSnap = MeasureSnap(position: w1, kind: .vertex, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                    if z1 >= 0 {
+                        let mpp1 = max(metresPerPoint ?? (max(z1, 0.01) * perspUnitScale), 1e-6)
+                        if z1 <= bestFaceT + mpp1 * 18.0 {
+                            let distPts1 = hypot(x1, y1) / mpp1
+                            if distPts1 <= vertexRadiusPts {
+                                let score = distPts1 + z1 * 1e-4
+                                if score < bestVertexScore {
+                                    bestVertexScore = score
+                                    bestVertexSnap = MeasureSnap(position: w1, kind: .vertex, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                                }
                             }
                         }
                     }
-                }
 
-                // 2. Check segment midpoint (when segment is at least 18 pt on screen)
-                let zMid = (z0 + z1) * 0.5
-                if zMid >= 0 {
-                    let mppMid = max(metresPerPoint ?? (max(zMid, 0.01) * perspUnitScale), 1e-6)
-                    let segScreenLen = hypot(x1 - x0, y1 - y0) / mppMid
-                    if segScreenLen >= 18.0, zMid <= bestFaceT + mppMid * 18.0 {
-                        let xMid = (x0 + x1) * 0.5, yMid = (y0 + y1) * 0.5
-                        let distPtsMid = hypot(xMid, yMid) / mppMid
-                        if distPtsMid <= midpointRadiusPts {
-                            let score = distPtsMid + zMid * 1e-4
-                            if score < bestMidpointScore {
-                                bestMidpointScore = score
-                                bestMidpointSnap = MeasureSnap(position: (w0 + w1) * 0.5, kind: .midpoint, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                    // 2. Check segment midpoint (when segment is at least 18 pt on screen)
+                    let zMid = (z0 + z1) * 0.5
+                    if zMid >= 0 {
+                        let mppMid = max(metresPerPoint ?? (max(zMid, 0.01) * perspUnitScale), 1e-6)
+                        let segScreenLen = hypot(x1 - x0, y1 - y0) / mppMid
+                        if segScreenLen >= 18.0, zMid <= bestFaceT + mppMid * 18.0 {
+                            let xMid = (x0 + x1) * 0.5, yMid = (y0 + y1) * 0.5
+                            let distPtsMid = hypot(xMid, yMid) / mppMid
+                            if distPtsMid <= midpointRadiusPts {
+                                let score = distPtsMid + zMid * 1e-4
+                                if score < bestMidpointScore {
+                                    bestMidpointScore = score
+                                    bestMidpointSnap = MeasureSnap(position: (w0 + w1) * 0.5, kind: .midpoint, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                                }
                             }
                         }
                     }
-                }
 
-                // 3. Check closest point along the edge segment
-                let dx = x1 - x0, dy = y1 - y0
-                let lenSq = dx * dx + dy * dy
-                let s: Float = lenSq > 1e-12 ? simd_clamp(-(x0 * dx + y0 * dy) / lenSq, 0.0, 1.0) : 0.0
-                let cz = z0 + s * (z1 - z0)
-                if cz >= 0, cz <= maxDepth {
-                    let mppZ = max(metresPerPoint ?? (max(cz, 0.01) * perspUnitScale), 1e-6)
-                    if cz <= bestFaceT + mppZ * 18.0 {
-                        let cx = x0 + s * dx, cy = y0 + s * dy
-                        let distPts = hypot(cx, cy) / mppZ
-                        if distPts <= screenRadiusPoints {
-                            let score = distPts + cz * 1e-4
-                            if score < bestEdgeScore {
-                                bestEdgeScore = score
-                                let snappedPos = w0 + s * (w1 - w0)
-                                bestEdgeSnap = MeasureSnap(position: snappedPos, kind: .edge, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                    // 3. Check closest point along the edge segment
+                    let dx = x1 - x0, dy = y1 - y0
+                    let lenSq = dx * dx + dy * dy
+                    let s: Float = lenSq > 1e-12 ? simd_clamp(-(x0 * dx + y0 * dy) / lenSq, 0.0, 1.0) : 0.0
+                    let cz = z0 + s * (z1 - z0)
+                    if cz >= 0, cz <= maxDepth {
+                        let mppZ = max(metresPerPoint ?? (max(cz, 0.01) * perspUnitScale), 1e-6)
+                        if cz <= bestFaceT + mppZ * 18.0 {
+                            let cx = x0 + s * dx, cy = y0 + s * dy
+                            let distPts = hypot(cx, cy) / mppZ
+                            if distPts <= screenRadiusPoints {
+                                let score = distPts + cz * 1e-4
+                                if score < bestEdgeScore {
+                                    bestEdgeScore = score
+                                    let snappedPos = w0 + s * (w1 - w0)
+                                    bestEdgeSnap = MeasureSnap(position: snappedPos, kind: .edge, segmentStart: w0, segmentEnd: w1, layerIndex: layerIdx)
+                                }
                             }
                         }
                     }
@@ -907,7 +1130,87 @@ public final class ViewportScene: @unchecked Sendable {
         if let bestFacePoint {
             return MeasureSnap(position: bestFacePoint, kind: .face, layerIndex: bestFaceLayer)
         }
+        if model.splatCloud != nil, !hiddenLayers.contains(0),
+           let splatHit = raycastSplatCloud(
+               from: from,
+               direction: direction,
+               reach: reach,
+               tanHalfFOV: tanHalfFOV,
+               viewportHeight: viewportHeight,
+               screenRadiusPoints: screenRadiusPoints,
+               orthoMetresPerPoint: metresPerPoint
+           ) {
+            return MeasureSnap(position: splatHit, kind: .vertex, layerIndex: 0)
+        }
         return nil
+    }
+
+    /// Fast Morton sub-block AABB raycaster for 3D Gaussian Splats and Point Clouds (used for orbit pivot, double-click recentre, zoom-to-cursor, and `⌘D` measurement).
+    public func raycastSplatCloud(
+        from: SIMD3<Float>,
+        direction: SIMD3<Float>,
+        reach: Float,
+        tanHalfFOV: Float = 0.315,
+        viewportHeight: Float = 600,
+        screenRadiusPoints: Float = 14.0,
+        orthoMetresPerPoint: Float? = nil
+    ) -> SIMD3<Float>? {
+        guard let cloud = model.splatCloud, cloud.count > 0, !hiddenLayers.contains(0) else {
+            return nil
+        }
+        let perspUnitScale = 2.0 * tanHalfFOV / max(1.0, viewportHeight)
+        let baseRadius = max(cloud.defaultPointRadius * 2.5, 0.005)
+        let maxTol = max(baseRadius, (orthoMetresPerPoint ?? (reach * perspUnitScale)) * screenRadiusPoints)
+        let tolVec = SIMD3<Float>(repeating: maxTol)
+
+        guard Self.rayIntersectsAABB(
+            origin: from,
+            direction: direction,
+            maxT: reach + maxTol,
+            min: model.boundsMin - tolVec,
+            max: model.boundsMax + tolVec
+        ) else {
+            return nil
+        }
+
+        var bestPos: SIMD3<Float>? = nil
+        var bestScore: Float = .infinity
+
+        cloud.splats.withUnsafeBufferPointer { splatBuf in
+            guard let sPtr = splatBuf.baseAddress else { return }
+            for block in cloud.subBlocks {
+                guard Self.rayIntersectsAABB(
+                    origin: from,
+                    direction: direction,
+                    maxT: min(reach, bestScore) + maxTol,
+                    min: block.boundsMin - tolVec,
+                    max: block.boundsMax + tolVec
+                ) else {
+                    continue
+                }
+                for idx in block.startIndex..<block.endIndex {
+                    let s = sPtr[idx]
+                    // Ignore nearly invisible Gaussian splats when picking
+                    if s.colorA < 0.05 { continue }
+                    let p = s.position
+                    let rel = p - from
+                    let z = simd_dot(rel, direction)
+                    guard z > 0 && z <= reach else { continue }
+                    let mpp = max(orthoMetresPerPoint ?? (z * perspUnitScale), 1e-5)
+                    let radiusTol = max(baseRadius, mpp * screenRadiusPoints)
+                    let perp = rel - direction * z
+                    let distSq = simd_length_squared(perp)
+                    guard distSq <= radiusTol * radiusTol else { continue }
+                    let dist = sqrt(distSq)
+                    let score = z + (dist / radiusTol) * (mpp * 4.0)
+                    if score < bestScore {
+                        bestScore = score
+                        bestPos = p
+                    }
+                }
+            }
+        }
+        return bestPos
     }
 
     private static func rayIntersectsAABB(
@@ -1254,7 +1557,8 @@ public final class ViewportScene: @unchecked Sendable {
                         indexCount: chunk.indices,
                         set: chunk.set,
                         boundsMin: mergedData.boundsMin,
-                        boundsMax: mergedData.boundsMax
+                        boundsMax: mergedData.boundsMax,
+                        subBlockBounds: mergedData.subBlockBounds
                     ))
                 }
                 if shadingStyle != .textured {
@@ -1272,7 +1576,8 @@ public final class ViewportScene: @unchecked Sendable {
                     vertexCount: chunk.vertices,
                     set: chunk.set,
                     boundsMin: mergedData.boundsMin,
-                    boundsMax: mergedData.boundsMax
+                    boundsMax: mergedData.boundsMax,
+                    subBlockBounds: mergedData.subBlockBounds
                 ))
             }
             chunk.set.node!.addChildNode(child)
@@ -1287,6 +1592,7 @@ public final class ViewportScene: @unchecked Sendable {
         if Thread.isMainThread {
             MainActor.assumeIsolated { clearHoverVisuals(); cancelLayerPulse() }
         }
+        splatRenderer?.shadingStyle = shadingStyle
         for (node, material) in faceNodes {
             applyShadingStyle(to: node, original: material)
         }
@@ -2142,6 +2448,7 @@ public final class ViewportScene: @unchecked Sendable {
         var positions: MTLBuffer, normals: MTLBuffer?, uvs: MTLBuffer?, indices: Data?
         var boundsMin: SIMD3<Float> = .zero
         var boundsMax: SIMD3<Float> = .zero
+        var subBlockBounds: [SubBlockAABB] = []
     }
 
     private static func buffer(_ bytes: Int) -> MTLBuffer {
@@ -2160,6 +2467,11 @@ public final class ViewportScene: @unchecked Sendable {
         var vo = 0, io = 0, base: UInt32 = 0
         var lo = SIMD3<Float>(repeating: .infinity)
         var hi = SIMD3<Float>(repeating: -.infinity)
+        let triCount = chunk.indices / 3
+        let blockCount = (triCount + Self.subBlockSize - 1) / Self.subBlockSize
+        var subBlocks: [SubBlockAABB] = []
+        subBlocks.reserveCapacity(blockCount)
+
         indices.withUnsafeMutableBytes { ib in
             let ix = ib.bindMemory(to: UInt32.self).baseAddress!
             for piece in chunk.pieces {
@@ -2195,6 +2507,23 @@ public final class ViewportScene: @unchecked Sendable {
                 vo += mesh.positions.count
                 base += UInt32(mesh.positions.count)
             }
+            for bIdx in 0..<blockCount {
+                let startTri = bIdx * Self.subBlockSize
+                let endTri = min(triCount, startTri + Self.subBlockSize)
+                var sbLo = SIMD3<Float>(repeating: .infinity)
+                var sbHi = SIMD3<Float>(repeating: -.infinity)
+                for t in startTri..<endTri {
+                    let i0 = Int(ix[t * 3]) * 3
+                    let i1 = Int(ix[t * 3 + 1]) * 3
+                    let i2 = Int(ix[t * 3 + 2]) * 3
+                    let v0 = SIMD3<Float>(pv[i0], pv[i0 + 1], pv[i0 + 2])
+                    let v1 = SIMD3<Float>(pv[i1], pv[i1 + 1], pv[i1 + 2])
+                    let v2 = SIMD3<Float>(pv[i2], pv[i2 + 1], pv[i2 + 2])
+                    sbLo = simd_min(sbLo, simd_min(v0, simd_min(v1, v2)))
+                    sbHi = simd_max(sbHi, simd_max(v0, simd_max(v1, v2)))
+                }
+                subBlocks.append(SubBlockAABB(min: sbLo, max: sbHi))
+            }
         }
         let valid = lo.x <= hi.x
         return Merged(
@@ -2203,7 +2532,8 @@ public final class ViewportScene: @unchecked Sendable {
             uvs: uvs,
             indices: indices,
             boundsMin: valid ? lo : .zero,
-            boundsMax: valid ? hi : .zero
+            boundsMax: valid ? hi : .zero,
+            subBlockBounds: subBlocks
         )
     }
 
@@ -2225,6 +2555,24 @@ public final class ViewportScene: @unchecked Sendable {
                 hi = simd_max(hi, p)
             }
         }
+        let segCount = chunk.vertices / 2
+        let blockCount = (segCount + Self.subBlockSize - 1) / Self.subBlockSize
+        var subBlocks: [SubBlockAABB] = []
+        subBlocks.reserveCapacity(blockCount)
+        for bIdx in 0..<blockCount {
+            let startSeg = bIdx * Self.subBlockSize
+            let endSeg = min(segCount, startSeg + Self.subBlockSize)
+            var sbLo = SIMD3<Float>(repeating: .infinity)
+            var sbHi = SIMD3<Float>(repeating: -.infinity)
+            for s in startSeg..<endSeg {
+                let o = s * 6
+                let p0 = SIMD3<Float>(v[o], v[o + 1], v[o + 2])
+                let p1 = SIMD3<Float>(v[o + 3], v[o + 4], v[o + 5])
+                sbLo = simd_min(sbLo, simd_min(p0, p1))
+                sbHi = simd_max(sbHi, simd_max(p0, p1))
+            }
+            subBlocks.append(SubBlockAABB(min: sbLo, max: sbHi))
+        }
         let valid = lo.x <= hi.x
         return Merged(
             positions: positions,
@@ -2232,7 +2580,8 @@ public final class ViewportScene: @unchecked Sendable {
             uvs: nil,
             indices: nil,
             boundsMin: valid ? lo : .zero,
-            boundsMax: valid ? hi : .zero
+            boundsMax: valid ? hi : .zero,
+            subBlockBounds: subBlocks
         )
     }
 
@@ -2345,46 +2694,61 @@ public final class ViewportScene: @unchecked Sendable {
 
     /// Updates the offscreen Metal shadow depth maps, pattern atlas, scene material shader modifiers, and 3D frustum gizmos.
     private func updateVideoProjectors() {
-        let active = Array(videoProjectors.filter { $0.isEnabled && $0.intensity > 0.0001 }.prefix(VideoProjectorRenderer.maxActiveProjectors))
+        if !videoProjectors.isEmpty {
+            // Ensure all visible layer sets are built so their faces cast occlusion shadows and clip frustum rays
+            let unbuiltVisible = layerSets.values.filter { $0.node == nil && isVisible($0) }
+            if !unbuiltVisible.isEmpty {
+                build(unbuiltVisible)
+                for set in unbuiltVisible { set.node?.isHidden = !isVisible(set) }
+                sceneGeometryRevision &+= 1
+            }
+        } else {
+            cachedProjectorBounces.removeAll()
+            cachedProjectorFrustums.removeAll()
+            projectorRenderer.invalidateDepthCache()
+        }
+
+        let active: [VideoProjector]
+        if projectorsFrustumOnly {
+            active = []
+        } else {
+            active = Array(videoProjectors.filter { $0.isEnabled && $0.intensity > 0.0001 }.prefix(VideoProjectorRenderer.maxActiveProjectors))
+        }
         let b = visibleBounds
         let diag = max(simd_distance(b.min, b.max), 10.0)
         let zNear: Float = 0.15
         let zFar: Float = max(diag * 2.5, 120.0)
 
         if !active.isEmpty {
-            // Ensure all visible layer sets are built so their faces cast occlusion shadows
-            let unbuiltVisible = layerSets.values.filter { $0.node == nil && isVisible($0) }
-            if !unbuiltVisible.isEmpty {
-                build(unbuiltVisible)
-                for set in unbuiltVisible { set.node?.isHidden = !isVisible(set) }
-            }
-
-            // Lazily create MTLBuffer index buffers for face chunks and ensure untextured face chunks
+            // Lazily create MTLBuffer index buffers for newly built face chunks and ensure untextured face chunks
             // expose a `.texcoord` geometry source for SceneKit's `SCNMaterialProperty` shader arguments.
-            for i in faceChunks.indices {
-                if faceChunks[i].indexBuffer == nil {
-                    let data = faceChunks[i].indicesData
-                    let buf = data.withUnsafeBytes { rawBuf -> MTLBuffer in
-                        Self.device.makeBuffer(bytes: rawBuf.baseAddress!, length: max(data.count, 4), options: .storageModeShared)!
+            if faceChunksPreparedCount < faceChunks.count {
+                for i in faceChunksPreparedCount..<faceChunks.count {
+                    if faceChunks[i].indexBuffer == nil {
+                        let data = faceChunks[i].indicesData
+                        let buf = data.withUnsafeBytes { rawBuf -> MTLBuffer in
+                            Self.device.makeBuffer(bytes: rawBuf.baseAddress!, length: max(data.count, 4), options: .storageModeShared)!
+                        }
+                        faceChunks[i].indexBuffer = buf
                     }
-                    faceChunks[i].indexBuffer = buf
+                    if let oldGeom = faceChunks[i].node.geometry,
+                       oldGeom.sources(for: .texcoord).isEmpty,
+                       let vCount = oldGeom.sources(for: .vertex).first?.vectorCount {
+                        let texSource = SCNGeometrySource(
+                            buffer: faceChunks[i].positions,
+                            vertexFormat: .float2,
+                            semantic: .texcoord,
+                            vertexCount: vCount,
+                            dataOffset: 0,
+                            dataStride: 12
+                        )
+                        let newGeom = SCNGeometry(sources: oldGeom.sources + [texSource], elements: oldGeom.elements)
+                        newGeom.boundingBox = oldGeom.boundingBox
+                        newGeom.materials = oldGeom.materials
+                        faceChunks[i].node.geometry = newGeom
+                    }
                 }
-                if let oldGeom = faceChunks[i].node.geometry,
-                   oldGeom.sources(for: .texcoord).isEmpty,
-                   let vCount = oldGeom.sources(for: .vertex).first?.vectorCount {
-                    let texSource = SCNGeometrySource(
-                        buffer: faceChunks[i].positions,
-                        vertexFormat: .float2,
-                        semantic: .texcoord,
-                        vertexCount: vCount,
-                        dataOffset: 0,
-                        dataStride: 12
-                    )
-                    let newGeom = SCNGeometry(sources: oldGeom.sources + [texSource], elements: oldGeom.elements)
-                    newGeom.boundingBox = oldGeom.boundingBox
-                    newGeom.materials = oldGeom.materials
-                    faceChunks[i].node.geometry = newGeom
-                }
+                faceChunksPreparedCount = faceChunks.count
             }
 
             let refs: [VideoProjectorRenderer.FaceChunkRef] = faceChunks.compactMap { chunk in
@@ -2393,6 +2757,8 @@ public final class ViewportScene: @unchecked Sendable {
                     positions: chunk.positions,
                     indexBuffer: idxBuf,
                     indexCount: chunk.indexCount,
+                    boundsMin: chunk.boundsMin,
+                    boundsMax: chunk.boundsMax,
                     isVisible: { [weak self] in
                         guard let self else { return false }
                         return !chunk.node.isHidden && chunk.set.node?.isHidden == false && self.isVisible(chunk.set)
@@ -2404,25 +2770,73 @@ public final class ViewportScene: @unchecked Sendable {
                 activeProjectors: active,
                 faceChunks: refs,
                 zNear: zNear,
-                zFar: zFar
+                zFar: zFar,
+                sceneRevision: sceneGeometryRevision
             )
-            cachedBounceMatrices = active.enumerated().map { slot, proj in
-                computeProjectorBounceMatrices(for: proj, slot: slot, diag: diag)
+            var bounceMats: [(bPos: simd_float4x4, bNorm: simd_float4x4, bCol: simd_float4x4)] = []
+            var bounceGains: [[SIMD3<Float>]] = []
+            for (slot, proj) in active.enumerated() {
+                let res = computeProjectorBounceMatrices(for: proj, slot: slot, diag: diag)
+                bounceMats.append((res.bPos, res.bNorm, res.bCol))
+                bounceGains.append(res.reflectanceGains)
             }
+            cachedBounceMatrices = bounceMats
+            cachedBounceReflectanceGains = bounceGains
+            projectorRenderer.updateParamTexture(
+                activeProjectors: active,
+                zNear: zNear,
+                zFar: zFar,
+                photometricSimulation: photometricSimulation,
+                photometricReferenceLux: photometricReferenceLux,
+                bounceMatrices: bounceMats
+            )
             projectorsShaderActive = true
         } else if projectorsShaderActive {
+            projectorRenderer.stopAllLiveClients()
             cachedBounceMatrices = []
+            cachedBounceReflectanceGains = []
             projectorsShaderActive = false
+        } else {
+            projectorRenderer.stopAllLiveClients()
         }
 
-        var allFaceMaterials: [SCNMaterial] = [defaultMaterial, clayMaterial]
-        allFaceMaterials.append(contentsOf: materials.values)
-        allFaceMaterials.append(contentsOf: xrayMaterials.values)
-        for mat in allFaceMaterials {
-            applyCurrentProjectorShader(to: mat, activeProjectors: active, zNear: zNear, zFar: zFar)
+        if active.count != lastShaderActiveProjectorCount {
+            lastShaderActiveProjectorCount = active.count
+            var allFaceMaterials: [SCNMaterial] = [defaultMaterial, clayMaterial]
+            allFaceMaterials.append(contentsOf: materials.values)
+            allFaceMaterials.append(contentsOf: xrayMaterials.values)
+            for mat in allFaceMaterials {
+                applyCurrentProjectorShader(to: mat, activeProjectors: active, zNear: zNear, zFar: zFar)
+            }
         }
 
         rebuildProjectorGizmos()
+    }
+
+    private var lastShaderActiveProjectorCount: Int = 0
+
+    /// Fast path called when a live Syphon or NDI stream delivers a new video frame while scene geometry is stationary.
+    public func refreshLiveProjectorFrames() {
+        guard !projectorsFrustumOnly else { return }
+        let active = Array(videoProjectors.filter { $0.isEnabled && $0.intensity > 0.0001 }.prefix(VideoProjectorRenderer.maxActiveProjectors))
+        guard !active.isEmpty, projectorsShaderActive else { return }
+        let updatedSlots = projectorRenderer.updateLiveFramesOnly(activeProjectors: active)
+        guard !updatedSlots.isEmpty else { return }
+
+        for slot in updatedSlots where slot < cachedBounceMatrices.count && slot < cachedBounceReflectanceGains.count {
+            let gains = cachedBounceReflectanceGains[slot]
+            var colCols = [SIMD4<Float>](repeating: .zero, count: 4)
+            let proj = slot < active.count ? active[slot] : nil
+            for q in 0..<4 {
+                let quadTint = projectorRenderer.quadrantBounceTint(forSlot: slot, quadrant: q, projector: proj)
+                let bounceRGB = quadTint * gains[q]
+                colCols[q] = SIMD4<Float>(bounceRGB.x, bounceRGB.y, bounceRGB.z, 1.0)
+            }
+            let bCol = simd_float4x4(colCols[0], colCols[1], colCols[2], colCols[3])
+            cachedBounceMatrices[slot].bCol = bCol
+            projectorRenderer.updateSlotBounceColor(slot: slot, bCol: bCol)
+        }
+        onNeedRedraw?()
     }
 
     private func applyCurrentProjectorShader(
@@ -2431,12 +2845,20 @@ public final class ViewportScene: @unchecked Sendable {
         zNear: Float = 0.15,
         zFar: Float = 150.0
     ) {
-        let active = activeProjectors ?? Array(videoProjectors.filter { $0.isEnabled && $0.intensity > 0.0001 }.prefix(VideoProjectorRenderer.maxActiveProjectors))
+        let active: [VideoProjector]
+        if let activeProjectors {
+            active = activeProjectors
+        } else if projectorsFrustumOnly {
+            active = []
+        } else {
+            active = Array(videoProjectors.filter { $0.isEnabled && $0.intensity > 0.0001 }.prefix(VideoProjectorRenderer.maxActiveProjectors))
+        }
         let baseSnippet = baseSurfaceModifiers[ObjectIdentifier(material)]
 
         guard !active.isEmpty,
               let depthProp = projectorRenderer.depthProperty,
-              let colorProp = projectorRenderer.colorProperty
+              let colorProp = projectorRenderer.colorProperty,
+              let paramProp = projectorRenderer.paramProperty
         else {
             material.emission.contents = NSColor.black
             if let baseSnippet {
@@ -2459,94 +2881,95 @@ public final class ViewportScene: @unchecked Sendable {
         material.setValue(NSNumber(value: active.count), forKey: "sskp_projCount")
         material.setValue(depthProp, forKey: "sskp_projDepth")
         material.setValue(colorProp, forKey: "sskp_projColor")
-
-        let zeroMat = SCNMatrix4(simd_float4x4(
-            SIMD4<Float>.zero,
-            SIMD4<Float>.zero,
-            SIMD4<Float>.zero,
-            SIMD4<Float>.zero
-        ))
-
-        for i in 0..<VideoProjectorRenderer.maxActiveProjectors {
-            if i < active.count {
-                let p = active[i]
-                let vp = p.viewProjectionMatrix(zNear: zNear, zFar: zFar)
-                material.setValue(NSValue(scnMatrix4: SCNMatrix4(vp)), forKey: "sskp_projVP\(i)")
-                let pi = SCNVector4(CGFloat(p.position.x), CGFloat(p.position.y), CGFloat(p.position.z), CGFloat(p.intensity))
-                material.setValue(NSValue(scnVector4: pi), forKey: "sskp_projPI\(i)")
-                let bounce = i < cachedBounceMatrices.count ? cachedBounceMatrices[i] : (bPos: zeroMat, bNorm: zeroMat, bCol: zeroMat)
-                material.setValue(NSValue(scnMatrix4: bounce.bPos), forKey: "sskp_projBPos\(i)")
-                material.setValue(NSValue(scnMatrix4: bounce.bNorm), forKey: "sskp_projBNorm\(i)")
-                material.setValue(NSValue(scnMatrix4: bounce.bCol), forKey: "sskp_projBCol\(i)")
-            } else {
-                material.setValue(NSValue(scnMatrix4: SCNMatrix4Identity), forKey: "sskp_projVP\(i)")
-                material.setValue(NSValue(scnVector4: SCNVector4Zero), forKey: "sskp_projPI\(i)")
-                material.setValue(NSValue(scnMatrix4: zeroMat), forKey: "sskp_projBPos\(i)")
-                material.setValue(NSValue(scnMatrix4: zeroMat), forKey: "sskp_projBNorm\(i)")
-                material.setValue(NSValue(scnMatrix4: zeroMat), forKey: "sskp_projBCol\(i)")
-            }
-        }
+        material.setValue(paramProp, forKey: "sskp_projData")
     }
 
     /// Computes the 4-quadrant indirect reverberation matrices (`bPos`, `bNorm`, `bCol`) for `projector` at `slot`,
     /// inspired by QuestVR Seine Musicale Auditorium's `rebond_video.gdshaderinc` (`_apport_projecteur_4quadrants`).
+    /// Caches the 4 geometric raycast hits per `(projector.opticalPoseKey, sceneGeometryRevision)` so intensity/pattern/reverb updates perform 0 raycasts.
     private func computeProjectorBounceMatrices(
         for projector: VideoProjector,
         slot: Int,
         diag: Float
-    ) -> (bPos: SCNMatrix4, bNorm: SCNMatrix4, bCol: SCNMatrix4) {
-        let zeroMat = SCNMatrix4(simd_float4x4(.zero, .zero, .zero, .zero))
+    ) -> (bPos: simd_float4x4, bNorm: simd_float4x4, bCol: simd_float4x4, reflectanceGains: [SIMD3<Float>]) {
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "vp.bounce") }
+        let zeroMat = simd_float4x4(.zero, .zero, .zero, .zero)
+        var reflectanceGains = [SIMD3<Float>](repeating: .zero, count: 4)
         guard projector.isEnabled,
               projector.intensity > 0.001,
               projector.reverbIntensity > 0.001
         else {
-            return (zeroMat, zeroMat, zeroMat)
+            return (zeroMat, zeroMat, zeroMat, reflectanceGains)
         }
 
-        let throwDist = projector.throwDistance
-        let maxRayReach = max(throwDist * 2.5, diag * 1.5)
-        let corners = projector.frustumCorners(atDistance: throwDist)
-        let lumenScale = pow(max(Float(projector.spec.lumens) / 6000.0, 0.35), 0.45)
-        let baseGain = pow(min(max(projector.intensity, 0.0), 2.5), 0.75) * 0.48 * projector.reverbIntensity * lumenScale
+        let cacheKey = ProjectorSceneKey(poseKey: projector.opticalPoseKey, sceneRevision: sceneGeometryRevision)
+        let bounceGeom: CachedProjectorBounce
+        if let cached = cachedProjectorBounces[cacheKey] {
+            bounceGeom = cached
+        } else {
+            let throwDist = projector.throwDistance
+            let maxRayReach = max(throwDist * 2.5, diag * 1.5)
+            let corners = projector.frustumCorners(atDistance: throwDist)
+            var posCols = [SIMD4<Float>](repeating: .zero, count: 4)
+            var normCols = [SIMD4<Float>](repeating: .zero, count: 4)
+            var unitRefs = [SIMD3<Float>](repeating: .zero, count: 4)
 
-        var posCols = [SIMD4<Float>](repeating: .zero, count: 4)
-        var normCols = [SIMD4<Float>](repeating: .zero, count: 4)
-        var colCols = [SIMD4<Float>](repeating: .zero, count: 4)
+            // 4 quadrants: 0 = HG (top-left), 1 = HD (top-right), 2 = BG (bottom-left), 3 = BD (bottom-right)
+            for q in 0..<4 {
+                let u: Float = (q & 1) == 1 ? 0.72 : 0.28
+                let v: Float = (q >= 2) ? 0.72 : 0.28
+                let topPt = corners.topLeft + (corners.topRight - corners.topLeft) * u
+                let botPt = corners.bottomLeft + (corners.bottomRight - corners.bottomLeft) * u
+                let targetPt = topPt + (botPt - topPt) * v
+                let rayVec = targetPt - projector.position
+                let rayDist = max(simd_length(rayVec), 0.05)
+                let rayDir = rayVec / rayDist
 
-        // 4 quadrants: 0 = HG (top-left), 1 = HD (top-right), 2 = BG (bottom-left), 3 = BD (bottom-right)
-        for q in 0..<4 {
-            let u: Float = (q & 1) == 1 ? 0.72 : 0.28
-            let v: Float = (q >= 2) ? 0.72 : 0.28
-            let topPt = corners.topLeft + (corners.topRight - corners.topLeft) * u
-            let botPt = corners.bottomLeft + (corners.bottomRight - corners.bottomLeft) * u
-            let targetPt = topPt + (botPt - topPt) * v
-            let rayVec = targetPt - projector.position
-            let rayDist = max(simd_length(rayVec), 0.05)
-            let rayDir = rayVec / rayDist
+                projectorRaycastCount += 1
+                if let hit = raycastModelHit(from: projector.position, direction: rayDir, maxDistance: maxRayReach) {
+                    let cosTheta = max(0.0, simd_dot(hit.normal, -rayDir))
+                    let incFactor = VideoProjector.incidenceFluxFactor(cosTheta: cosTheta)
+                    guard incFactor > 0.005 else { continue }
 
-            if let hit = raycastModelHit(from: projector.position, direction: rayDir, maxDistance: maxRayReach) {
-                let cosTheta = max(0.0, simd_dot(hit.normal, -rayDir))
-                let incFactor = VideoProjector.incidenceFluxFactor(cosTheta: cosTheta)
-                guard incFactor > 0.005 else { continue }
+                    let projW = projector.projectedWidth(atDistance: hit.distance)
+                    let bounceRadius = max(projW * 2.4, min(max(hit.distance * 1.4, 6.0), 18.0))
+                    let surfReflectance = simd_mix(SIMD3<Float>(repeating: 1.0), hit.albedo, SIMD3<Float>(repeating: 0.45))
+                    unitRefs[q] = surfReflectance * incFactor
 
-                let projW = projector.projectedWidth(atDistance: hit.distance)
-                let bounceRadius = max(projW * 2.4, min(max(hit.distance * 1.4, 6.0), 18.0))
-                let quadTint = projectorRenderer.quadrantBounceTint(forSlot: slot, quadrant: q)
-                let surfReflectance = simd_mix(SIMD3<Float>(repeating: 1.0), hit.albedo, SIMD3<Float>(repeating: 0.45))
-                let bounceRGB = quadTint * surfReflectance * (baseGain * incFactor)
-
-                // Offset impact position slightly (2 cm) along the bounce normal so points on the wall plane have cosEmit <= 0
-                let impactPt = hit.point + hit.normal * 0.02
-                posCols[q] = SIMD4<Float>(impactPt.x, impactPt.y, impactPt.z, bounceRadius)
-                normCols[q] = SIMD4<Float>(hit.normal.x, hit.normal.y, hit.normal.z, 0.0)
-                colCols[q] = SIMD4<Float>(bounceRGB.x, bounceRGB.y, bounceRGB.z, 1.0)
+                    // Offset impact position slightly (2 cm) along the bounce normal so points on the wall plane have cosEmit <= 0
+                    let impactPt = hit.point + hit.normal * 0.02
+                    posCols[q] = SIMD4<Float>(impactPt.x, impactPt.y, impactPt.z, bounceRadius)
+                    normCols[q] = SIMD4<Float>(hit.normal.x, hit.normal.y, hit.normal.z, 0.0)
+                }
             }
+            let bPos = simd_float4x4(posCols[0], posCols[1], posCols[2], posCols[3])
+            let bNorm = simd_float4x4(normCols[0], normCols[1], normCols[2], normCols[3])
+            let computed = CachedProjectorBounce(bPos: bPos, bNorm: bNorm, unitReflectances: unitRefs)
+            if cachedProjectorBounces.count > 32 { cachedProjectorBounces.removeAll(keepingCapacity: true) }
+            cachedProjectorBounces[cacheKey] = computed
+            bounceGeom = computed
         }
 
-        let bPos = SCNMatrix4(simd_float4x4(posCols[0], posCols[1], posCols[2], posCols[3]))
-        let bNorm = SCNMatrix4(simd_float4x4(normCols[0], normCols[1], normCols[2], normCols[3]))
-        let bCol = SCNMatrix4(simd_float4x4(colCols[0], colCols[1], colCols[2], colCols[3]))
-        return (bPos, bNorm, bCol)
+        let baseGain: Float
+        if photometricSimulation {
+            let lux = projector.illuminanceLux()
+            let photoRatio = simd_clamp(lux / max(photometricReferenceLux, 10.0), 0.05, 5.0)
+            baseGain = photoRatio * 0.48 * projector.reverbIntensity
+        } else {
+            let lumenScale = pow(max(Float(projector.spec.lumens) / 6000.0, 0.35), 0.45)
+            baseGain = pow(min(max(projector.intensity, 0.0), 2.5), 0.75) * 0.48 * projector.reverbIntensity * lumenScale
+        }
+        var colCols = [SIMD4<Float>](repeating: .zero, count: 4)
+        for q in 0..<4 {
+            let effGain = bounceGeom.unitReflectances[q] * baseGain
+            reflectanceGains[q] = effGain
+            let quadTint = projectorRenderer.quadrantBounceTint(forSlot: slot, quadrant: q, projector: projector)
+            let bounceRGB = quadTint * effGain
+            colCols[q] = SIMD4<Float>(bounceRGB.x, bounceRGB.y, bounceRGB.z, 1.0)
+        }
+        let bCol = simd_float4x4(colCols[0], colCols[1], colCols[2], colCols[3])
+        return (bounceGeom.bPos, bounceGeom.bNorm, bCol, reflectanceGains)
     }
 
     /// Tests whether `point` in model space is visible to `projector` (inside its optical frustum and NOT occluded by any closer scene surface).
@@ -2575,6 +2998,7 @@ public final class ViewportScene: @unchecked Sendable {
     }
 
     /// Raycasts a segment in model space (`modelRoot`) against visible opaque face geometry and returns the closest hit distance, 3D point, oriented surface normal, and diffuse albedo.
+    /// Uses Morton-ordered 256-triangle sub-block AABBs (`subBlockBounds`) to reject >98% of triangles without vertex fetches.
     public func raycastModelHit(
         from origin: SIMD3<Float>,
         direction: SIMD3<Float>,
@@ -2604,41 +3028,64 @@ public final class ViewportScene: @unchecked Sendable {
 
             let pv = chunk.positions.contents().bindMemory(to: Float.self, capacity: chunk.positions.length / 4)
             let chunkMat = chunk.node.geometry?.firstMaterial
+            let subBlocks = chunk.subBlockBounds
+            let blockCount = subBlocks.count
+            let totalTris = chunk.indexCount / 3
+
             chunk.indicesData.withUnsafeBytes { rawIdx in
                 guard let ix = rawIdx.bindMemory(to: UInt32.self).baseAddress else { return }
-                var tIdx = 0
-                let count = chunk.indexCount
-                while tIdx + 2 < count {
-                    let i0 = Int(ix[tIdx]) * 3
-                    let i1 = Int(ix[tIdx + 1]) * 3
-                    let i2 = Int(ix[tIdx + 2]) * 3
-                    tIdx += 3
-                    let v0 = SIMD3<Float>(pv[i0], pv[i0 + 1], pv[i0 + 2])
-                    let v1 = SIMD3<Float>(pv[i1], pv[i1 + 1], pv[i1 + 2])
-                    let v2 = SIMD3<Float>(pv[i2], pv[i2 + 1], pv[i2 + 2])
-                    let e1 = v1 - v0
-                    let e2 = v2 - v0
-                    let h = simd_cross(unitDir, e2)
-                    let a = simd_dot(e1, h)
-                    if abs(a) < 1e-7 { continue }
-                    let f = 1.0 / a
-                    let s = origin - v0
-                    let u = f * simd_dot(s, h)
-                    if u < 0.0 || u > 1.0 { continue }
-                    let q = simd_cross(s, e1)
-                    let v = f * simd_dot(unitDir, q)
-                    if v < 0.0 || u + v > 1.0 { continue }
-                    let t = f * simd_dot(e2, q)
-                    if t >= 0.04, t <= maxDistance, t < bestT {
-                        bestT = t
-                        let triCross = simd_cross(e1, e2)
-                        let cLen = simd_length(triCross)
-                        if cLen > 1e-7 {
-                            var n = triCross / cLen
-                            if simd_dot(n, unitDir) > 0 { n = -n }
-                            bestNormal = n
+                for bIdx in 0..<max(blockCount, 1) {
+                    let startTri: Int
+                    let endTri: Int
+                    if bIdx < blockCount {
+                        let sb = subBlocks[bIdx]
+                        guard Self.rayIntersectsAABB(
+                            origin: origin,
+                            direction: unitDir,
+                            maxT: min(bestT, maxDistance),
+                            min: sb.min,
+                            max: sb.max
+                        ) else { continue }
+                        startTri = bIdx * Self.subBlockSize
+                        endTri = min(totalTris, startTri + Self.subBlockSize)
+                    } else {
+                        startTri = 0
+                        endTri = totalTris
+                    }
+                    var tIdx = startTri * 3
+                    let endIdx = endTri * 3
+                    while tIdx + 2 < endIdx {
+                        let i0 = Int(ix[tIdx]) * 3
+                        let i1 = Int(ix[tIdx + 1]) * 3
+                        let i2 = Int(ix[tIdx + 2]) * 3
+                        tIdx += 3
+                        let v0 = SIMD3<Float>(pv[i0], pv[i0 + 1], pv[i0 + 2])
+                        let v1 = SIMD3<Float>(pv[i1], pv[i1 + 1], pv[i1 + 2])
+                        let v2 = SIMD3<Float>(pv[i2], pv[i2 + 1], pv[i2 + 2])
+                        let e1 = v1 - v0
+                        let e2 = v2 - v0
+                        let h = simd_cross(unitDir, e2)
+                        let a = simd_dot(e1, h)
+                        if abs(a) < 1e-7 { continue }
+                        let f = 1.0 / a
+                        let s = origin - v0
+                        let u = f * simd_dot(s, h)
+                        if u < 0.0 || u > 1.0 { continue }
+                        let q = simd_cross(s, e1)
+                        let v = f * simd_dot(unitDir, q)
+                        if v < 0.0 || u + v > 1.0 { continue }
+                        let t = f * simd_dot(e2, q)
+                        if t >= 0.04, t <= maxDistance, t < bestT {
+                            bestT = t
+                            let triCross = simd_cross(e1, e2)
+                            let cLen = simd_length(triCross)
+                            if cLen > 1e-7 {
+                                var n = triCross / cLen
+                                if simd_dot(n, unitDir) > 0 { n = -n }
+                                bestNormal = n
+                            }
+                            bestMaterial = chunkMat
                         }
-                        bestMaterial = chunkMat
                     }
                 }
             }
@@ -2652,6 +3099,8 @@ public final class ViewportScene: @unchecked Sendable {
     }
 
     private func rebuildProjectorGizmos() {
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "vp.frustum") }
         projectorsRoot.childNodes.forEach { $0.removeFromParentNode() }
         guard !videoProjectors.isEmpty else {
             projectorsRoot.isHidden = true
@@ -2663,7 +3112,7 @@ public final class ViewportScene: @unchecked Sendable {
         let diag = max(simd_distance(b.min, b.max), 2.0)
 
         for (idx, proj) in videoProjectors.enumerated() {
-            let isSelected = (idx == selectedVideoProjectorIndex)
+            let isSelected = selectedVideoProjectorIndices.contains(idx) || (idx == selectedVideoProjectorIndex)
             let holder = SCNNode()
             holder.name = proj.name
 
@@ -2709,9 +3158,26 @@ public final class ViewportScene: @unchecked Sendable {
                 chassisSegments.append(contentsOf: [p0, p1, q0, q1, p0, q0])
             }
 
+            let isStageLight = proj.isStageLight
+            let lc = proj.effectiveBeamRGB
+            let lcPeak = max(max(lc.x, lc.y), max(lc.z, 0.25))
+            let lcNorm = lc / lcPeak
+            let lcVis = SIMD3<Float>(
+                max(0.28, lcNorm.x),
+                max(0.26, lcNorm.y),
+                max(0.22, lcNorm.z)
+            )
             let chassisColor: NSColor
             if !proj.isEnabled {
                 chassisColor = NSColor(srgbRed: 0.65, green: 0.68, blue: 0.72, alpha: 0.75)
+            } else if isStageLight {
+                let boost: CGFloat = isSelected ? 1.52 : 1.28
+                chassisColor = NSColor(
+                    srgbRed: CGFloat(lcVis.x) * boost,
+                    green: CGFloat(lcVis.y) * boost,
+                    blue: CGFloat(lcVis.z) * boost,
+                    alpha: isSelected ? 1.0 : 0.94
+                )
             } else if isSelected {
                 chassisColor = NSColor(srgbRed: 0.22 * 1.48, green: 0.96 * 1.48, blue: 0.68 * 1.48, alpha: 1.0)
             } else {
@@ -2720,67 +3186,92 @@ public final class ViewportScene: @unchecked Sendable {
             holder.addChildNode(Self.makeProjectorLineNode(points: chassisSegments, color: chassisColor, depthTest: false, order: 12))
 
             // 2. Off-Axis Wireframe Frustum & Surface-Clipped Projection Outline
-            if proj.showsFrustum {
+            if proj.showsFrustum || projectorsFrustumOnly {
                 let throwDist = proj.throwDistance
-                let maxRayReach = max(throwDist * 2.5, diag * 1.5)
-                let cornersAtThrow = proj.frustumCorners(atDistance: throwDist)
-                let rawCorners = [
-                    cornersAtThrow.bottomLeft,
-                    cornersAtThrow.bottomRight,
-                    cornersAtThrow.topRight,
-                    cornersAtThrow.topLeft,
-                ]
+                let cacheKey = ProjectorSceneKey(poseKey: proj.opticalPoseKey, sceneRevision: sceneGeometryRevision)
+                let frustumGeom: CachedProjectorFrustum
 
-                // Clip each corner ray against the first architectural obstacle it hits
-                var clippedCorners: [SIMD3<Float>] = []
-                for c in rawCorners {
-                    let rayVec = c - proj.position
-                    let rayDist = max(simd_length(rayVec), 0.05)
-                    let rayDir = rayVec / rayDist
-                    if let hitT = raycastModelDistance(from: proj.position, direction: rayDir, maxDistance: maxRayReach) {
-                        clippedCorners.append(proj.position + rayDir * hitT)
-                    } else {
-                        clippedCorners.append(c)
-                    }
-                }
+                if let cached = cachedProjectorFrustums[cacheKey] {
+                    frustumGeom = cached
+                } else {
+                    let maxRayReach = max(throwDist * 2.5, diag * 1.5)
+                    let cornersAtThrow = proj.frustumCorners(atDistance: throwDist)
+                    let rawCorners = [
+                        cornersAtThrow.bottomLeft,
+                        cornersAtThrow.bottomRight,
+                        cornersAtThrow.topRight,
+                        cornersAtThrow.topLeft,
+                    ]
 
-                // Subdivide the 4 perimeter edges (6 segments per edge) and raycast each point so the projected frame hugs 3D walls/floors
-                var surfaceOutlineSegments: [SIMD3<Float>] = []
-                let subdivs = 6
-                for edgeIdx in 0..<4 {
-                    let cA = rawCorners[edgeIdx]
-                    let cB = rawCorners[(edgeIdx + 1) % 4]
-                    var prevPt: SIMD3<Float>? = nil
-                    for step in 0...subdivs {
-                        let t = Float(step) / Float(subdivs)
-                        let targetPt = cA + (cB - cA) * t
-                        let rayVec = targetPt - proj.position
+                    // Clip each corner ray against the first architectural obstacle it hits
+                    var clippedCorners: [SIMD3<Float>] = []
+                    for c in rawCorners {
+                        let rayVec = c - proj.position
                         let rayDist = max(simd_length(rayVec), 0.05)
                         let rayDir = rayVec / rayDist
-                        let hitPt: SIMD3<Float>
+                        projectorRaycastCount += 1
                         if let hitT = raycastModelDistance(from: proj.position, direction: rayDir, maxDistance: maxRayReach) {
-                            hitPt = proj.position + rayDir * hitT
+                            clippedCorners.append(proj.position + rayDir * hitT)
                         } else {
-                            hitPt = targetPt
+                            clippedCorners.append(c)
                         }
-                        if let prevPt {
-                            surfaceOutlineSegments.append(contentsOf: [prevPt, hitPt])
-                        }
-                        prevPt = hitPt
                     }
+
+                    // Subdivide the 4 perimeter edges (6 segments per edge) and raycast interior points so the projected frame hugs 3D walls/floors
+                    var surfaceOutlineSegments: [SIMD3<Float>] = []
+                    let subdivs = 6
+                    for edgeIdx in 0..<4 {
+                        let nextIdx = (edgeIdx + 1) % 4
+                        let cA = rawCorners[edgeIdx]
+                        let cB = rawCorners[nextIdx]
+                        var prevPt: SIMD3<Float> = clippedCorners[edgeIdx]
+                        for step in 1...subdivs {
+                            let hitPt: SIMD3<Float>
+                            if step == subdivs {
+                                hitPt = clippedCorners[nextIdx]
+                            } else {
+                                let t = Float(step) / Float(subdivs)
+                                let targetPt = cA + (cB - cA) * t
+                                let rayVec = targetPt - proj.position
+                                let rayDist = max(simd_length(rayVec), 0.05)
+                                let rayDir = rayVec / rayDist
+                                projectorRaycastCount += 1
+                                if let hitT = raycastModelDistance(from: proj.position, direction: rayDir, maxDistance: maxRayReach) {
+                                    hitPt = proj.position + rayDir * hitT
+                                } else {
+                                    hitPt = targetPt
+                                }
+                            }
+                            surfaceOutlineSegments.append(contentsOf: [prevPt, hitPt])
+                            prevPt = hitPt
+                        }
+                    }
+
+                    // Optical axis ray from lens to target (or first hit)
+                    projectorRaycastCount += 1
+                    let axisHitT = raycastModelDistance(from: proj.position, direction: forward, maxDistance: throwDist)
+                    let axisEnd = axisHitT.map { proj.position + forward * $0 } ?? proj.target
+
+                    let computed = CachedProjectorFrustum(
+                        rawCorners: rawCorners,
+                        clippedCorners: clippedCorners,
+                        surfaceOutlineSegments: surfaceOutlineSegments,
+                        axisEnd: axisEnd
+                    )
+                    if cachedProjectorFrustums.count > 32 { cachedProjectorFrustums.removeAll(keepingCapacity: true) }
+                    cachedProjectorFrustums[cacheKey] = computed
+                    frustumGeom = computed
                 }
 
-                // 4 corner rays from lens to clipped surface points
+                // 4 corner rays from lens to clipped surface points + optical axis ray
                 var raySegments: [SIMD3<Float>] = []
-                for cc in clippedCorners {
+                for cc in frustumGeom.clippedCorners {
                     raySegments.append(contentsOf: [lensFront, cc])
                 }
-                // Optical axis ray from lens to target (or first hit)
-                let axisHitT = raycastModelDistance(from: proj.position, direction: forward, maxDistance: throwDist)
-                let axisEnd = axisHitT.map { proj.position + forward * $0 } ?? proj.target
-                raySegments.append(contentsOf: [lensFront, axisEnd])
+                raySegments.append(contentsOf: [lensFront, frustumGeom.axisEnd])
 
                 // Target marker cross at `proj.target`
+                let rawCorners = frustumGeom.rawCorners
                 let targetCrossR = max(proj.projectedHeight(atDistance: throwDist) * 0.05, 0.08)
                 let targetSegments: [SIMD3<Float>] = [
                     proj.target - right * targetCrossR, proj.target + right * targetCrossR,
@@ -2791,16 +3282,35 @@ public final class ViewportScene: @unchecked Sendable {
                     rawCorners[3], rawCorners[0],
                 ]
 
-                let rayColor = isSelected
-                    ? NSColor(srgbRed: 0.20 * 1.4, green: 0.92 * 1.4, blue: 0.65 * 1.4, alpha: 0.82)
-                    : NSColor(srgbRed: 0.25 * 1.25, green: 0.78 * 1.25, blue: 0.95 * 1.25, alpha: 0.58)
-                let outlineColor = isSelected
-                    ? NSColor(srgbRed: 0.30 * 1.5, green: 1.00 * 1.5, blue: 0.72 * 1.5, alpha: 0.98)
-                    : NSColor(srgbRed: 0.30 * 1.35, green: 0.88 * 1.35, blue: 1.00 * 1.35, alpha: 0.85)
+                let rayColor: NSColor
+                let outlineColor: NSColor
+                if isStageLight {
+                    let rBoost: CGFloat = isSelected ? 1.42 : 1.25
+                    let oBoost: CGFloat = isSelected ? 1.55 : 1.35
+                    rayColor = NSColor(
+                        srgbRed: CGFloat(lcVis.x) * rBoost,
+                        green: CGFloat(lcVis.y) * rBoost,
+                        blue: CGFloat(lcVis.z) * rBoost,
+                        alpha: isSelected ? 0.84 : 0.54
+                    )
+                    outlineColor = NSColor(
+                        srgbRed: CGFloat(lcVis.x) * oBoost,
+                        green: CGFloat(lcVis.y) * oBoost,
+                        blue: CGFloat(lcVis.z) * oBoost,
+                        alpha: isSelected ? 0.98 : 0.82
+                    )
+                } else {
+                    rayColor = isSelected
+                        ? NSColor(srgbRed: 0.20 * 1.4, green: 0.92 * 1.4, blue: 0.65 * 1.4, alpha: 0.82)
+                        : NSColor(srgbRed: 0.25 * 1.25, green: 0.78 * 1.25, blue: 0.95 * 1.25, alpha: 0.58)
+                    outlineColor = isSelected
+                        ? NSColor(srgbRed: 0.30 * 1.5, green: 1.00 * 1.5, blue: 0.72 * 1.5, alpha: 0.98)
+                        : NSColor(srgbRed: 0.30 * 1.35, green: 0.88 * 1.35, blue: 1.00 * 1.35, alpha: 0.85)
+                }
                 let targetPlaneColor = NSColor(srgbRed: 1.00 * 1.3, green: 0.76 * 1.3, blue: 0.22 * 1.3, alpha: isSelected ? 0.55 : 0.30)
 
                 holder.addChildNode(Self.makeProjectorLineNode(points: raySegments, color: rayColor, depthTest: true, order: 10))
-                holder.addChildNode(Self.makeProjectorLineNode(points: surfaceOutlineSegments, color: outlineColor, depthTest: false, order: 11))
+                holder.addChildNode(Self.makeProjectorLineNode(points: frustumGeom.surfaceOutlineSegments, color: outlineColor, depthTest: false, order: 11))
                 holder.addChildNode(Self.makeProjectorLineNode(points: targetSegments, color: targetPlaneColor, depthTest: false, order: 9))
             }
 

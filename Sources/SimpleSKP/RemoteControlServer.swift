@@ -14,6 +14,207 @@ final class LockBox<T>: @unchecked Sendable {
     func set(_ newValue: T) { lock.lock(); value = newValue; lock.unlock() }
 }
 
+/// Thread-safe coalescing buffer for incoming UDP OSC messages.
+/// Absorbs high-frequency curve streams on the background UDP receive thread using *latest-value-wins* per continuous
+/// parameter address while preserving discrete cues, ensuring at most one main-thread wakeup per display frame (<= 120 Hz)
+/// and zero backlog lag behind `OSCScore`'s playhead.
+final class OSCIncomingCoalescer: @unchecked Sendable {
+    private struct Entry {
+        var key: String?
+        var message: OSCCodec.Message
+    }
+
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+    private var isDrainScheduled = false
+    private var lastDrainTime: CFAbsoluteTime = 0
+    /// Minimum interval between main-thread batch drains (120 Hz ProMotion frame budget).
+    static let minDrainInterval: CFAbsoluteTime = 1.0 / 120.0
+
+    /// Enqueues a burst of decoded OSC messages from the background UDP thread.
+    /// Returns the delay (in seconds, `0` for immediate) if the caller should schedule a main-thread drain,
+    /// or `nil` if a drain is already scheduled.
+    func enqueue(_ messages: [OSCCodec.Message], now: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()) -> CFAbsoluteTime? {
+        guard !messages.isEmpty else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+
+        for msg in messages {
+            appendOrCoalesceLocked(msg)
+        }
+
+        guard !isDrainScheduled else { return nil }
+        isDrainScheduled = true
+        let elapsed = now - lastDrainTime
+        if elapsed >= Self.minDrainInterval {
+            return 0
+        }
+        return Self.minDrainInterval - elapsed
+    }
+
+    /// Atomically drains all coalesced messages for single-pass execution on `@MainActor`.
+    func drain(now: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()) -> [OSCCodec.Message] {
+        lock.lock()
+        defer { lock.unlock() }
+        isDrainScheduled = false
+        lastDrainTime = now
+        guard !entries.isEmpty else { return [] }
+        let out = entries.map(\.message)
+        entries.removeAll(keepingCapacity: true)
+        return out
+    }
+
+    private func appendOrCoalesceLocked(_ message: OSCCodec.Message) {
+        let classification = Self.classify(address: message.address)
+        switch classification {
+        case .discrete:
+            entries.append(Entry(key: nil, message: message))
+
+        case .orbitDelta:
+            let dYaw = message.float(at: 0) ?? 0
+            let dPitch = message.float(at: 1) ?? 0
+            if let idx = entries.firstIndex(where: { $0.key == "camera/orbit" }) {
+                let prevYaw = entries[idx].message.float(at: 0) ?? 0
+                let prevPitch = entries[idx].message.float(at: 1) ?? 0
+                let merged = OSCCodec.Message(
+                    address: message.address,
+                    arguments: [.float(prevYaw + dYaw), .float(prevPitch + dPitch)]
+                )
+                entries.remove(at: idx)
+                entries.append(Entry(key: "camera/orbit", message: merged))
+            } else {
+                entries.append(Entry(key: "camera/orbit", message: message))
+            }
+
+        case .continuous(let key, let supersededKeys):
+            if !supersededKeys.isEmpty {
+                entries.removeAll { entry in
+                    guard let k = entry.key else { return false }
+                    return k == key || supersededKeys.contains(k)
+                }
+            } else if let idx = entries.firstIndex(where: { $0.key == key }) {
+                entries.remove(at: idx)
+            }
+            entries.append(Entry(key: key, message: message))
+        }
+    }
+
+    private enum Classification {
+        case discrete
+        case orbitDelta
+        case continuous(key: String, supersedes: Set<String>)
+    }
+
+    private static func classify(address: String) -> Classification {
+        let rawParts = address
+            .lowercased()
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard !rawParts.isEmpty else { return .discrete }
+        let route = rawParts.first == "simpleskp" ? Array(rawParts.dropFirst()) : rawParts
+        guard let head = route.first else { return .discrete }
+
+        switch head {
+        case "camera":
+            let sub = route.count > 1 ? route[1] : "position"
+            switch sub {
+            case "position", "pos":
+                return .continuous(key: "camera/position", supersedes: ["camera/x", "camera/y", "camera/z"])
+            case "x":
+                return .continuous(key: "camera/x", supersedes: [])
+            case "y":
+                return .continuous(key: "camera/y", supersedes: [])
+            case "z":
+                return .continuous(key: "camera/z", supersedes: [])
+            case "target":
+                return .continuous(key: "camera/target", supersedes: [])
+            case "lookat":
+                return .continuous(
+                    key: "camera/lookat",
+                    supersedes: ["camera/position", "camera/x", "camera/y", "camera/z", "camera/target", "camera/orientation", "camera/yaw", "camera/pitch"]
+                )
+            case "orientation", "angles":
+                return .continuous(key: "camera/orientation", supersedes: ["camera/yaw", "camera/pitch"])
+            case "yaw", "azimuth":
+                return .continuous(key: "camera/yaw", supersedes: [])
+            case "pitch", "elevation", "tilt":
+                return .continuous(key: "camera/pitch", supersedes: [])
+            case "distance", "dist":
+                return .continuous(key: "camera/distance", supersedes: [])
+            case "orbit":
+                return .orbitDelta
+            case "fov", "focal":
+                return .continuous(key: "camera/fov", supersedes: [])
+            case "exposure":
+                return .continuous(key: "camera/exposure", supersedes: [])
+            case "ortho_scale", "orthoscale":
+                return .continuous(key: "camera/ortho_scale", supersedes: [])
+            case "speed":
+                return .continuous(key: "camera/speed", supersedes: [])
+            case "eye_height", "eyeheight":
+                return .continuous(key: "camera/eye_height", supersedes: [])
+            default:
+                return .discrete
+            }
+
+        case "ssao":
+            return .continuous(key: "ssao", supersedes: [])
+
+        case "ambient":
+            return .continuous(key: "lighting/ambient", supersedes: [])
+
+        case "lighting":
+            let sub = route.count > 1 ? route[1] : "mode"
+            if sub == "ambient" {
+                return .continuous(key: "lighting/ambient", supersedes: [])
+            }
+            return .discrete
+
+        case "sun":
+            let sub = route.count > 1 ? route[1] : "angles"
+            switch sub {
+            case "angles":
+                return .continuous(key: "sun/angles", supersedes: ["sun/azimuth", "sun/elevation"])
+            case "azimuth":
+                return .continuous(key: "sun/azimuth", supersedes: [])
+            case "elevation":
+                return .continuous(key: "sun/elevation", supersedes: [])
+            case "intensity", "power":
+                return .continuous(key: "sun/intensity", supersedes: [])
+            default:
+                return .discrete
+            }
+
+        case "light":
+            let sub = route.count > 1 ? route[1] : "intensity"
+            switch sub {
+            case "position":
+                return .continuous(key: "light/position", supersedes: ["light/x", "light/y", "light/z"])
+            case "x":
+                return .continuous(key: "light/x", supersedes: [])
+            case "y":
+                return .continuous(key: "light/y", supersedes: [])
+            case "z":
+                return .continuous(key: "light/z", supersedes: [])
+            case "intensity":
+                return .continuous(key: "light/intensity", supersedes: [])
+            default:
+                return .discrete
+            }
+
+        case "backdrop":
+            let sub = route.count > 1 ? route[1] : "style"
+            if sub == "color" {
+                return .continuous(key: "backdrop/color", supersedes: [])
+            }
+            return .discrete
+
+        default:
+            return .discrete
+        }
+    }
+}
+
 /// Manages SimpleSKP's remote control endpoints:
 /// - UDP OSC input on `0.0.0.0:9150` (`SIMPLESKP_OSC_IN_PORT`)
 /// - UDP OSC feedback output to `127.0.0.1:9151` (`SIMPLESKP_OSC_OUT_PORT`)
@@ -31,6 +232,8 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
     private var bonjourRenameAttempted = false
     private var isApplyingRemoteOSC = false
     private var lastFeedbackTime: CFAbsoluteTime = 0
+    nonisolated let oscCoalescer = OSCIncomingCoalescer()
+    private let cachedOSCInPortBox = LockBox<UInt16>(kSimpleSKPDefaultOSCInPort)
 
     /// Optional explicit document model for unit tests or headless invocations.
     weak var overrideModel: DocumentModel?
@@ -104,13 +307,43 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
 
     func startOSCServer(port: UInt16 = kSimpleSKPDefaultOSCInPort) {
         oscServer?.stop()
-        let srv = OSCUDPServer(port: port) { [weak self] msg in
-            Task { @MainActor [weak self] in
-                self?.handleOSCMessage(msg)
+        let coalescer = self.oscCoalescer
+        let srv = OSCUDPServer(
+            port: port,
+            batchHandler: { [weak self] burst in
+                guard let delay = coalescer.enqueue(burst) else { return }
+                if delay <= 0 {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.drainPendingOSCMessages()
+                    }
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.drainPendingOSCMessages()
+                    }
+                }
+            },
+            handler: { [weak self] msg in
+                guard let delay = coalescer.enqueue([msg]) else { return }
+                if delay <= 0 {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.drainPendingOSCMessages()
+                    }
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.drainPendingOSCMessages()
+                    }
+                }
             }
-        }
+        )
         _ = srv.start()
         self.oscServer = srv
+        self.cachedOSCInPortBox.set(srv.port)
+    }
+
+    func drainPendingOSCMessages() {
+        let batch = oscCoalescer.drain()
+        guard !batch.isEmpty else { return }
+        handleOSCBatch(batch)
     }
 
     func startHTTPServer(port: UInt16 = kSimpleSKPDefaultHTTPPort, maxAttempts: Int = 16) {
@@ -245,23 +478,13 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
         let yaw = model.cameraYawDegrees
         let pitch = model.cameraPitchDegrees
 
-        OSCUDPServer.send(
-            OSCCodec.Message(address: "/simpleskp/camera/position", arguments: [.float(pos.x), .float(pos.y), .float(pos.z)]),
-            toHost: host,
-            port: port
-        )
-        OSCUDPServer.send(
-            OSCCodec.Message(address: "/simpleskp/camera/target", arguments: [.float(tgt.x), .float(tgt.y), .float(tgt.z)]),
-            toHost: host,
-            port: port
-        )
-        OSCUDPServer.send(
-            OSCCodec.Message(address: "/simpleskp/camera/orientation", arguments: [.float(yaw), .float(pitch)]),
-            toHost: host,
-            port: port
-        )
-        OSCUDPServer.send(
-            OSCCodec.Message(address: "/simpleskp/camera/fov", arguments: [.float(model.cameraFOV)]),
+        OSCUDPServer.sendBatch(
+            [
+                OSCCodec.Message(address: "/simpleskp/camera/position", arguments: [.float(pos.x), .float(pos.y), .float(pos.z)]),
+                OSCCodec.Message(address: "/simpleskp/camera/target", arguments: [.float(tgt.x), .float(tgt.y), .float(tgt.z)]),
+                OSCCodec.Message(address: "/simpleskp/camera/orientation", arguments: [.float(yaw), .float(pitch)]),
+                OSCCodec.Message(address: "/simpleskp/camera/fov", arguments: [.float(model.cameraFOV)]),
+            ],
             toHost: host,
             port: port
         )
@@ -269,14 +492,44 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
 
     // MARK: - OSC Incoming Message Routing
 
+    func handleOSCBatch(_ messages: [OSCCodec.Message]) {
+        guard !messages.isEmpty else { return }
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "osc.update") }
+        for message in messages {
+            let rawParts = message.address
+                .lowercased()
+                .split(separator: "/", omittingEmptySubsequences: true)
+                .map(String.init)
+            let route = rawParts.first == "simpleskp" ? Array(rawParts.dropFirst()) : rawParts
+            if route.first == "open", let pathStr = message.string(at: 0), !pathStr.isEmpty {
+                let url = URL(fileURLWithPath: (pathStr as NSString).expandingTildeInPath)
+                NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+            }
+        }
+
+        guard let model = activeModel else { return }
+        attachFeedbackIfNeeded(to: model)
+
+        isApplyingRemoteOSC = true
+        defer { isApplyingRemoteOSC = false }
+
+        model.performBatchedRemoteUpdate {
+            for message in messages {
+                applyOSCMessage(message, to: model)
+            }
+        }
+    }
+
     func handleOSCMessage(_ message: OSCCodec.Message) {
+        let t0 = CACurrentMediaTime()
+        defer { FrameProfiler.shared.recordDuration(seconds: CACurrentMediaTime() - t0, for: "osc.update") }
         let rawParts = message.address
             .lowercased()
             .split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init)
         guard !rawParts.isEmpty else { return }
 
-        // Accept both `/simpleskp/camera/fov` and `/camera/fov`
         let route = rawParts.first == "simpleskp" ? Array(rawParts.dropFirst()) : rawParts
         guard let head = route.first else { return }
 
@@ -291,6 +544,22 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
 
         isApplyingRemoteOSC = true
         defer { isApplyingRemoteOSC = false }
+
+        model.performBatchedRemoteUpdate {
+            applyOSCMessage(message, to: model)
+        }
+    }
+
+    private func applyOSCMessage(_ message: OSCCodec.Message, to model: DocumentModel) {
+        let rawParts = message.address
+            .lowercased()
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard !rawParts.isEmpty else { return }
+
+        // Accept both `/simpleskp/camera/fov` and `/camera/fov`
+        let route = rawParts.first == "simpleskp" ? Array(rawParts.dropFirst()) : rawParts
+        guard let head = route.first, head != "open" else { return }
 
         switch head {
         case "camera":
@@ -490,6 +759,61 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                 break
             }
 
+        case "projectors", "projector", "vp":
+            let sub = route.count > 1 ? route[1] : "frustum_only"
+            switch sub {
+            case "frustum_only", "frustumonly", "fast":
+                if let b = message.bool(at: 0) {
+                    model.setProjectorsFrustumOnly(b)
+                } else {
+                    model.toggleProjectorsFrustumOnly()
+                }
+            case "photometric", "photo", "lux":
+                if let b = message.bool(at: 0) {
+                    model.setPhotometricSimulation(b)
+                } else {
+                    model.togglePhotometricSimulation()
+                }
+            case "reflux", "ref_lux", "calibration":
+                if let f = message.float(at: 0) {
+                    model.setPhotometricReferenceLux(f)
+                }
+            default:
+                break
+            }
+
+        case "syphon":
+            let sub = route.count > 1 ? route[1] : "enable"
+            switch sub {
+            case "enable", "enabled", "active", "on":
+                if let b = message.bool(at: 0) {
+                    model.setSyphonOutputEnabled(b)
+                } else {
+                    model.toggleSyphonOutput()
+                }
+            case "resolution", "res", "format":
+                if let s = message.string(at: 0), let parsed = SyphonOutputResolution.parse(s) {
+                    model.setSyphonOutputResolution(parsed)
+                }
+            default:
+                break
+            }
+
+        case "profiler", "profile":
+            let sub = route.count > 1 ? route[1] : "enabled"
+            switch sub {
+            case "enable", "enabled", "active", "on":
+                if let b = message.bool(at: 0) {
+                    FrameProfiler.shared.isEnabled = b
+                } else {
+                    FrameProfiler.shared.isEnabled.toggle()
+                }
+            case "reset":
+                FrameProfiler.shared.reset()
+            default:
+                break
+            }
+
         default:
             break
         }
@@ -497,7 +821,7 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
 
     private func handleCameraOSC(route: [String], message: OSCCodec.Message, model: DocumentModel) {
         let sub = route.first ?? "position"
-        let currentPos = model.cameraPosition
+        let currentPos = model.viewport.cameraModelPosition
         switch sub {
         case "position", "pos":
             if let x = message.float(at: 0), let y = message.float(at: 1), let z = message.float(at: 2) {
@@ -1009,6 +1333,26 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
         let bodyData = end < bodyEnd ? Data(buffer[end..<bodyEnd]) : Data()
         let jsonArgs = ((try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any]) ?? [:]
 
+        // Fast-path: answer OSCQuery `HOST_INFO` directly on the background HTTP socket thread without hopping to `@MainActor`.
+        let attrQuery = query.split(separator: "&").first.flatMap { $0.split(separator: "=").first }.map(String.init) ?? ""
+        if (method == "GET" || method == "HEAD") && attrQuery == "HOST_INFO" {
+            let hostDict = OSCQueryTree.hostInfoJSON(name: "SimpleSKP", oscPort: cachedOSCInPortBox.get())
+            let body = (method == "HEAD") ? Data() : ((try? JSONSerialization.data(withJSONObject: hostDict, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8))
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+            var response = Data(header.utf8)
+            response.append(body)
+            response.withUnsafeBytes { ptr in
+                guard let base = ptr.baseAddress else { return }
+                var sent = 0
+                while sent < response.count {
+                    let w = Darwin.send(fd, base.advanced(by: sent), response.count - sent, 0)
+                    if w <= 0 { break }
+                    sent += w
+                }
+            }
+            return
+        }
+
         let sem = DispatchSemaphore(value: 0)
         let box = LockBox<Data>(Data("{\"ok\":true}".utf8))
         let statusBox = LockBox<Int>(200)
@@ -1103,6 +1447,18 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
 
         case ("GET", "/v1/help"):
             writeJSON(buildHelpDictionary())
+
+        case ("GET", "/v1/profile"):
+            writeJSON(buildProfileDictionary())
+
+        case ("POST", "/v1/profile"):
+            if let enabled = args["enabled"] as? Bool {
+                FrameProfiler.shared.isEnabled = enabled
+            }
+            if (args["reset"] as? Bool) == true || (args["action"] as? String)?.lowercased() == "reset" {
+                FrameProfiler.shared.reset()
+            }
+            writeJSON(buildProfileDictionary())
 
         case ("GET", "/v1/camera"):
             writeJSON(buildCameraDictionary(model: activeModel))
@@ -1307,150 +1663,191 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
     }
 
     func applyCameraJSON(_ args: [String: Any], to model: DocumentModel) {
-        if let action = (args["action"] as? String)?.lowercased() {
-            switch action {
-            case "reset": model.resetView()
-            case "zoom_extents", "zoomextents", "frame": model.zoomExtents()
-            case "level": model.levelCameraHorizon(animated: false)
-            case "eye_height", "eyeheight":
-                let h = (args["eyeHeight"] as? Double).map(Float.init) ?? 1.70
-                model.setCameraEyeHeight(h)
-            case "center":
-                model.centerCameraInModel()
-            default: break
+        model.performBatchedRemoteUpdate {
+            if let action = (args["action"] as? String)?.lowercased() {
+                switch action {
+                case "reset": model.resetView()
+                case "zoom_extents", "zoomextents", "frame": model.zoomExtents()
+                case "level": model.levelCameraHorizon(animated: false)
+                case "eye_height", "eyeheight":
+                    let h = (args["eyeHeight"] as? Double).map(Float.init) ?? 1.70
+                    model.setCameraEyeHeight(h)
+                case "center":
+                    model.centerCameraInModel()
+                default: break
+                }
             }
-        }
-        if let viewStr = (args["standardView"] as? String)?.lowercased() ?? (args["view"] as? String)?.lowercased() {
-            switch viewStr {
-            case "iso": model.look(.iso)
-            case "top", "dessus": model.look(.top)
-            case "bottom", "dessous": model.look(.bottom)
-            case "front", "face": model.look(.front)
-            case "back", "arriere", "arrière": model.look(.back)
-            case "left", "gauche": model.look(.left)
-            case "right", "droite": model.look(.right)
-            default: break
+            if let viewStr = (args["standardView"] as? String)?.lowercased() ?? (args["view"] as? String)?.lowercased() {
+                switch viewStr {
+                case "iso": model.look(.iso)
+                case "top", "dessus": model.look(.top)
+                case "bottom", "dessous": model.look(.bottom)
+                case "front", "face": model.look(.front)
+                case "back", "arriere", "arrière": model.look(.back)
+                case "left", "gauche": model.look(.left)
+                case "right", "droite": model.look(.right)
+                default: break
+                }
             }
-        }
-        if let persp = args["perspective"] as? Bool {
-            model.setPerspective(persp)
-        }
-        if let fov = (args["fov"] as? Double).map(Float.init) ?? (args["fov"] as? Int).map(Float.init) {
-            model.setCameraFOV(fov)
-        }
-        if let focal = (args["focalLengthMM"] as? Double).map(Float.init) ?? (args["focal"] as? Double).map(Float.init) {
-            model.setCameraFocalLength(focal)
-        }
-        if let exp = (args["exposure"] as? Double).map(Float.init) {
-            model.setCameraExposure(exp)
-        }
-        if let ortho = (args["orthoScale"] as? Double).map(Float.init) {
-            model.setCameraOrthoScale(ortho)
-        }
-        if let speed = (args["speedScale"] as? Double).map(Float.init) ?? (args["speed"] as? Double).map(Float.init) {
-            model.setCameraSpeedScale(speed)
-        }
+            if let persp = args["perspective"] as? Bool {
+                model.setPerspective(persp)
+            }
+            if let fov = (args["fov"] as? Double).map(Float.init) ?? (args["fov"] as? Int).map(Float.init) {
+                model.setCameraFOV(fov)
+            }
+            if let focal = (args["focalLengthMM"] as? Double).map(Float.init) ?? (args["focal"] as? Double).map(Float.init) {
+                model.setCameraFocalLength(focal)
+            }
+            if let exp = (args["exposure"] as? Double).map(Float.init) {
+                model.setCameraExposure(exp)
+            }
+            if let ortho = (args["orthoScale"] as? Double).map(Float.init) {
+                model.setCameraOrthoScale(ortho)
+            }
+            if let speed = (args["speedScale"] as? Double).map(Float.init) ?? (args["speed"] as? Double).map(Float.init) {
+                model.setCameraSpeedScale(speed)
+            }
 
-        var pos = model.cameraPosition
-        var hasPosChange = false
-        if let arr = args["position"] as? [Any], arr.count >= 3,
-           let x = (arr[0] as? NSNumber)?.floatValue,
-           let y = (arr[1] as? NSNumber)?.floatValue,
-           let z = (arr[2] as? NSNumber)?.floatValue {
-            pos = SIMD3<Float>(x, y, z)
-            hasPosChange = true
-        }
-        if let x = (args["x"] as? NSNumber)?.floatValue { pos.x = x; hasPosChange = true }
-        if let y = (args["y"] as? NSNumber)?.floatValue { pos.y = y; hasPosChange = true }
-        if let z = (args["z"] as? NSNumber)?.floatValue { pos.z = z; hasPosChange = true }
-        if hasPosChange {
-            model.setCameraPosition(pos)
-        }
+            var pos = model.viewport.cameraModelPosition
+            var hasPosChange = false
+            if let arr = args["position"] as? [Any], arr.count >= 3,
+               let x = (arr[0] as? NSNumber)?.floatValue,
+               let y = (arr[1] as? NSNumber)?.floatValue,
+               let z = (arr[2] as? NSNumber)?.floatValue {
+                pos = SIMD3<Float>(x, y, z)
+                hasPosChange = true
+            }
+            if let x = (args["x"] as? NSNumber)?.floatValue { pos.x = x; hasPosChange = true }
+            if let y = (args["y"] as? NSNumber)?.floatValue { pos.y = y; hasPosChange = true }
+            if let z = (args["z"] as? NSNumber)?.floatValue { pos.z = z; hasPosChange = true }
+            if hasPosChange {
+                model.setCameraPosition(pos)
+            }
 
-        if let tgtArr = args["target"] as? [Any], tgtArr.count >= 3,
-           let tx = (tgtArr[0] as? NSNumber)?.floatValue,
-           let ty = (tgtArr[1] as? NSNumber)?.floatValue,
-           let tz = (tgtArr[2] as? NSNumber)?.floatValue {
-            model.setCameraTarget(SIMD3<Float>(tx, ty, tz), animated: false)
-        }
+            if let tgtArr = args["target"] as? [Any], tgtArr.count >= 3,
+               let tx = (tgtArr[0] as? NSNumber)?.floatValue,
+               let ty = (tgtArr[1] as? NSNumber)?.floatValue,
+               let tz = (tgtArr[2] as? NSNumber)?.floatValue {
+                model.setCameraTarget(SIMD3<Float>(tx, ty, tz), animated: false)
+            }
 
-        let yaw = (args["yaw"] as? NSNumber)?.floatValue
-        let pitch = (args["pitch"] as? NSNumber)?.floatValue
-        if yaw != nil || pitch != nil {
-            model.setCameraOrientation(yawDegrees: yaw, pitchDegrees: pitch)
-        }
-        if let dist = (args["distance"] as? NSNumber)?.floatValue {
-            model.setCameraDistance(dist)
+            let yaw = (args["yaw"] as? NSNumber)?.floatValue
+            let pitch = (args["pitch"] as? NSNumber)?.floatValue
+            if yaw != nil || pitch != nil {
+                model.setCameraOrientation(yawDegrees: yaw, pitchDegrees: pitch)
+            }
+            if let dist = (args["distance"] as? NSNumber)?.floatValue {
+                model.setCameraDistance(dist)
+            }
         }
     }
 
     func applyRenderingJSON(_ args: [String: Any], to model: DocumentModel) {
-        if let styleStr = (args["style"] as? String)?.lowercased() {
-            switch styleStr {
-            case "textured", "pbr": model.setShadingStyle(.textured)
-            case "clay", "blanc": model.setShadingStyle(.clay)
-            case "xray", "x-ray": model.setShadingStyle(.xray)
-            case "wireframe", "wire", "filaire": model.setShadingStyle(.wireframe)
-            default: break
+        model.performBatchedRemoteUpdate {
+            if let styleStr = (args["style"] as? String)?.lowercased() {
+                switch styleStr {
+                case "textured", "pbr": model.setShadingStyle(.textured)
+                case "clay", "blanc": model.setShadingStyle(.clay)
+                case "xray", "x-ray": model.setShadingStyle(.xray)
+                case "wireframe", "wire", "filaire": model.setShadingStyle(.wireframe)
+                default: break
+                }
+            }
+            if let edges = args["edges"] as? Bool, model.showsEdges != edges {
+                model.toggleEdges()
+            }
+            if let grid = args["grid"] as? Bool, model.showsGrid != grid {
+                model.toggleGrid()
+            }
+            if let shadows = args["shadows"] as? Bool, model.shadowsEnabled != shadows {
+                model.toggleShadows()
+            }
+            if let ssao = (args["ssao"] as? NSNumber)?.floatValue {
+                model.setAmbientOcclusionIntensity(ssao)
+            }
+            if let modeStr = (args["lightingMode"] as? String)?.lowercased() {
+                if modeStr == "point" || modeStr == "omni" {
+                    model.setLightingMode(.point)
+                } else if modeStr == "sun" {
+                    model.setLightingMode(.sun)
+                }
+            }
+            let sunAz = (args["sunAzimuth"] as? NSNumber)?.floatValue
+            let sunEl = (args["sunElevation"] as? NSNumber)?.floatValue
+            if sunAz != nil || sunEl != nil {
+                model.setSun(
+                    azimuth: sunAz ?? model.sunAzimuthDegrees,
+                    elevation: sunEl ?? model.sunElevationDegrees
+                )
+            }
+            if let sunInt = (args["sunIntensity"] as? NSNumber)?.floatValue {
+                model.setSunIntensity(sunInt)
+            }
+            if let ambInt = (args["ambientIntensity"] as? NSNumber)?.floatValue ?? (args["ambient"] as? NSNumber)?.floatValue {
+                model.setAmbientIntensity(ambInt)
+            }
+            if let lpos = args["lightPosition"] as? [Any], lpos.count >= 3,
+               let lx = (lpos[0] as? NSNumber)?.floatValue,
+               let ly = (lpos[1] as? NSNumber)?.floatValue,
+               let lz = (lpos[2] as? NSNumber)?.floatValue {
+                if model.lightingMode != .point { model.setLightingMode(.point) }
+                model.updateSelectedPointLight(position: SIMD3<Float>(lx, ly, lz))
+            }
+            if let lint = (args["lightIntensity"] as? NSNumber)?.floatValue {
+                if model.lightingMode != .point { model.setLightingMode(.point) }
+                model.updateSelectedPointLight(intensity: lint)
+            }
+            if let gizmo = args["lightGizmo"] as? Bool, model.showsPointLightGizmo != gizmo {
+                model.togglePointLightGizmo()
+            }
+            if let bdStr = args["backdropStyle"] as? String,
+               let bd = BackdropStyle.allCases.first(where: { $0.rawValue.lowercased() == bdStr.lowercased() }) {
+                model.setBackdropStyle(bd)
+            }
+            if let rgb = args["backdropColor"] as? [Any], rgb.count >= 3,
+               let r = (rgb[0] as? NSNumber)?.floatValue,
+               let g = (rgb[1] as? NSNumber)?.floatValue,
+               let b = (rgb[2] as? NSNumber)?.floatValue {
+                model.setCustomBackdropColor(SIMD3<Float>(r, g, b))
+            }
+            if let frustumOnly = args["projectorsFrustumOnly"] as? Bool {
+                model.setProjectorsFrustumOnly(frustumOnly)
+            }
+            if let photoSim = (args["photometricSimulation"] as? Bool ?? args["photometric"] as? Bool) {
+                model.setPhotometricSimulation(photoSim)
+            }
+            if let refLux = (args["photometricReferenceLux"] as? NSNumber)?.floatValue ?? (args["referenceLux"] as? NSNumber)?.floatValue {
+                model.setPhotometricReferenceLux(refLux)
+            }
+            if let syphonRes = (args["syphonOutputResolution"] as? String ?? args["syphonResolution"] as? String ?? args["syphonFormat"] as? String),
+               let parsed = SyphonOutputResolution.parse(syphonRes) {
+                model.setSyphonOutputResolution(parsed)
+            }
+            if let syphonOn = (args["syphonOutputEnabled"] as? Bool ?? args["syphon"] as? Bool) {
+                model.setSyphonOutputEnabled(syphonOn)
             }
         }
-        if let edges = args["edges"] as? Bool, model.showsEdges != edges {
-            model.toggleEdges()
-        }
-        if let grid = args["grid"] as? Bool, model.showsGrid != grid {
-            model.toggleGrid()
-        }
-        if let shadows = args["shadows"] as? Bool, model.shadowsEnabled != shadows {
-            model.toggleShadows()
-        }
-        if let ssao = (args["ssao"] as? NSNumber)?.floatValue {
-            model.setAmbientOcclusionIntensity(ssao)
-        }
-        if let modeStr = (args["lightingMode"] as? String)?.lowercased() {
-            if modeStr == "point" || modeStr == "omni" {
-                model.setLightingMode(.point)
-            } else if modeStr == "sun" {
-                model.setLightingMode(.sun)
-            }
-        }
-        let sunAz = (args["sunAzimuth"] as? NSNumber)?.floatValue
-        let sunEl = (args["sunElevation"] as? NSNumber)?.floatValue
-        if sunAz != nil || sunEl != nil {
-            model.setSun(
-                azimuth: sunAz ?? model.sunAzimuthDegrees,
-                elevation: sunEl ?? model.sunElevationDegrees
-            )
-        }
-        if let sunInt = (args["sunIntensity"] as? NSNumber)?.floatValue {
-            model.setSunIntensity(sunInt)
-        }
-        if let ambInt = (args["ambientIntensity"] as? NSNumber)?.floatValue ?? (args["ambient"] as? NSNumber)?.floatValue {
-            model.setAmbientIntensity(ambInt)
-        }
-        if let lpos = args["lightPosition"] as? [Any], lpos.count >= 3,
-           let lx = (lpos[0] as? NSNumber)?.floatValue,
-           let ly = (lpos[1] as? NSNumber)?.floatValue,
-           let lz = (lpos[2] as? NSNumber)?.floatValue {
-            if model.lightingMode != .point { model.setLightingMode(.point) }
-            model.updateSelectedPointLight(position: SIMD3<Float>(lx, ly, lz))
-        }
-        if let lint = (args["lightIntensity"] as? NSNumber)?.floatValue {
-            if model.lightingMode != .point { model.setLightingMode(.point) }
-            model.updateSelectedPointLight(intensity: lint)
-        }
-        if let gizmo = args["lightGizmo"] as? Bool, model.showsPointLightGizmo != gizmo {
-            model.togglePointLightGizmo()
-        }
-        if let bdStr = args["backdropStyle"] as? String,
-           let bd = BackdropStyle.allCases.first(where: { $0.rawValue.lowercased() == bdStr.lowercased() }) {
-            model.setBackdropStyle(bd)
-        }
-        if let rgb = args["backdropColor"] as? [Any], rgb.count >= 3,
-           let r = (rgb[0] as? NSNumber)?.floatValue,
-           let g = (rgb[1] as? NSNumber)?.floatValue,
-           let b = (rgb[2] as? NSNumber)?.floatValue {
-            model.setCustomBackdropColor(SIMD3<Float>(r, g, b))
-        }
+    }
+
+    func buildProfileDictionary() -> [String: Any] {
+        let stats = FrameProfiler.shared.copyStats()
+        return [
+            "enabled": FrameProfiler.shared.isEnabled,
+            "fpsLastSecond": FrameProfiler.shared.framesInLastSecond(),
+            "displayFPS": FrameProfiler.shared.profilerDisplayFPS(),
+            "windowFrames": FrameProfiler.ringFrames,
+            "markdown": FrameProfiler.shared.markdownTable(),
+            "zones": stats.map { s in
+                [
+                    "name": s.name,
+                    "lastMs": s.lastMs,
+                    "p50Ms": s.p50Ms,
+                    "p95Ms": s.p95Ms,
+                    "maxMs": s.maxMs,
+                    "samples": s.samples,
+                ] as [String: Any]
+            },
+        ]
     }
 
     func buildCameraDictionary(model: DocumentModel?) -> [String: Any] {
@@ -1500,6 +1897,11 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
                 ] as [String: Any]
             } ?? NSNull(),
             "showsPointLightGizmo": model.showsPointLightGizmo,
+            "projectorsFrustumOnly": model.projectorsFrustumOnly,
+            "photometricSimulation": model.photometricSimulation,
+            "photometricReferenceLux": model.photometricReferenceLux,
+            "syphonOutputEnabled": model.syphonOutputEnabled,
+            "syphonOutputResolution": model.syphonOutputResolution.rawValue,
             "backdropStyle": model.backdropStyle.rawValue,
             "customBackdropColor": [model.customBackdropColor.x, model.customBackdropColor.y, model.customBackdropColor.z],
         ]
@@ -1534,6 +1936,34 @@ final class RemoteControlServer: NSObject, NetServiceDelegate {
             ],
             "camera": buildCameraDictionary(model: model),
             "rendering": buildRenderingDictionary(model: model),
+            "videoProjectors": (model?.videoProjectors ?? []).enumerated().map { (idx, p) in
+                let surfaceDist = model?.actualSurfaceDistance(for: p)
+                let evalDist = surfaceDist ?? p.throwDistance
+                return [
+                    "index": idx,
+                    "name": p.name,
+                    "specID": p.specID,
+                    "model": p.spec.displayName,
+                    "lumens": p.spec.lumens,
+                    "effectiveLumens": p.effectiveLumens,
+                    "isEnabled": p.isEnabled,
+                    "position": [p.position.x, p.position.y, p.position.z],
+                    "target": [p.target.x, p.target.y, p.target.z],
+                    "throwRatio": p.throwRatio,
+                    "throwDistance": p.throwDistance,
+                    "surfaceDistance": surfaceDist as Any,
+                    "projectedWidth": p.projectedWidth(atDistance: evalDist),
+                    "projectedHeight": p.projectedHeight(atDistance: evalDist),
+                    "projectedAreaM2": p.projectedArea(atDistance: evalDist),
+                    "projectedDiagonalM": p.projectedDiagonal(atDistance: evalDist),
+                    "illuminanceLux": p.illuminanceLux(atDistance: evalDist),
+                    "luminanceNits": p.surfaceLuminanceNits(atDistance: evalDist),
+                    "lensTransmission": p.lensTransmission,
+                    "intensity": p.intensity,
+                    "pattern": p.pattern.rawValue,
+                    "isSelected": model?.selectedVideoProjectorIndices.contains(idx) ?? false,
+                ] as [String: Any]
+            },
             "selectedScene": model?.selectedScene ?? NSNull(),
             "scenes": (skp?.scenes ?? []).enumerated().map { idx, sc in
                 [
