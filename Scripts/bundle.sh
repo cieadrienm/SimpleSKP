@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # The version shown by the Finder, About and the status bar: bump it here, and only here (CHANGELOG.md says
 # what changed; a release is tagged vX.Y.Z). The build number counts commits.
-VERSION="1.4.1"
+VERSION="1.5.0"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 CONFIG="${1:-release}"
 
@@ -91,18 +91,27 @@ if [ -f "$NDI_SRC" ]; then
 fi
 
 # Signing. A real identity keeps the app's identity stable across rebuilds.
+IS_DEV_ID=0
 if [ -z "${SIGN_IDENTITY:-}" ]; then
     IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-    SIGN_IDENTITY="$(echo "$IDENTITIES" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-    [ -n "$SIGN_IDENTITY" ] || SIGN_IDENTITY="$(echo "$IDENTITIES" | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
-    [ -n "$SIGN_IDENTITY" ] || SIGN_IDENTITY="-"
+    DEV_ID_HASH="$(echo "$IDENTITIES" | awk '/"Developer ID Application:/ {print $2; exit}')"
+    if [ -n "$DEV_ID_HASH" ]; then
+        SIGN_IDENTITY="$DEV_ID_HASH"
+        IS_DEV_ID=1
+    else
+        SIGN_IDENTITY="$(echo "$IDENTITIES" | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
+        [ -n "$SIGN_IDENTITY" ] || SIGN_IDENTITY="-"
+    fi
+elif [[ "$SIGN_IDENTITY" == "Developer ID Application:"* ]]; then
+    IS_DEV_ID=1
 fi
 # Developer ID: hardened runtime + secure timestamp (notarization). The embedded framework is re-signed with the
 # app's identity, so library validation passes; the entitlement that turns it off (D10) is kept anyway, harmless.
-case "$SIGN_IDENTITY" in
-    "Developer ID Application:"*) SIGN_FLAGS=(--timestamp --options runtime --entitlements Resources/SimpleSKP.entitlements) ;;
-    *) SIGN_FLAGS=(--timestamp=none) ;;
-esac
+if [ "$IS_DEV_ID" = "1" ]; then
+    SIGN_FLAGS=(--timestamp --options runtime --entitlements Resources/SimpleSKP.entitlements)
+else
+    SIGN_FLAGS=(--timestamp=none)
+fi
 # Inside out: the framework's dylibs, the frameworks, the MCP binary, then the app.
 sign_all() {
     for LIB in "$FW"/Versions/A/Libraries/*.dylib "$FW"; do

@@ -1,5 +1,17 @@
 # Changelog — SimpleSKP
 
+## 1.5.0 — 2026-11-09
+- **Ouverture native des modèles Khronos glTF 2.0 / Binary GLB (`.glb`, `.gltf`) et Autodesk FBX (`.fbx`)** :
+  - Lecteur natif sans dépendance externe (`GLTFReader`) prenant en charge les conteneurs `.glb` et `.gltf`, le graphe de scène complet avec conversion automatique $Y\text{-up} \to Z\text{-up}$ en mètres, les matériaux PBR, la sélection d'UV (`TEXCOORD_0` / `TEXCOORD_1`), `KHR_texture_transform`, les textures embarquées (`bufferView`), les couleurs par sommet (`COLOR_0`), les calques par nœuds/maillages, les caméras et les arêtes franches.
+  - Lecteur natif Autodesk FBX binaire et ASCII (`FBXReader` via `ufbx` embarqué) avec conversion métrique et axe $Z$ vertical automatiques, instances, matériaux PBR/Phong, textures embarquées et caméras.
+- **Rendu Metal ultra-optimisé des 3D Gaussian Splats (`.ply`, `.splat`, `.spz`) et Nuages de points 3D (`.ply`, `.xyz`, `.pts`, `.pcd`)** :
+  - Décodage parallèle `mmap`, covariance 3D anisotrope + harmoniques sphériques `SH0–SH3`, tri spatial par code de Morton 30 bits, instanciation matérielle Metal en un seul appel de dessin (`MetalSplatRenderer`) et raycasting CPU par sous-blocs de 256 splats pour l'orbite, le double-clic et l'outil de mesure (`⌘D`).
+- **Simulation d'éclairage scénique RGB / RGBW (12 slots GPU), Art-Net 4 & Conduite Millumin (`.millumin` + OFL)** :
+  - Séparation stricte dans l'interface entre **Vidéoprojecteurs** (Syphon, NDI, *Lens Shift*, rapport `:1`) et **Lumières de scène** (gradateur, curseurs `R / G / B / W`, ouverture en degrés `°`, 4 couteaux/volets, focus, bouton `Douche 90°`).
+  - Ajout du **Varytec Hero Wash 300 FC** (`6°–50°`, RGBW), du **Showtec Performer Profile Mini** et de l'**Eurolite LED PLL-480 QCL**, ainsi que de toute la librairie Open Fixture Library (`/Users/adrien/Library/Millumin/Light-fixtures`).
+  - Évaluation 100 % analytique des faisceaux lumineux et couteaux dans le shader Metal via la texture de paramètres `sskp_projData` ($32 \times 16$ `.rgba32Float`, `0` rastérisation CPU) et mélange additif linéaire Lumière + Vidéo avec roll-off filmique.
+  - Récepteur **Art-Net 4** temps réel (`UDP 6454`, prioritaire sur l'OSC) et import direct des lumières et états de conduite depuis les fichiers `.millumin`.
+
 ## 1.4.1 — 2026-10-29
 - **Nouveaux modèles de vidéoprojecteurs Optoma** :
   - Ajout des modèles courte focale et ultra-courte focale **Optoma ZU606TSTe** (WUXGA `1920 × 1200` `16:10`, rapport fixe `0.79:1`, *Lens Shift* H `±10 %` / V `±20 %`, `6 300 lm`), **Optoma ZH450ST** (Full HD `1920 × 1080` `16:9`, rapport fixe `0.496:1`, offset vertical `+16 %`, `4 200 lm`) et **Optoma ZH406ST** (Full HD `1920 × 1080` `16:9`, rapport fixe `0.50:1`, offset vertical `+15 %`, `4 200 lm`).
